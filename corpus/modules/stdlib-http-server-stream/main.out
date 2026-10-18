@@ -1,0 +1,51 @@
+length + next: POST /a | 'hello, world' [3 reads, finished=true]
+length + next: GET /b | '' [0 reads, finished=true]
+length + next: end after 2
+chunked: POST /c | 'abcdefghijk' [3 reads, finished=true]
+chunked: GET /d | '' [0 reads, finished=true]
+chunked: end after 2
+no framing: POST /e | '' [0 reads, finished=true]
+no framing: end after 1
+above MAX_BODY: PUT /f | 'only this' ERR the peer stopped in the middle of a message
+above MAX_BODY: end after 1
+both fields: ERR the message's framing is ambiguous or unsupported
+== chunked: ok, keep-alive=true
+HTTP/1.1 200 OK
+transfer-encoding: chunked
+
+3
+abc
+5
+defgh
+0
+
+
+== length exact: ok, keep-alive=true
+HTTP/1.1 200 OK
+content-length: 6
+
+abcdef
+== length short: finish ERR the message's framing is ambiguous or unsupported, keep-alive=false
+HTTP/1.1 200 OK
+content-length: 6
+
+abc
+== length over: write ERR the message's framing is ambiguous or unsupported, keep-alive=false
+HTTP/1.1 200 OK
+content-length: 2
+
+
+== HEAD: ok, keep-alive=true
+HTTP/1.1 200 OK
+transfer-encoding: chunked
+
+
+== 204: ok, keep-alive=true
+HTTP/1.1 204 No Content
+
+
+== 1.0: ok, keep-alive=false
+HTTP/1.1 200 OK
+connection: close
+
+to the end

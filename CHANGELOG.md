@@ -3,7 +3,37 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
-## 0.6.0 (unreleased)
+## 0.7.0 (unreleased)
+
+### Added -- streamed bodies on the server side
+
+`lib/net/http.m31` can now serve a body larger than memory in both
+directions, which a git server, a proxy or an upload endpoint needs:
+
+- **`http.read_request_stream(stream)`** reads and checks a request head
+  exactly as `read_request` does and leaves the body on the stream.
+  `RequestStream.read(n)` hands it over a piece at a time, through the same
+  chunked and Content-Length decoder `BodyStream` uses; there is no ceiling.
+  `RequestStream.request()` is the head, `is_finished()` says the stream is at
+  the next request.
+- **`http.start_response(stream, req, resp, keep_alive)`** writes the head and
+  returns a `BodyWriter`: `write(bytes)` sends a piece, `finish()` ends the
+  body. Chunked for a 1.1 peer; a caller's own `Content-Length` is enforced in
+  both directions (`Framing`, and the connection is marked not reusable);
+  nothing is sent for `HEAD`, 1xx, 204 and 304; a 1.0 peer gets a body that
+  ends when the connection closes. `BodyWriter.is_keep_alive()` reports the
+  outcome.
+- `serve` and `Handler` are unchanged and still buffer: a streaming server
+  writes its own loop, because only it knows whether an unread body means
+  drain or close.
+
+### Fixed
+
+- `BodyStream` (`fetch_stream`, `read_response_stream`) refused a declared
+  `Content-Length` above `MAX_BODY`, though it promises no ceiling. It now
+  accepts any length.
+
+## 0.6.0
 
 ### Changed -- one command-line grammar for everything
 

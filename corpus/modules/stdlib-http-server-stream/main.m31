@@ -1,0 +1,176 @@
+import net.http;
+import io;
+
+// The server's streaming seam: `read_request_stream` hands a request body
+// over a piece at a time, and `start_response` writes a response body the
+// same way. Over an in-memory `Duplex`, so every framing is pinned without a
+// socket; the live check (a body larger than `MAX_BODY`, through a real
+// connection) is tests/http/test_server_stream.sh.
+//
+// What it pins down:
+//
+//   - **Each request framing**, read five bytes at a time: a length, chunked
+//     with an extension and a trailer, and neither (no body at all).
+//   - **The stream is left at the next request** once a body is read to the
+//     end, so keep-alive works through the streaming form.
+//   - **No ceiling.** A `Content-Length` above `MAX_BODY` is a head that
+//     reads, where `read_request` refuses it; a body that stops short of its
+//     length is an `Err`, not a short body.
+//   - **The smuggling refusals are the buffered ones**: both framing fields.
+//   - **Each response framing**: chunked for 1.1, a caller's length checked
+//     in both directions, nothing for `HEAD` and 204, and close-delimited for
+//     1.0, which turns keep-alive off.
+
+// Both directions of a connection, in memory.
+type Duplex {
+    io.Buffer inbound;
+    io.Buffer outbound;
+}
+
+Result<bytes, io.Error> Duplex.read(int count) {
+    return inbound.read(count);
+}
+
+Result<bytes, io.Error> Duplex.read_all() {
+    return inbound.read_all();
+}
+
+Result<bytes, io.Error> Duplex.read_until(bytes delimiter, int limit) {
+    return inbound.read_until(delimiter, limit);
+}
+
+Result<int, io.Error> Duplex.write(bytes data) {
+    return outbound.write(data);
+}
+
+Result<bool, io.Error> Duplex.close() {
+    return outbound.close();
+}
+
+// What the server wrote, with CRLF shown as a newline so the expected output
+// can be read.
+str Duplex.written() {
+    match (outbound.peek().utf8()) {
+        case Some(str text): {
+            return text.split("\r\n").join("\n");
+        }
+        case None: {
+            return "(not text)";
+        }
+    }
+}
+
+Duplex duplex_of(str sent) {
+    return Duplex(io.buffer_of(sent.to_bytes()), io.buffer());
+}
+
+str drain(http.RequestStream body, int step) {
+    str out = "";
+    int reads = 0;
+    while (true) {
+        match (body.read(step)) {
+            case Ok(bytes piece): {
+                if (piece.size() == 0) {
+                    return "'" + out + "' [" + reads.to_str() + " reads, finished=" + body.is_finished().to_str() + "]";
+                }
+                reads = reads + 1;
+                out = out + piece.utf8().or("?");
+            }
+            case Err(http.Error failure): {
+                return "'" + out + "' ERR " + failure.to_str();
+            }
+        }
+    }
+}
+
+void requests(str label, str wire) {
+    io.Buffer source = io.buffer_of(wire.to_bytes());
+    int seen = 0;
+    while (true) {
+        match (http.read_request_stream(source)) {
+            case Ok(Option<http.RequestStream> maybe): {
+                match (maybe) {
+                    case None: {
+                        print(label + ": end after " + seen.to_str());
+                        return;
+                    }
+                    case Some(http.RequestStream incoming): {
+                        seen = seen + 1;
+                        http.Request head = incoming.request();
+                        print(label + ": " + head.method() + " " + head.path() + " | " + drain(incoming, 5));
+                    }
+                }
+            }
+            case Err(http.Error failure): {
+                print(label + ": ERR " + failure.to_str());
+                return;
+            }
+        }
+    }
+}
+
+void respond(str label, str request_wire, int status, str length, List<str> pieces, bool is_keep_alive) {
+    Duplex link = duplex_of(request_wire);
+    match (http.read_request(link)) {
+        case Ok(Option<http.Request> maybe): {
+            match (maybe) {
+                case Some(http.Request incoming): {
+                    http.Response outgoing = http.response(status);
+                    if (length != "") {
+                        outgoing.set("content-length", length);
+                    }
+                    match (http.start_response(link, incoming, outgoing, is_keep_alive)) {
+                        case Ok(http.BodyWriter writer): {
+                            str result = "ok";
+                            for (str piece in pieces) {
+                                match (writer.write(piece.to_bytes())) {
+                                    case Ok: {
+                                    }
+                                    case Err(http.Error failure): {
+                                        if (result == "ok") {
+                                            result = "write ERR " + failure.to_str();
+                                        }
+                                    }
+                                }
+                            }
+                            match (writer.finish()) {
+                                case Ok: {
+                                }
+                                case Err(http.Error failure): {
+                                    if (result == "ok") {
+                                        result = "finish ERR " + failure.to_str();
+                                    }
+                                }
+                            }
+                            print("== " + label + ": " + result + ", keep-alive=" + writer.is_keep_alive().to_str());
+                            print(link.written());
+                        }
+                        case Err(http.Error failure): {
+                            print("== " + label + ": start ERR " + failure.to_str());
+                        }
+                    }
+                }
+                case None: {
+                    print("== " + label + ": no request");
+                }
+            }
+        }
+        case Err(http.Error failure): {
+            print("== " + label + ": read ERR " + failure.to_str());
+        }
+    }
+}
+
+requests("length + next", "POST /a HTTP/1.1\r\nHost: h\r\nContent-Length: 12\r\n\r\nhello, world" + "GET /b HTTP/1.1\r\nHost: h\r\n\r\n");
+requests("chunked", "POST /c HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n4;ext=1\r\nabcd\r\n7\r\nefghijk\r\n0\r\nX-Trailer: t\r\n\r\n" + "GET /d HTTP/1.1\r\nHost: h\r\n\r\n");
+requests("no framing", "POST /e HTTP/1.1\r\nHost: h\r\n\r\n");
+requests("above MAX_BODY", "PUT /f HTTP/1.1\r\nHost: h\r\nContent-Length: 40000000\r\n\r\nonly this");
+requests("both fields", "POST /g HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+str get11 = "GET /x HTTP/1.1\r\nHost: h\r\n\r\n";
+respond("chunked", get11, 200, "", ["abc", "", "defgh"], true);
+respond("length exact", get11, 200, "6", ["abc", "def"], true);
+respond("length short", get11, 200, "6", ["abc"], true);
+respond("length over", get11, 200, "2", ["abc"], true);
+respond("HEAD", "HEAD /x HTTP/1.1\r\nHost: h\r\n\r\n", 200, "", ["dropped"], true);
+respond("204", get11, 204, "", ["dropped"], true);
+respond("1.0", "GET /x HTTP/1.0\r\n\r\n", 200, "", ["to the end"], true);

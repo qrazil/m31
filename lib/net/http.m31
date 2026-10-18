@@ -34,6 +34,12 @@
 //   http.read_response(s, method)    -> Result<Response, Error>
 //   http.write_response(s, req, resp, keep_alive)  -> Result<void, Error>
 //   http.should_keep_alive(req, resp) -> bool
+//   http.read_request_stream(s)      -> Result<Option<RequestStream>, Error>
+//                                    the head read, the body left for `rs.read(n)`
+//   rs.request(), rs.read(n), rs.is_finished()
+//   http.start_response(s, req, resp, keep_alive)  -> Result<BodyWriter, Error>
+//                                    the head written, the body sent by `w.write(b)`
+//   w.write(b), w.finish(), w.is_keep_alive()
 //
 // API -- the server
 // -----------------
@@ -71,8 +77,10 @@
 // agree today drift tomorrow, so there is one of each and the corpus drives
 // it from memory.
 //
-// **A body is `bytes`, already read, and bounded by `MAX_BODY`.** There is no
-// streaming body and no body reader object -- see "what is not here" below.
+// **A body is `bytes`, already read, and bounded by `MAX_BODY`** -- except
+// through the streaming forms (`fetch_stream`, `read_request_stream`,
+// `start_response`), which hand the body over a piece at a time, have no
+// ceiling, and leave the connection's position to the caller.
 //
 // --- the limits, and why each one exists -----------------------------------
 //
@@ -177,13 +185,11 @@
 //     an `https` URL's rules (never downgraded to `http`) live here.
 //     What is checked and what is not (TLS 1.2, resumption, client
 //     certificates and revocation are not) is in `lib/tls.m31`'s header.
-//   - **A streaming body.** A body is read whole, into `bytes`, bounded by
-//     `MAX_BODY`. A reader object would have to own its place in the
-//     connection, which means a handler that does not read it desynchronises
-//     the next request, which means a drain, which means a second limit --
-//     and the shape that makes all of that go away is "the body is a value".
-//     A file server and a proxy want the streaming shape, and neither is
-//     here.
+//   - **A streaming handler.** `Handler` takes and returns values, and
+//     `serve` buffers. The streaming forms are the seam, not a server: a
+//     program that streams (a git server, a proxy) writes its own loop over
+//     `read_request_stream` and `start_response`, because only it knows
+//     whether an unread body means "drain" or "close".
 //   - **Cookies, authentication, pooling, retries and compression.** Each is
 //     a policy the caller owns; Oro's `std/http.oro` lists the same five and
 //     the reasons hold word for word.
@@ -1753,7 +1759,11 @@ Result<int, Error> content_length(str text) {
 // the classic request-smuggling vector: whichever this end picks, some proxy
 // in front of it picks the other, and the disagreement is an injected
 // message.
-Result<int, Error> framing(Headers fields) {
+//
+// `limit` bounds a declared length, for a body that is about to be held in
+// memory; a streamed body passes -1, because its reader decides how much to
+// take and a length is not a request for memory.
+Result<int, Error> framing(Headers fields, int limit) {
     match (fields.get("transfer-encoding")) {
         case Some(str transfer_coding): {
             if (fields.has_name("content-length")) {
@@ -1770,7 +1780,7 @@ Result<int, Error> framing(Headers fields) {
     match (fields.get("content-length")) {
         case Some(str length_text): {
             int length = content_length(length_text)?;
-            if (length > MAX_BODY) {
+            if (limit >= 0 && length > limit) {
                 return Result<int, Error>.Err(Error.TooLarge);
             }
             return Result<int, Error>.Ok(length);
@@ -1792,6 +1802,26 @@ Result<int, Error> framing(Headers fields) {
 /// connection would read the next request as this one's body -- the same
 /// smuggling bug from the other direction.
 pub Result<Option<Request>, Error> read_request(io.Stream stream) {
+    match (read_request_head(stream)?) {
+        case None: {
+            return Result<Option<Request>, Error>.Ok(Option<Request>.None);
+        }
+        case Some(Request http_request): {
+            int length = framing(http_request.head, MAX_BODY)?;
+            if (length == -2) {
+                http_request.payload = read_chunked(stream, MAX_BODY)?;
+            } else if (length > 0) {
+                http_request.payload = read_exact(stream, length, "the request body")?;
+            }
+            return Result<Option<Request>, Error>.Ok(Option<Request>.Some(http_request));
+        }
+    }
+}
+
+// The request line and fields, checked, with the body left on the stream:
+// what `read_request` and `read_request_stream` share, so a streamed request
+// is refused for exactly what a buffered one is.
+Result<Option<Request>, Error> read_request_head(io.Stream stream) {
     bytes raw = read_head(stream)?;
     if (raw.size() == 0) {
         return Result<Option<Request>, Error>.Ok(Option<Request>.None);
@@ -1816,13 +1846,59 @@ pub Result<Option<Request>, Error> read_request(io.Stream stream) {
     }
     Url loc = target_url(start[0], start[1], host)?;
     Request http_request = Request(start[0], loc, version, fields);
-    int length = framing(fields)?;
-    if (length == -2) {
-        http_request.payload = read_chunked(stream, MAX_BODY)?;
-    } else if (length > 0) {
-        http_request.payload = read_exact(stream, length, "the request body")?;
-    }
     return Result<Option<Request>, Error>.Ok(Option<Request>.Some(http_request));
+}
+
+/// A request whose head has been read and whose body has not: the server's
+/// side of `BodyStream`. The body comes out of `read` a piece at a time, so an
+/// upload need not be held in memory, and it has **no ceiling** -- not
+/// `MAX_BODY`, not a declared `Content-Length` -- because the caller decides
+/// how much to take.
+///
+/// The head is checked exactly as `read_request` checks it, and the framing
+/// rules are the request's: neither framing field means no body.
+///
+/// **The caller owns the connection's position.** A request whose body was
+/// not read to the end leaves the stream part way through it, and the next
+/// request cannot be read from there: either read to the end (`is_finished`)
+/// or close the connection. `start_response` cannot know, so it does not
+/// decide; `BodyWriter.is_keep_alive` is the caller's answer to give.
+pub type RequestStream {
+    Request head;
+    BodyReader body;
+}
+
+/// The request, with an empty body: method, target, version and fields.
+pub Request RequestStream.request() {
+    return head;
+}
+
+/// True once the whole body has been handed out: the next `read` answers an
+/// empty `bytes`, and the stream is positioned at the next request.
+pub bool RequestStream.is_finished() {
+    return body.is_finished();
+}
+
+/// Between 1 and `max_bytes` bytes of the body, or an empty `bytes` once it
+/// has ended -- `BodyStream.read`'s contract, read through the same decoder.
+/// Traps on `max_bytes` below 1.
+pub Result<bytes, Error> RequestStream.read(int max_bytes) {
+    return body.read(max_bytes);
+}
+
+/// The next request on `stream` with its body left for `RequestStream.read`,
+/// or `None` at a clean end: the streaming form of `read_request`.
+pub Result<Option<RequestStream>, Error> read_request_stream(io.Stream stream) {
+    match (read_request_head(stream)?) {
+        case None: {
+            return Result<Option<RequestStream>, Error>.Ok(Option<RequestStream>.None);
+        }
+        case Some(Request http_request): {
+            RequestStream out = RequestStream(http_request, BodyReader(stream));
+            out.body.frame(framing(http_request.head, -1)?, false);
+            return Result<Option<RequestStream>, Error>.Ok(Option<RequestStream>.Some(out));
+        }
+    }
 }
 
 // The method, the target and the version, as three strings.
@@ -2025,7 +2101,7 @@ Result<Response, Error> read_one_response(io.Stream stream, str method) {
     if (method == "CONNECT" && http_response.code >= 200 && http_response.code < 300) {
         return Result<Response, Error>.Err(Error.Framing);
     }
-    int length = framing(fields)?;
+    int length = framing(fields, MAX_BODY)?;
     if (length == -2) {
         http_response.payload = read_chunked(stream, MAX_BODY)?;
     } else if (length >= 0) {
@@ -2036,24 +2112,10 @@ Result<Response, Error> read_one_response(io.Stream stream, str method) {
     return Result<Response, Error>.Ok(http_response);
 }
 
-// --- reading a response body as it arrives ---------------------------------
-/// A response whose head has been read and whose body has not: the body comes
-/// out of `read` a piece at a time, so a download need not be held in memory
-/// and a long-lived response (a log tail, an event stream) can be consumed
-/// while it is still being written.
-///
-/// `read_response` and `fetch` are unchanged and still buffer: they read the
-/// same body through the same framing rules, to the end, with a ceiling
-/// (`MAX_BODY`). **A `BodyStream` has no ceiling** -- the caller decides how
-/// much to take, and stopping early is just not calling `read` again -- and
-/// has no redirect handling: a 3xx is handed back as it is.
-///
-/// Dropping a `BodyStream` before the end closes the connection it holds when
-/// that was opened by `fetch_stream`; over a stream the caller owns
-/// (`read_response_stream`), the caller's stream is left as it stood, part way
-/// through the body.
-pub type BodyStream {
-    Response head;
+// --- a body read as it arrives, in either direction -------------------------
+// The framing state `BodyStream` and `RequestStream` share: one reader, so a
+// request body and a response body cannot be decoded two ways.
+type BodyReader {
     io.Stream source;
     // 0: no more body, 1: `left` bytes of a length-delimited body,
     // 2: chunked, `left` bytes of the current chunk, 3: until the stream ends.
@@ -2061,49 +2123,27 @@ pub type BodyStream {
     int left = 0;
 }
 
-/// The status code.
-pub int BodyStream.status() {
-    return head.code;
+// Set the framing from what `framing` answered. `is_close_delimited` is the
+// response rule: a response with neither field runs to the end of the
+// stream, a request with neither has no body.
+void BodyReader.frame(int length, bool is_close_delimited) {
+    if (length == -2) {
+        mode = 2;
+    } else if (length > 0) {
+        mode = 1;
+        left = length;
+    } else if (length < 0 && is_close_delimited) {
+        mode = 3;
+    }
 }
 
-/// The reason phrase the server sent.
-pub str BodyStream.reason() {
-    return head.phrase;
-}
-
-/// `"1.0"` or `"1.1"`.
-pub str BodyStream.version() {
-    return head.ver;
-}
-
-/// The first value of the field `name`, which is matched without regard to
-/// case.
-pub Option<str> BodyStream.header(str name) {
-    return head.head.get(name);
-}
-
-/// Every field name that arrived, lowercased, in order.
-pub List<str> BodyStream.header_names() {
-    return head.head.names();
-}
-
-/// True once the whole body has been handed out: the next `read` answers an
-/// empty `bytes`.
-pub bool BodyStream.is_finished() {
+bool BodyReader.is_finished() {
     return mode == 0;
 }
 
-/// Between 1 and `max_bytes` bytes of the body, or an empty `bytes` once it
-/// has ended. As with `io.File.read`, fewer than `max_bytes` is not the end;
-/// an empty answer is, and is the only way the end is reported.
-///
-/// A body that stops short of what its framing declared, or a chunk that is
-/// malformed, is an `Err` (`Closed`, `Syntax`), never a quiet short body. A
-/// read that times out is an `Err` and the stream can be read again.
-/// Traps on `max_bytes` below 1, so an empty answer has one meaning.
-pub Result<bytes, Error> BodyStream.read(int max_bytes) {
+Result<bytes, Error> BodyReader.read(int max_bytes) {
     if (max_bytes < 1) {
-        trap("BodyStream.read(" + max_bytes.to_str() + "): read at least one byte");
+        trap("read(" + max_bytes.to_str() + "): read at least one byte");
     }
     bytes none = [];
     if (mode == 2 && left == 0) {
@@ -2157,6 +2197,71 @@ pub Result<bytes, Error> BodyStream.read(int max_bytes) {
     }
 }
 
+// --- reading a response body as it arrives ---------------------------------
+/// A response whose head has been read and whose body has not: the body comes
+/// out of `read` a piece at a time, so a download need not be held in memory
+/// and a long-lived response (a log tail, an event stream) can be consumed
+/// while it is still being written.
+///
+/// `read_response` and `fetch` are unchanged and still buffer: they read the
+/// same body through the same framing rules, to the end, with a ceiling
+/// (`MAX_BODY`). **A `BodyStream` has no ceiling** -- the caller decides how
+/// much to take, and stopping early is just not calling `read` again -- and
+/// has no redirect handling: a 3xx is handed back as it is.
+///
+/// Dropping a `BodyStream` before the end closes the connection it holds when
+/// that was opened by `fetch_stream`; over a stream the caller owns
+/// (`read_response_stream`), the caller's stream is left as it stood, part way
+/// through the body.
+pub type BodyStream {
+    Response head;
+    BodyReader body;
+}
+
+/// The status code.
+pub int BodyStream.status() {
+    return head.code;
+}
+
+/// The reason phrase the server sent.
+pub str BodyStream.reason() {
+    return head.phrase;
+}
+
+/// `"1.0"` or `"1.1"`.
+pub str BodyStream.version() {
+    return head.ver;
+}
+
+/// The first value of the field `name`, which is matched without regard to
+/// case.
+pub Option<str> BodyStream.header(str name) {
+    return head.head.get(name);
+}
+
+/// Every field name that arrived, lowercased, in order.
+pub List<str> BodyStream.header_names() {
+    return head.head.names();
+}
+
+/// True once the whole body has been handed out: the next `read` answers an
+/// empty `bytes`.
+pub bool BodyStream.is_finished() {
+    return body.is_finished();
+}
+
+/// Between 1 and `max_bytes` bytes of the body, or an empty `bytes` once it
+/// has ended. As with `io.File.read`, fewer than `max_bytes` is not the end;
+/// an empty answer is, and is the only way the end is reported.
+///
+/// A body that stops short of what its framing declared, or a chunk that is
+/// malformed, is an `Err` (`Closed`, `Syntax`), never a quiet short body. A
+/// read that times out is an `Err` and the stream can be read again.
+/// Traps on `max_bytes` below 1, so an empty answer has one meaning.
+pub Result<bytes, Error> BodyStream.read(int max_bytes) {
+    return body.read(max_bytes);
+}
+
 /// The response on `stream` to a request that used `method`, with the head
 /// read and the body left on the stream for `BodyStream.read`: the streaming
 /// form of `read_response`, with the same interim-response and framing rules.
@@ -2175,22 +2280,15 @@ pub Result<BodyStream, Error> read_response_stream(io.Stream stream, str method)
 }
 
 Result<BodyStream, Error> body_stream_of(io.Stream stream, Response http_response, str method) {
-    BodyStream out = BodyStream(http_response, stream);
+    BodyStream out = BodyStream(http_response, BodyReader(stream));
     if (method == "HEAD" || is_bodiless(http_response.code)) {
         return Result<BodyStream, Error>.Ok(out);
     }
     if (method == "CONNECT" && http_response.code >= 200 && http_response.code < 300) {
         return Result<BodyStream, Error>.Err(Error.Framing);
     }
-    int length = framing(http_response.head)?;
-    if (length == -2) {
-        out.mode = 2;
-    } else if (length > 0) {
-        out.mode = 1;
-        out.left = length;
-    } else if (length < 0) {
-        out.mode = 3;
-    }
+    int length = framing(http_response.head, -1)?;
+    out.body.frame(length, true);
     return Result<BodyStream, Error>.Ok(out);
 }
 
@@ -2284,6 +2382,21 @@ pub Result<void, Error> write_response(io.Stream stream, Request http_request, R
         fields.set("content-length", http_response.payload.size().to_str());
         fields.remove("transfer-encoding");
     }
+    bytes out = response_head(http_request, http_response, is_keep_alive)?;
+    if (!is_suppress) {
+        if (is_chunked) {
+            chunk_into(out, http_response.payload);
+        } else {
+            out.extend(http_response.payload);
+        }
+    }
+    return write_all(stream, out);
+}
+
+// The status line, the fields and the blank line, with `Connection` set from
+// `is_keep_alive`. The framing fields are the caller's, already set.
+Result<bytes, Error> response_head(Request http_request, Response http_response, bool is_keep_alive) {
+    Headers fields = http_response.head;
     if (!is_keep_alive) {
         fields.set("connection", "close");
     } else if (http_request.ver == "1.0") {
@@ -2293,14 +2406,125 @@ pub Result<void, Error> write_response(io.Stream stream, Request http_request, R
     out.extend(CRLF);
     fields.render(out, "response")?;
     out.extend(CRLF);
-    if (!is_suppress) {
-        if (is_chunked) {
-            chunk_into(out, http_response.payload);
-        } else {
-            out.extend(http_response.payload);
+    return Result<bytes, Error>.Ok(out);
+}
+
+// --- writing a response body as it is produced -----------------------------
+/// A response whose head has been written and whose body is written a piece
+/// at a time: the server's side of a download, a relayed program's output,
+/// anything not held in memory first. `start_response` makes one.
+///
+/// The framing is chosen once, from the request and the response's fields:
+///
+///   - a bodiless status (1xx, 204, 304) or a `HEAD`: nothing is written,
+///     and `write` accepts and drops the bytes, so a handler need not know;
+///   - a `Content-Length` the caller set: exactly that many bytes, and
+///     `finish` refuses (`Framing`) a body that came to any other size;
+///   - otherwise, from a 1.1 peer, `Transfer-Encoding: chunked`;
+///   - otherwise (a 1.0 peer has no chunked coding) the body runs to the end
+///     of the connection, which is then closed: `is_keep_alive` says false.
+pub type BodyWriter {
+    io.Stream sink;
+    // 0: drop, 1: counted (`left` bytes still owed), 2: chunked,
+    // 3: until the connection closes.
+    int mode;
+    int left = 0;
+    bool is_reusable = true;
+    bool is_done = false;
+}
+
+/// Whether the connection may carry another request after this response:
+/// false when the caller said so, when the body is delimited by closing the
+/// connection, or when a counted body came to the wrong size.
+pub bool BodyWriter.is_keep_alive() {
+    return is_reusable;
+}
+
+/// Send `data` as the next piece of the body. An empty `data` sends nothing
+/// (an empty chunk would end a chunked body).
+pub Result<void, Error> BodyWriter.write(bytes data) {
+    if (is_done) {
+        trap("BodyWriter.write after finish");
+    }
+    if (mode == 0 || data.size() == 0) {
+        return Result<void, Error>.Ok;
+    }
+    if (mode == 1) {
+        if (data.size() > left) {
+            is_reusable = false;
+            return Result<void, Error>.Err(Error.Framing);
+        }
+        left = left - data.size();
+        return write_all(sink, data);
+    }
+    if (mode == 2) {
+        bytes out = hex_of(data.size()).to_bytes();
+        out.extend(CRLF);
+        out.extend(data);
+        out.extend(CRLF);
+        return write_all(sink, out);
+    }
+    return write_all(sink, data);
+}
+
+/// End the body: the zero chunk for a chunked body, a check that a counted
+/// body was sent in full (`Framing` if not), nothing otherwise.
+pub Result<void, Error> BodyWriter.finish() {
+    if (is_done) {
+        return Result<void, Error>.Ok;
+    }
+    is_done = true;
+    if (mode == 1 && left != 0) {
+        // The peer is owed bytes that will never come: the connection is
+        // now out of step and must close.
+        is_reusable = false;
+        return Result<void, Error>.Err(Error.Framing);
+    }
+    if (mode == 2) {
+        bytes out = "0".to_bytes();
+        out.extend(CRLF);
+        out.extend(CRLF);
+        return write_all(sink, out);
+    }
+    return Result<void, Error>.Ok;
+}
+
+/// Write `http_response`'s head to `stream` as the answer to `http_request`,
+/// and hand back the writer for its body. The response's own body
+/// (`set_body`) is not sent; the writer's is. `is_keep_alive` is
+/// `should_keep_alive`'s answer, or false when the request's body was not
+/// read to the end; the framing may turn it to false, which
+/// `BodyWriter.is_keep_alive` reports.
+pub Result<BodyWriter, Error> start_response(io.Stream stream, Request http_request, Response http_response, bool is_keep_alive) {
+    Headers fields = http_response.head;
+    BodyWriter out = BodyWriter(stream, 3);
+    out.is_reusable = is_keep_alive;
+    if (is_bodiless(http_response.code)) {
+        fields.remove("content-length");
+        fields.remove("transfer-encoding");
+        out.mode = 0;
+    } else {
+        fields.remove("transfer-encoding");
+        match (fields.get("content-length")) {
+            case Some(str length_text): {
+                out.mode = 1;
+                out.left = content_length(length_text)?;
+            }
+            case None: {
+                if (http_request.ver == "1.0") {
+                    out.is_reusable = false;
+                } else {
+                    fields.set("transfer-encoding", "chunked");
+                    out.mode = 2;
+                }
+            }
+        }
+        if (http_request.verb == "HEAD") {
+            out.mode = 0;
         }
     }
-    return write_all(stream, out);
+    write_all(stream, response_head(http_request, http_response, out.is_reusable)?)?;
+    return Result<BodyWriter, Error>.Ok(out);
 }
 
 /// Whether this connection can carry another request after this exchange.

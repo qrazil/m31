@@ -160,6 +160,10 @@ run "terminal reads park only the green thread" bash runtime/tests/term_wait_tes
 # os.path.realpath on a tree of links, with the monotonic clock.
 run "child processes vs python3 subprocess" bash tests/proc/test_proc.sh
 run "realpath, readlink, monotonic clock" bash tests/fs/test_realpath.sh
+# A server's request and response bodies streamed (lib/net/http.m31's
+# read_request_stream / start_response): 48 MiB echoed through a live socket
+# in constant memory, checked byte for byte by Python.
+run "http server streaming" bash tests/http/test_server_stream.sh
 
 # The formatter must not change what a program means, and must reach a fixed
 # point. Both are checked against every corpus program rather than asserted:

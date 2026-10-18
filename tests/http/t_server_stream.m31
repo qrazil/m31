@@ -1,0 +1,105 @@
+import net.http;
+import io;
+import net;
+import fs;
+
+// The server half of tests/http/test_server_stream.sh. It listens on a port
+// the kernel picks, prints it on stderr, takes one connection, and echoes
+// the request body back as a chunked response, a piece at a time, through
+// `read_request_stream` and `start_response`. Then it prints the bytes it
+// relayed and, where `/proc` exists, its peak resident memory in KiB.
+
+// `VmHWM` from /proc/self/status, or -1 off Linux.
+int peak_kib() {
+    if (!fs.is_file("/proc/self/status")) {
+        return -1;
+    }
+    match (io.read("/proc/self/status")) {
+        case Ok(str text): {
+            for (str line in text.split("\n")) {
+                if (line.starts_with("VmHWM:")) {
+                    return line.substr(6, line.size() - 2).trim().parse_int().or(-1);
+                }
+            }
+        }
+        case Err(io.Error failure): {
+        }
+    }
+    return -1;
+}
+
+int relay(net.Conn connection) {
+    match (http.read_request_stream(connection)) {
+        case Ok(Option<http.RequestStream> maybe): {
+            match (maybe) {
+                case Some(http.RequestStream incoming): {
+                    http.Response outgoing = http.response(200);
+                    match (http.start_response(connection, incoming.request(), outgoing, false)) {
+                        case Ok(http.BodyWriter writer): {
+                            int total = 0;
+                            while (true) {
+                                match (incoming.read(65536)) {
+                                    case Ok(bytes piece): {
+                                        if (piece.size() == 0) {
+                                            match (writer.finish()) {
+                                                case Ok: {
+                                                    return total;
+                                                }
+                                                case Err(http.Error failure): {
+                                                    print("finish: " + failure.to_str());
+                                                    return -1;
+                                                }
+                                            }
+                                        }
+                                        total = total + piece.size();
+                                        match (writer.write(piece)) {
+                                            case Ok: {
+                                            }
+                                            case Err(http.Error failure): {
+                                                print("write: " + failure.to_str());
+                                                return -1;
+                                            }
+                                        }
+                                    }
+                                    case Err(http.Error failure): {
+                                        print("read: " + failure.to_str());
+                                        return -1;
+                                    }
+                                }
+                            }
+                        }
+                        case Err(http.Error failure): {
+                            print("start: " + failure.to_str());
+                        }
+                    }
+                }
+                case None: {
+                    print("no request");
+                }
+            }
+        }
+        case Err(http.Error failure): {
+            print("head: " + failure.to_str());
+        }
+    }
+    return -1;
+}
+
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener listener): {
+        io.eprint(listener.local().port().to_str() + "\n");
+        match (listener.accept()) {
+            case Ok(net.Conn connection): {
+                int total = relay(connection);
+                print("relayed " + total.to_str());
+                print("peak " + peak_kib().to_str());
+            }
+            case Err(net.Error failure): {
+                print("accept failed: " + failure.to_str());
+            }
+        }
+    }
+    case Err(net.Error failure): {
+        print("listen failed: " + failure.to_str());
+    }
+}
