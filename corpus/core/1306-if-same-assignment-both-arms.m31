@@ -32,7 +32,6 @@ print(first);
 print(last);
 print(pick(true, 5, 9));
 print(pick(false, 5, 9));
-
 int k = 1;
 if (first == 0) {
     k = last;

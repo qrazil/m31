@@ -13,6 +13,16 @@ change landed on master.
   "unchanged", so `x` came out of the `if` with its old value. It now also
   compares with the value from before the `if`
   (`lower_if`, corpus `1306-if-same-assignment-both-arms`).
+- **Assigning a parameter or a `case V(T x)` binding inside a loop or an `if`
+  freed memory still in use** (use-after-free, a double free, glibc's
+  `malloc(): unaligned tcache chunk detected`). Those names are borrowed, and
+  the first assignment took ownership -- registered in the innermost block, so
+  the new value was released when that block ended while the name lived on.
+  A parameter or payload binding the body assigns is now owned from entry (one
+  retain), so every assignment is an ordinary release-old, retain-new. A
+  reassigned payload binding is also no longer a slot a `send` could take out
+  of the enum (corpus `1307-assign-borrowed-in-nested-block`; found only by
+  the sanitizer gate).
 
 ## 0.8.0 (2026-10-19)
 

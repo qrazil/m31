@@ -1,0 +1,165 @@
+// A parameter and a `case V(T x)` payload binding are BORROWED: the caller,
+// or the enum, holds the reference. Assigning one takes ownership from then
+// on -- but the assignment may sit inside a loop or an `if`, and ownership
+// taken there was released at the end of that inner block while the name
+// lived on, so the next read (or the function's own return) used freed memory
+// or released it twice. Heap corruption under glibc ("unaligned tcache
+// chunk"), a use-after-free under AddressSanitizer, silent in a plain run.
+//
+// The cases: str, List and struct values; function and method; loop body,
+// `if`, and both nested; payload bound by a `case` and reassigned in the arm
+// and below it. __rc_live=0 at exit and the sanitizer builds are the oracle.
+
+type Box {
+    str name;
+}
+
+str Box.deep(str s, int n) {
+    int i = 0;
+    while (i < n) {
+        if (i % 2 == 0) {
+            s = s + name;
+        } else {
+            s = s + "-";
+        }
+        i = i + 1;
+    }
+    return s;
+}
+
+str Box.pick(Msg m, int n) {
+    match (m) {
+        case Text(str x): {
+            int i = 0;
+            while (i < n) {
+                x = x + "?";
+                i = i + 1;
+            }
+            if (n > 1) {
+                x = x + "#";
+            }
+            return x;
+        }
+        case Items(List<str> xs): {
+            if (n > 0) {
+                xs = ["only"];
+            }
+            return "items:" + xs.join(",");
+        }
+        case Boxed(Box b): {
+            int i = 0;
+            while (i < n) {
+                b = Box(b.name + "b");
+                i = i + 1;
+            }
+            return b.name;
+        }
+        case Empty: {
+            return "empty";
+        }
+    }
+}
+
+type Pair {
+    int a;
+    int b;
+}
+
+enum Msg {
+    Text(str);
+    Items(List<str>);
+    Boxed(Box);
+    Empty;
+}
+
+str grow(str s, int n) {
+    int i = 0;
+    while (i < n) {
+        s = s + "+";
+        i = i + 1;
+    }
+    return s;
+}
+
+str maybe(str s, bool c) {
+    if (c) {
+        s = s + "y";
+    }
+    return s;
+}
+
+int total(List<str> xs, bool swap) {
+    if (swap) {
+        xs = ["x", "y", "z"];
+    }
+    return xs.size();
+}
+
+str boxed(Box b, int n) {
+    int i = 0;
+    while (i < n) {
+        b = Box(b.name + "!");
+        i = i + 1;
+    }
+    return b.name;
+}
+
+// Reassigned directly in the arm, with nothing nested: the plain case.
+str direct(Msg m) {
+    match (m) {
+        case Text(str x): {
+            x = x + "!";
+            return x;
+        }
+        case Items(_): {
+            return "items";
+        }
+        case Boxed(_): {
+            return "boxed";
+        }
+        case Empty: {
+            return "empty";
+        }
+    }
+}
+
+// A reassigned payload is the arm's own value, so a move out of the arm sends
+// the NEW one and leaves the enum's slot alone (it is not a borrow to take).
+void worker(Chan<Box> inbox, Chan<str> done) {
+    Box b = recv(inbox);
+    send(done, clone(b.name));
+}
+
+void handoff() {
+    Chan<Box> inbox = Chan<Box>(1);
+    Chan<str> done = Chan<str>(1);
+    spawn worker(inbox, done);
+    match (Result<Box, str>.Ok(Box("old"))) {
+        case Ok(Box b): {
+            b = Box("new");
+            send(inbox, b);
+        }
+        case Err(str e): {
+            print(e);
+        }
+    }
+    print(recv(done));
+}
+
+print(grow("p" + "q", 3));
+print(grow("p" + "q", 0));
+print(maybe("p" + "q", true));
+print(maybe("p" + "q", false));
+print(total(["a", "b"], true));
+print(total(["a", "b"], false));
+print(boxed(Box("n" + "m"), 2));
+Box k = Box("k");
+print(k.deep("s" + "t", 3));
+print(k.pick(Msg.Text("a" + "b"), 3));
+print(k.pick(Msg.Text("a" + "b"), 0));
+print(k.pick(Msg.Items(["u", "v"]), 1));
+print(k.pick(Msg.Items(["u", "v"]), 0));
+print(k.pick(Msg.Boxed(Box("q")), 2));
+print(k.pick(Msg.Empty, 2));
+print(direct(Msg.Text("a" + "b")));
+handoff();

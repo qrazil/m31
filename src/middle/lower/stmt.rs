@@ -558,7 +558,7 @@ impl Lowerer {
     /// which variables are loop-carried by looking. This is the cheap
     /// alternative to incremental SSA construction with incomplete blocks,
     /// and it is exact for the statements v0 has.
-    fn assigned_names(stmts: &[Stmt], out: &mut Vec<String>) {
+    pub(super) fn assigned_names(stmts: &[Stmt], out: &mut Vec<String>) {
         for s in stmts {
             match s {
                 Stmt::Assign { name, .. } => {
@@ -1463,6 +1463,8 @@ impl Lowerer {
             // `transfer` does that, and `payload_binds` is what tells it
             // which names it may do it to.
             let binds_from = self.payload_binds.len();
+            let mut assigned = Vec::new();
+            Self::assigned_names(&a.body, &mut assigned);
             for (idx, b) in a.binds.iter().enumerate() {
                 // A discard projects nothing and enters no scope, so it can
                 // neither shadow nor be shadowed and may repeat freely.
@@ -1480,7 +1482,17 @@ impl Lowerer {
                     .last_mut()
                     .unwrap()
                     .insert(b.name.clone(), (b.ty, d, false));
-                if self.is_ref(b.ty) {
+                if self.is_ref(b.ty) && assigned.contains(&b.name) {
+                    // The arm reassigns this name, so it is the arm's own
+                    // value rather than a borrow of the enum's slot: own it
+                    // from the start (see `lower_func_inner` for why a first
+                    // assignment inside a loop or branch cannot take
+                    // ownership). It is then an ordinary owned local -- and
+                    // not a `payload_binds` entry, because taking the slot
+                    // out for a `transfer` would move the OLD payload.
+                    self.rc_inc(d);
+                    self.owned.last_mut().unwrap().push(b.name.clone());
+                } else if self.is_ref(b.ty) {
                     self.payload_binds.push(PayloadBind {
                         name: b.name.clone(),
                         hold: hold.clone(),

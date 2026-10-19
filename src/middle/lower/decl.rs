@@ -568,8 +568,23 @@ impl Lowerer {
         self.blocks[self.cur].params = params.clone();
         self.scopes.push(scope);
         // Parameters are BORROWED (docs/ir-v0.md §5.1), so they are never
-        // registered as owned and never decremented here.
+        // registered as owned and never decremented here -- unless the body
+        // assigns one. Whether a name is owned is one compile-time fact, but
+        // an assignment inside a loop or a branch runs a different number of
+        // times than it is written, so ownership first taken at the
+        // assignment would be released at the end of that inner block while
+        // the name outlives it. Take it at entry instead (one retain), and
+        // every assignment is then an ordinary release-old, retain-new.
         self.owned.push(Vec::new());
+        let mut assigned = Vec::new();
+        Self::assigned_names(&f.body, &mut assigned);
+        for p in &f.params {
+            if self.is_ref(p.ty) && assigned.contains(&p.name) {
+                let v = self.lookup(&p.name).expect("parameter is in scope").1;
+                self.rc_inc(v);
+                self.owned.last_mut().unwrap().push(p.name.clone());
+            }
+        }
 
         self.lower_block(&f.body)?;
 
