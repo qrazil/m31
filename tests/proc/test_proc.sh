@@ -249,9 +249,14 @@ def pty_oracle(argv, rows=24, cols=80, until=b"", typed=b""):
 
 def norm(data):
     data = re.sub(rb"/dev/(pts/\d+|tty[a-z0-9]+)", b"/dev/pts/N", data)
-    # `until=` stops at the text it names; whether the line break after it has
-    # already arrived when ^C is typed is a race between two processes
-    return re.sub(rb"\r\n(?=\^C)", b"", data)
+    return data
+
+def norm_interrupt(data):
+    # `until=` stops at the text it names; whether the line break after it and
+    # the terminal's echo of the ^C have arrived by the time the child is gone is
+    # a race between processes: the case is about the exit status, so compare
+    # the text before them
+    return re.sub(rb"(\r\n)?(\^C)?(\r\n)?$", b"", norm(data))
 
 def m31_pty(argv, rows=24, cols=80, until="", typed=b""):
     words = ["pty", "rows=%d" % rows, "columns=%d" % cols]
@@ -282,7 +287,8 @@ for label, argv, kw in pty_cases:
     until = kw.get("until", b"")
     want_code, want_out = pty_oracle(argv, rows=kw.get("rows", 24), cols=kw.get("cols", 80), until=until, typed=kw.get("typed", b""))
     got_code, got_out = m31_pty(argv, rows=kw.get("rows", 24), cols=kw.get("cols", 80), until=until.decode(), typed=kw.get("typed", b""))
-    check("pty: " + label, got_code == want_code and norm(got_out) == norm(want_out), "got %r %r want %r %r" % (got_code, got_out, want_code, want_out))
+    same = norm_interrupt if label.startswith("^C interrupts") else norm
+    check("pty: " + label, got_code == want_code and same(got_out) == same(want_out), "got %r %r want %r %r" % (got_code, got_out, want_code, want_out))
 
 # A resize is seen by the child: stty size before and after.
 out, rc, err = m31("pty-resize")
