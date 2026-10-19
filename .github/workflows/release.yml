@@ -397,9 +397,14 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Checksums
+        run: (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
           fail_on_unmatched_files: true
           generate_release_notes: true

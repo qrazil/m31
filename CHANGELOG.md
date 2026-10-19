@@ -3,6 +3,14 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased
+
+### Added -- `SHA256SUMS` on every release
+
+The release workflow now publishes a `SHA256SUMS` file beside the platform
+tarballs, so an installer can check what it downloads. v0.7.0 has one
+uploaded by hand.
+
 ## 0.7.0 (2026-10-18)
 
 ### Added -- streamed bodies on the server side
