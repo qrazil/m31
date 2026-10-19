@@ -5,7 +5,7 @@ change landed on master.
 
 ## 0.9.0 (2026-10-19)
 
-Recommended version: 0.9.0 (additive; nothing existing changes).
+Additive; nothing existing changes.
 
 ### Added
 
