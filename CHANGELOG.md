@@ -3,7 +3,7 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
-## 0.7.0 (unreleased)
+## 0.7.0 (2026-10-18)
 
 ### Added -- streamed bodies on the server side
 
