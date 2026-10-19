@@ -63,6 +63,7 @@
 #define SYS_ESPIPE       29
 #define SYS_EROFS        30
 #define SYS_EPIPE        32
+#define SYS_ERANGE       34
 #define SYS_ENAMETOOLONG 36
 #define SYS_ENOSYS       38
 #define SYS_ENOTEMPTY    39
@@ -785,5 +786,29 @@ int64_t sys_proc_start_pty(char *const argv[], char *const envp[],
  * -- so a caller asks again with a larger buffer until the result is below
  * `cap`. -SYS_EINVAL when `path` is not a link. */
 int64_t sys_readlink(const char *path, char *buf, int64_t cap);       /* bytes */
+
+/* The absolute path of the process's current directory, written to `buf`
+ * followed by a NUL, which needs `cap` to be at least the length plus one.
+ * Returns the length, NUL not counted; the path starts with '/' and holds
+ * no symbolic link (the kernel's, or the C library's, own answer).
+ *
+ *   -SYS_ERANGE   `cap` is too small; the caller asks again with a larger
+ *                 buffer. Unlike sys_readlink the layer can say so exactly.
+ *   -SYS_EINVAL   `cap` is not positive.
+ *   -SYS_ENOENT   the directory was removed while the process was in it, or
+ *                 it lies outside this process's root (after a chroot); the
+ *                 kernel would give the second a path starting "(unreachable)"
+ *                 and the layer refuses it as the C library does.
+ *   -SYS_EACCES   (libc backend) a host whose getcwd(3) finds the path by
+ *                 walking up the tree can fail on a component it cannot
+ *                 search; the error is passed on, in Linux's numbering.
+ *   -SYS_ENAMETOOLONG  the path is longer than the kernel's PATH_MAX (4096):
+ *                 what the raw backend says. The libc backend says what the
+ *                 host's getcwd(3) says, which may be an answer.
+ *
+ * This is how a relative path is made absolute without /proc, which macOS
+ * does not have. The libc backend is `getcwd(3)`, which is also the only
+ * route there: macOS has no raw backend. */
+int64_t sys_getcwd(char *buf, int64_t cap);                           /* length */
 
 #endif /* RT_SYS_H */

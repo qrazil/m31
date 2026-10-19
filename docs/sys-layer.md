@@ -304,10 +304,11 @@ inherits fd 1 writes to it directly the moment it execs, so skipping the
 flush put a child's output before everything this program had already
 printed but not yet flushed.
 
-### Child stdio, pipes, signals and links: `sys_pipe`, `sys_proc_start_fds`, `sys_kill`, `sys_readlink`
+### Child stdio, pipes, signals and links: `sys_pipe`, `sys_proc_start_fds`, `sys_kill`, `sys_readlink`, `sys_getcwd`
 
 Added **2026-10-12** for `lib/proc.m31` (`docs/proc-decision.md`), and the
-last of them for `fs.realpath`. Everything above `sys_proc_start` was
+last of them for `fs.realpath`; `sys_getcwd` followed (see below) so that a
+relative path no longer needs `/proc`. Everything above `sys_proc_start` was
 inherit-only; capturing a child's output needs a pipe, a `dup2` in the child
 and a reader that cannot deadlock, and only the first two are below the
 language.
@@ -318,6 +319,7 @@ language.
 | `sys_proc_start_fds(argv, envp, cwd, in, out, err)` | pid | `posix_spawn` + file actions | `clone` 56, `dup3` 292, `chdir` 80, `rt_sigaction`, `rt_sigprocmask` 14, `execve` 59 | `clone` 220, `dup3` 24, `chdir` 49, `rt_sigprocmask` 135, `execve` 221 |
 | `sys_kill(pid, sig)` | 0 | `kill` | `kill` 62 | `kill` 129 |
 | `sys_readlink(path, buf, cap)` | bytes written | `readlink` | `readlinkat` 267 | `readlinkat` 78 |
+| `sys_getcwd(buf, cap)` | length, NUL after it | `getcwd` | `getcwd` 79 | `getcwd` 17 |
 
   - **A pipe's ends are close-on-exec and blocking; the reactor needs the
     parent's end non-blocking, and that is not a new function.**
@@ -366,6 +368,22 @@ language.
     `cap` when the target may have been cut, and the caller asks again with a
     larger buffer (`fs.readlink` does, doubling from 256).
 
+  - **`sys_getcwd` writes a NUL and can say exactly how much room it needs.**
+    It returns the length (NUL not counted) and a buffer that cannot hold the
+    path and its NUL is `-ERANGE`, which `fs.getcwd` answers by doubling from
+    256 bytes (to 1 MiB, then `Other(34)`). The kernel's own contract is
+    followed on both backends: a directory removed under the process is
+    `-ENOENT`, never a stale name; a path outside the process's root, which
+    the raw system call would return as `(unreachable)/...`, is `-ENOENT` too
+    (the raw backend checks that the result starts with `/`, as glibc does,
+    and checks the length the kernel reports against `cap`); a path over the
+    kernel's PATH_MAX of 4096 is `-ENAMETOOLONG` on the raw backend, whereas
+    glibc's `getcwd` walks up with `..` and can still answer. **The libc backend
+    is `getcwd(3)` and is the only route on macOS** (no raw backend there); it
+    is what `fs.realpath` of a relative path uses instead of `/proc/self/cwd`,
+    which macOS does not have. `SYS_ERANGE` joined the layer's errno numbers
+    (34 on every host; the libc backend maps it like the others).
+
 `runtime/tests/sys_test.c` covers every one of these on every backend,
 freestanding, and under qemu for aarch64 and riscv64: a round trip through
 `cat` with both ends chosen, an environment that is replaced, the child's
@@ -373,7 +391,9 @@ freestanding, and under qemu for aarch64 and riscv64: a round trip through
 missing and one that cannot be run, descriptors that must not reach the
 child (a `ls /dev/fd` with twelve more held here), SIGPIPE's disposition in
 the child, `kill` and death by signal, and `readlink` into a buffer that is
-too small.
+too small, and `getcwd` into buffers of every size around the path's length
+(exactly enough, one byte short, one, none) with a canary that nothing is
+written past `cap`.
 
 The reactor's own descriptors were the surprise: the epoll descriptor and
 its two eventfds were created without close-on-exec and so reached every

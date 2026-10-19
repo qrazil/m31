@@ -1121,6 +1121,43 @@ static void proc_tests(void) {
     expect("readlink of a missing path", sys_readlink("/no/such/link-2026", rl, sizeof rl), -SYS_ENOENT);
     expect("readlink of a non-link", sys_readlink("/", rl, sizeof rl), -SYS_EINVAL);
     sys_unlink(lnk);
+
+    /* ---- getcwd ---- */
+    char here[4200];
+    int64_t n = sys_getcwd(here, sizeof here);
+    expect_true("getcwd answers", n > 0);
+    expect_true("an absolute path", here[0] == '/');
+    expect("the NUL follows the length", (int64_t)here[n], 0);
+    {
+        int64_t length = 0;
+        while (here[length]) length++;
+        expect("the length is the string's", n, length);
+    }
+    expect("one byte short of the NUL is ERANGE", sys_getcwd(here, n), -SYS_ERANGE);
+    expect("exactly room for the NUL works", sys_getcwd(here, n + 1), n);
+    expect("a buffer of 1 cannot hold any path and NUL", sys_getcwd(here, 1), -SYS_ERANGE);
+    expect("cap 0 is EINVAL", sys_getcwd(here, 0), -SYS_EINVAL);
+    expect("a negative cap is EINVAL", sys_getcwd(here, -5), -SYS_EINVAL);
+    {
+        /* canary: nothing is written past cap */
+        char guard[64];
+        for (int i = 0; i < 64; i++) guard[i] = 0x5a;
+        int64_t m = sys_getcwd(guard, 8);
+        if (m >= 0) expect_true("a short buffer that fits holds the path", m < 8);
+        int ok = 1;
+        for (int i = 8; i < 64; i++) ok &= guard[i] == 0x5a;
+        expect_true("nothing past cap is written", ok);
+    }
+#ifdef __linux__
+    {
+        char proc[4200];
+        int64_t k = sys_readlink("/proc/self/cwd", proc, sizeof proc);
+        if (k > 0) {
+            proc[k] = 0;
+            expect_true("it is what /proc/self/cwd says", k == n && same(proc, here, n));
+        }
+    }
+#endif
 }
 
 

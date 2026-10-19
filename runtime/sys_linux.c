@@ -65,6 +65,7 @@
 #define NR_getsockopt   55
 #define NR_fcntl        72
 #define NR_chdir        80
+#define NR_getcwd       79
 #define NR_kill         62
 #define NR_rt_sigprocmask 14
 #define NR_readlinkat  267
@@ -88,6 +89,7 @@
 #define NR_dup3          24
 #define NR_setsid       157
 #define NR_chdir         49
+#define NR_getcwd        17
 #define NR_readlinkat    78
 #define NR_kill         129
 #define NR_rt_sigprocmask 135
@@ -1150,6 +1152,20 @@ int64_t sys_kill(int64_t pid, int64_t sig) {
 
 int64_t sys_readlink(const char *path, char *buf, int64_t cap) {
     return sc(NR_readlinkat, AT_FDCWD, P(path), P(buf), cap, 0, 0);
+}
+
+/* The kernel's getcwd writes the path and its NUL and returns their total
+ * size; a buffer too small is -ERANGE, a removed directory -ENOENT. It never
+ * writes more than `cap`. What it returns is checked anyway, and a path that
+ * does not start with '/' is the "(unreachable)" form of a directory outside
+ * the process's root, which the C library turns into ENOENT and so does
+ * this. */
+int64_t sys_getcwd(char *buf, int64_t cap) {
+    if (cap <= 0) return -SYS_EINVAL;
+    int64_t r = sc(NR_getcwd, P(buf), cap, 0, 0, 0, 0);
+    if (r < 0) return r;
+    if (r < 2 || r > cap || buf[r - 1] != '\0' || buf[0] != '/') return -SYS_ENOENT;
+    return r - 1;
 }
 
 /* /dev/ptmx, then the two ioctls glibc's unlockpt and ptsname are made of:

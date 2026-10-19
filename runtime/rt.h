@@ -285,6 +285,7 @@ int64_t rt_rename(Obj *from, Obj *to);
 int64_t rt_symlink(Obj *target, Obj *path);
 int64_t rt_listdir(Obj *path, Obj *buf);          /* bytes the listing needs */
 int64_t rt_readlink(Obj *path, Obj *buf);         /* bytes of the target written, or -errno */
+int64_t rt_getcwd(Obj *buf);                      /* length of the current directory's path, or -errno */
 /* Writes out what `print` has buffered. lib/io.m31 calls it before writing
  * to descriptor 1 or 2 itself, so the two paths to one stream land in the
  * order the program wrote them. */

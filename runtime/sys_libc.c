@@ -64,6 +64,7 @@ static int64_t neg_errno(int e) {
     case ESPIPE:       return -SYS_ESPIPE;
     case EROFS:        return -SYS_EROFS;
     case EPIPE:        return -SYS_EPIPE;
+    case ERANGE:       return -SYS_ERANGE;
     case ENAMETOOLONG: return -SYS_ENAMETOOLONG;
     case ENOSYS:       return -SYS_ENOSYS;
     case ENOTEMPTY:    return -SYS_ENOTEMPTY;
@@ -1044,6 +1045,18 @@ int64_t sys_kill(int64_t pid, int64_t sig) {
 
 int64_t sys_readlink(const char *path, char *buf, int64_t cap) {
     return ret((int64_t)readlink(path, buf, (size_t)cap));
+}
+
+/* getcwd(3): the one route on macOS, and on Linux the same system call the
+ * raw backend makes. A buffer of `cap` bytes is handed over whole, so the C
+ * library cannot write past it; the result is a NUL-terminated absolute path
+ * or NULL with errno (ERANGE for a short buffer, ENOENT for a removed
+ * directory). */
+int64_t sys_getcwd(char *buf, int64_t cap) {
+    if (cap <= 0) return -SYS_EINVAL;
+    if (getcwd(buf, (size_t)cap) == NULL) return neg_errno(errno);
+    if (buf[0] != '/') return -SYS_ENOENT;
+    return (int64_t)strlen(buf);
 }
 
 int64_t sys_pty_open(int64_t *master_fd, char *slave_path, int64_t cap) {

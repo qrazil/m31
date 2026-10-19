@@ -3054,6 +3054,18 @@ int64_t rt_readlink(Obj *path, Obj *buf) {
     return sys_readlink(((Str *)path)->data, (char *)b->data, b->len);
 }
 
+/* Writes the current directory's absolute path into `buf` (whose whole size
+ * the layer may use, and which it NUL-terminates inside that size); the
+ * length, or -errno: -SYS_ERANGE when `buf` is too small, and the caller asks
+ * again with a larger one (sys.h, sys_getcwd). The buffer must be mutable;
+ * its size is passed as the layer's capacity, so nothing is written outside it
+ * and its size never changes. */
+int64_t rt_getcwd(Obj *buf) {
+    rt_check_mutable(buf);
+    Bytes *b = (Bytes *)buf;
+    return sys_getcwd((char *)b->data, b->len);
+}
+
 /* ---- process primitives: lib/os.m31, lib/date.m31, lib/random.m31 ------ */
 /* Each is one OS fact, handed back as a scalar or pushed onto the caller's
  * list. None of them decides anything: whether argv[0] is included, what an
