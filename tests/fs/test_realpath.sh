@@ -3,7 +3,9 @@
 # and os.readlink, on a tree of symbolic links built here: absolute and
 # relative links, chains, links to files, a link in the middle of a path
 # followed by `..`, dangling links, a loop, and paths that are not there.
-# Also timer.monotonic_ns against time.monotonic_ns (the same clock).
+# A relative path and fs.getcwd (no /proc: the same on macOS): a lying or
+# missing PWD, a path of 3.4 KB, one past the kernel's limit, and a removed
+# current directory. Also timer.monotonic_ns against time.monotonic_ns.
 #
 #   bash tests/fs/test_realpath.sh
 #
@@ -107,11 +109,74 @@ for p, got in zip(links, out):
         want = "error system error %d" % e.errno
     check("readlink %s" % p, got == want, "got %r want %r" % (got, want))
 
-# A relative path from the current directory (/proc/self/cwd: Linux).
-if sys.platform.startswith("linux"):
-    done = subprocess.run([binary, "real", "a/rel/c", "../tree/self/a"], cwd=root, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    want = [py_real(os.path.join(root, "a/rel/c")), py_real(os.path.join(root, "../tree/self/a"))]
-    check("relative paths", done.stdout.splitlines() == want, "%r vs %r" % (done.stdout, want))
+# A relative path from the current directory: fs.getcwd, on every system
+# (no /proc). The child runs with a hostile environment too: no PWD at all,
+# and a PWD that names somewhere else, neither of which may matter.
+done = subprocess.run([binary, "real", "a/rel/c", "../tree/self/a"], cwd=root, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+want = [py_real(os.path.join(root, "a/rel/c")), py_real(os.path.join(root, "../tree/self/a"))]
+check("relative paths", done.stdout.splitlines() == want, "%r vs %r" % (done.stdout, want))
+real_root = os.path.realpath(root)
+def run_cwd(env, **kw):
+    done = subprocess.run([binary, "cwd"], capture_output=True, text=True, stdin=subprocess.DEVNULL, env=env, **kw)
+    return done.stdout.splitlines()
+check("getcwd and realpath('.') are the directory", run_cwd({}, cwd=root) == [real_root, real_root], str(run_cwd({}, cwd=root)))
+check("getcwd ignores a lying PWD", run_cwd({"PWD": "/nonexistent/lie"}, cwd=root) == [real_root, real_root])
+check("getcwd through a link is the real directory", run_cwd({}, cwd=mk("abs")) == [os.path.realpath(mk("abs"))] * 2)
+check("getcwd of /", run_cwd({}, cwd="/") == ["/", "/"])
+done = subprocess.run([binary, "real", "a/b/c/../file.txt", "."], cwd=root, capture_output=True, text=True, stdin=subprocess.DEVNULL, env={})
+check("relative paths with no environment at all", done.stdout.splitlines() == [py_real(mk("a/b/file.txt")), real_root], repr(done.stdout))
+
+# A long path: the process is put in the directory by a chdir per component
+# (no path this long can be passed to one), 3.4 KB of path; and one past the
+# kernel's 4096, where the raw backend says ENAMETOOLONG (36) and a C library
+# whose getcwd walks up with `..` may still answer.
+def deep(names):
+    def go():
+        for name in names:
+            os.chdir(name)
+    return go
+def build_deep(base, count, width):
+    os.makedirs(base)
+    names = [("d%02d" % i).ljust(width, "x") for i in range(count)]
+    here = os.getcwd()
+    try:
+        os.chdir(base)
+        for name in names:
+            os.mkdir(name)
+            os.chdir(name)
+    finally:
+        os.chdir(here)
+    return names
+near = build_deep(mk("deepnear"), 17, 200)
+want = os.path.realpath(mk("deepnear")) + "/" + "/".join(near)
+check("long path under PATH_MAX is built (%d bytes)" % len(want), 3000 < len(want) < 4096, str(len(want)))
+done = subprocess.run([binary, "cwd"], cwd=mk("deepnear"), preexec_fn=deep(near), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+check("getcwd in a %d-byte path" % len(want), done.stdout.splitlines() == [want, want], repr(done.stdout[:200]))
+done = subprocess.run([binary, "real", "../" + near[-1] + "/../" + near[-1]], cwd=mk("deepnear"), preexec_fn=deep(near), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+check("a relative realpath in the long directory", done.stdout.splitlines() == [want], repr(done.stdout[:200]))
+far = build_deep(mk("deepfar"), 22, 200)
+farwant = os.path.realpath(mk("deepfar")) + "/" + "/".join(far)
+done = subprocess.run([binary, "cwd"], cwd=mk("deepfar"), preexec_fn=deep(far), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+lines = done.stdout.splitlines()
+if backend == "-DRT_SYS_RAW":
+    check("getcwd past PATH_MAX is ENAMETOOLONG on the raw backend", lines == ["error system error 36", "error system error 36"], repr(done.stdout[:200]))
+else:
+    # (realpath(".") then stats the whole path, which no system accepts.)
+    check("getcwd past PATH_MAX is the host's answer, whole or an error, never cut",
+          len(lines) == 2 and all(l == farwant or l.startswith("error ") for l in lines), repr(done.stdout[:200]))
+
+# A current directory that was removed under the process: NotFound, never a
+# stale name; an absolute path still works.
+os.makedirs(mk("doomed"))
+def vanish():
+    os.chdir(mk("doomed"))
+    os.rmdir(mk("doomed"))
+done = subprocess.run([binary, "cwd"], preexec_fn=vanish, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+check("getcwd in a removed directory is NotFound", done.stdout.splitlines() == ["error no such file", "error no such file"], repr(done.stdout))
+os.makedirs(mk("doomed"))
+done = subprocess.run([binary, "real", "x", "/", "a/b"], preexec_fn=vanish, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+check("realpath of a relative path there is NotFound, an absolute one works",
+      done.stdout.splitlines() == ["error no such file", "/", "error no such file"], repr(done.stdout))
 
 # The monotonic clock is CLOCK_MONOTONIC, which Python reads too: the two
 # readings fall between Python's, and the sleep is at least 120 ms.

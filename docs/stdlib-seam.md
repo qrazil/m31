@@ -115,8 +115,9 @@ it. Three restrictions keep that containable, and all three are checked:
       - the result says how many bytes were written, and bytes past that
         are unspecified but still in 0..255, so no invariant of `bytes`
         (reference §3.10) can be broken by a short read.
-    `__read(fd, buf, off, n)` and `__listdir(path, buf)` are the two that
-    use it (§7). A `str` is never written: it is immutable, and
+    `__read(fd, buf, off, n)`, `__listdir(path, buf)`, `__readlink(path,
+    buf)` and `__getcwd(buf)` are the ones that use it (§7); the last two
+    pass the buffer's whole size as the capacity, which is the range check. A `str` is never written: it is immutable, and
     `__write_str` only reads one.
 
 ---
@@ -423,6 +424,8 @@ decides anything is in `lib/io.m31` and `lib/fs.m31`:
 | `__rename(str from, str to)` | `sys_rename` | 0 |
 | `__symlink(str target, str path)` | `sys_symlink` | 0 |
 | `__listdir(str path, bytes buf)` | `sys_listdir` | the bytes the whole listing needs; names NUL-separated in `buf` as far as it holds |
+| `__readlink(str path, bytes buf)` | `sys_readlink` | the bytes of the target written into `buf` (a count equal to the size may be cut) |
+| `__getcwd(bytes buf)` | `sys_getcwd` | the length of the current directory's path written into `buf`, NUL after it; `-ERANGE` for a buffer too small |
 | `__out_flush()` | -- | writes out what `print` has buffered |
 
 The C that is left does only what the language cannot: turn a `str` into

@@ -7,7 +7,19 @@ import timer;
 // tests/fs/test_realpath.sh, which asks Python's os.path.realpath the same.
 //   t_realpath real PATH...      fs.realpath
 //   t_realpath link PATH...      fs.readlink
+//   t_realpath cwd               fs.getcwd, then fs.realpath(".")
 //   t_realpath clock             two monotonic readings around a sleep
+
+void show(Result<str, io.Error> found) {
+    match (found) {
+        case Ok(str path): {
+            print(path);
+        }
+        case Err(io.Error error): {
+            print("error " + error.to_str());
+        }
+    }
+}
 
 List<str> words = os.arguments();
 if (words.size() >= 2 && words[1] == "clock") {
@@ -15,6 +27,9 @@ if (words.size() >= 2 && words[1] == "clock") {
     timer.sleep_ms(120);
     int second = timer.monotonic_ns();
     print(first.to_str() + " " + second.to_str());
+} else if (words.size() >= 2 && words[1] == "cwd") {
+    show(fs.getcwd());
+    show(fs.realpath("."));
 } else if (words.size() >= 3) {
     for (int index in 2 .. words.size()) {
         Result<str, io.Error> found = fs.realpath(words[index]);

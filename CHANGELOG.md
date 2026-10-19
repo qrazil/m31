@@ -29,6 +29,18 @@ uploaded by hand.
 - `sshconnect.connect_reporting` and `sshconnect.resolve` under them.
   `connect_configured`, `sshconnect.connect`, `Error` and `m31ssh`, `m31scp`,
   `m31sftp` are unchanged.
+- `fs.getcwd()` -> `Result<str, io.Error>`: the current directory as an
+  absolute path, from a new sys-layer primitive `sys_getcwd` (`getcwd` 79 /
+  17 on the raw backend, `getcwd(3)` on libc, which is the only route on
+  macOS). A removed current directory is `NotFound`; a path past the
+  kernel's 4096 is `Other(36)` on the raw backend.
+
+### Fixed
+
+- `fs.realpath` of a relative path (and `fs.realpath(".")`) no longer reads
+  `/proc/self/cwd`: it works on macOS, where it was `Other(38)`, and the
+  `Other(38)` fallback is gone. A removed current directory is `NotFound`
+  instead of a stale name.
 
 ## 0.6.0 (unreleased)
 

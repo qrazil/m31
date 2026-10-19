@@ -15,6 +15,7 @@
 //   fs.symlink(target, path) -> Result<bool, io.Error>        a link at path, to target
 //   fs.readlink(path)        -> Result<str, io.Error>         where a link points, as written
 //   fs.realpath(path)        -> Result<str, io.Error>         absolute, no links, no . or ..
+//   fs.getcwd()              -> Result<str, io.Error>         the current directory, absolute
 //   fs.join(a, b)            -> str
 //   fs.makedirs(path)        -> Result<bool, io.Error>        every missing component
 //   fs.walk(root)            -> Result<List<str>, io.Error>   every entry below root
@@ -48,6 +49,10 @@ prim int __symlink(str target, str path);
 // A count equal to the size may be a cut target (runtime/sys.h).
 prim int __readlink(str path, bytes buffer);
 prim int __listdir(str path, bytes buffer);
+// The current directory's path into `buffer`, which the runtime NUL-
+// terminates inside its size: the length, or -errno; -34 (ERANGE) is a
+// buffer too small (runtime/sys.h).
+prim int __getcwd(bytes buffer);
 
 // File type bits in a mode, the historical Unix values and the same on
 // every system (runtime/sys.h), in octal as they are usually written: type
@@ -274,6 +279,45 @@ pub Result<str, io.Error> readlink(str path) {
     }
 }
 
+/// The process's current directory as an absolute path: no symbolic link, no
+/// `.` or `..`, the way `getcwd(3)` and Python's `os.getcwd()` give it. The
+/// same on every system (the runtime calls the operating system's own
+/// `getcwd`; nothing reads `/proc` or `$PWD`, which a shell sets but a
+/// program can be started without).
+///
+/// A directory that was removed while the process is in it is `NotFound`
+/// (and so is one outside the process's root, after a `chroot`). A path
+/// longer than the system's limit is that system's own error, `Other(36)`
+/// (ENAMETOOLONG) on Linux, whose limit is 4096 bytes: `chdir` in several
+/// steps can get a process into a deeper directory than a path can name.
+/// A name that is not valid UTF-8 cannot be a `str` and is `InvalidUtf8`.
+/// The path is read with a buffer that doubles from 256 bytes to 1 MiB, so a
+/// long one costs nothing when it is not there; beyond that it is
+/// `Other(34)` (ERANGE).
+pub Result<str, io.Error> getcwd() {
+    int capacity = 256;
+    while (capacity <= 1048576) {
+        bytes buffer = [0; capacity];
+        int count = __getcwd(buffer);
+        if (count == -34) {
+            capacity = capacity * 2;
+            continue;
+        }
+        if (count < 0) {
+            return Result<str, io.Error>.Err(io.from_errno(-count));
+        }
+        match (buffer.substr(0, count).utf8()) {
+            case Some(str path): {
+                return Result<str, io.Error>.Ok(path);
+            }
+            case None: {
+                return Result<str, io.Error>.Err(io.Error.InvalidUtf8);
+            }
+        }
+    }
+    return Result<str, io.Error>.Err(io.from_errno(34));
+}
+
 /// The one absolute path of `path`: every symbolic link replaced by what it
 /// points to, every `.` and `..` and doubled `/` gone. Python's
 /// `os.path.realpath(p, strict=True)`.
@@ -288,10 +332,10 @@ pub Result<str, io.Error> readlink(str path) {
 /// library's `realpath` says `NotADirectory`). More than 40 links met on the
 /// way is `Other(40)` (ELOOP), the kernel's own limit.
 ///
-/// **A relative path is resolved from the current directory, which needs
-/// `/proc/self/cwd`** (Linux): the layer has no `getcwd`, and nothing in the
-/// standard library has needed one before. Where there is no `/proc` a
-/// relative path is `Other(38)` and an absolute one works as everywhere.
+/// **A relative path is resolved from the current directory**, `getcwd()`:
+/// the same on every system, with no `/proc`. If the current directory
+/// cannot be had (it was removed: `NotFound`) the relative path has no
+/// answer and that error is returned; an absolute path never asks.
 pub Result<str, io.Error> realpath(str path) {
     if (path == "") {
         return Result<str, io.Error>.Err(io.Error.NotFound);
@@ -303,14 +347,8 @@ pub Result<str, io.Error> realpath(str path) {
     List<str> resolved = [];
     str origin = path;
     if (!path.starts_with("/")) {
-        match (readlink("/proc/self/cwd")) {
-            case Ok(str here): {
-                origin = here + "/" + path;
-            }
-            case Err(io.Error error): {
-                return Result<str, io.Error>.Err(io.from_errno(38));
-            }
-        }
+        str here = getcwd()?;
+        origin = here + "/" + path;
     }
     push_components(origin, pending);
     int links = 0;

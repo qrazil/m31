@@ -1,0 +1,33 @@
+import fs;
+import io;
+
+// fs.getcwd: whatever directory the program runs in, the answer is absolute,
+// has no `.` or `..` in it, is a directory that exists, and is what
+// fs.realpath(".") (and a relative name) resolve against. Nothing here
+// depends on where that is, so the output is the same everywhere.
+match (fs.getcwd()) {
+    case Ok(str here): {
+        print(here.starts_with("/"));
+        print(fs.is_directory(here));
+        print(!here.contains("/./") && !here.contains("/../") && !here.ends_with("/.") && !here.ends_with("/.."));
+        match (fs.realpath(".")) {
+            case Ok(str real): {
+                print(real == here);
+            }
+            case Err(io.Error error): {
+                print(error.to_str());
+            }
+        }
+        match (fs.realpath("../" + here.split("/").pop())) {
+            case Ok(str real): {
+                print(real == here);
+            }
+            case Err(io.Error error): {
+                print(error.to_str());
+            }
+        }
+    }
+    case Err(io.Error error): {
+        print(error.to_str());
+    }
+}
