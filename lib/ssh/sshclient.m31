@@ -8,6 +8,10 @@
 //                                  -> Result<Session, Error>
 //   sshclient.connect_configured(host, port, user, ...)
 //                                  -> Result<Session, Error>   like `ssh` would
+//   sshclient.connect_detailed(host, port, user, ...)
+//                                  -> Result<Session, ConnectFailure>
+//   sshclient.resolve(host, port, user, ...)
+//                                  -> Result<Resolved, str>    no connection
 //   session.exec(command)          -> Result<sshexec.Channel, Error>
 //   session.banner()               -> str      the server's pre-login notice
 //   session.close()                -> Result<bool, Error>
@@ -36,6 +40,24 @@
 // of a person unless `is_interactive` is true: an unknown host is then
 // refused under the default `ask`, and a key that needs a passphrase is
 // skipped in favour of the agent.
+//
+// `connect_detailed` is `connect_configured` for a program that must show a
+// person what happened instead of printing a line (a terminal UI, a git
+// client with a confirm dialog): the same resolution and the same host-key
+// policy, but a refused host key comes back as data -- `ConnectFailure.
+// UnknownHost(PendingHost)` carries the resolved host and port, the key type,
+// the fingerprint and the `known_hosts` path, and `PendingHost.record()`
+// writes the line once the person said yes (then connect again: the second
+// connection is the same refusing check, so only the approved key can
+// succeed); `HostKeyChanged` and `HostKeyRevoked` carry the presented and the
+// listed fingerprints and have no record path. The library never trusts a
+// host key on its own: `is_interactive` false (the default) means it never
+// prompts, and what it does with an unknown host is what the configuration's
+// `StrictHostKeyChecking` says, exactly as in `connect_configured`. A program
+// that owns the terminal passes `is_silent` true so that `Warning:` lines
+// are returned in `Detail.warnings` rather than written to standard error.
+// `resolve` says what `connect_configured` would connect to, without
+// connecting.
 //
 // `Error` says which stage failed and carries that stage's own error.
 
@@ -229,6 +251,188 @@ pub Result<Session, Error> connect_configured(str host, int port, str user, List
         }
         case Err(str message): {
             return Result<Session, Error>.Err(Error.Configured(message));
+        }
+    }
+}
+
+// --- structured connection failures ------------------------------------------
+
+/// A host that `known_hosts` does not list, and the key it presented:
+/// everything a program needs to show the fingerprint and, after a yes, to
+/// record it.
+pub type PendingHost {
+    /// The host as checked (`HostName` after the configuration), and its port.
+    pub str host;
+    pub int port;
+    /// The key type, as in `known_hosts`: `ssh-ed25519`, `ecdsa-sha2-nistp256`,
+    /// `ssh-rsa`.
+    pub str key_type;
+    /// `SHA256:<unpadded base64>`, as `ssh-keygen -lf` prints it.
+    pub str fingerprint;
+    /// The file `record` appends to.
+    pub str known_hosts_path;
+    /// HashKnownHosts is set for this host: `record` writes the hashed form.
+    pub bool is_hashed;
+    ssh.HostKey key;
+}
+
+/// Appends the presented key to `known_hosts_path` (creating the file and its
+/// directory), plain or hashed as the configuration says. Call it only after
+/// a person approved `fingerprint`; the library does nothing of the kind on
+/// its own. `Err` is one line.
+pub Result<void, str> PendingHost.record() {
+    match (sshhosts.add(known_hosts_path, host, port, key, is_hashed)) {
+        case Ok(bool added): {
+            return Result<void, str>.Ok;
+        }
+        case Err(sshhosts.Error error): {
+            return Result<void, str>.Err("could not record the host key in " + known_hosts_path + ": " + error.to_str());
+        }
+    }
+}
+
+/// A host key that is not the one on file (`HostKeyChanged`) or that the file
+/// marks revoked (`HostKeyRevoked`). Never recordable: the file is not
+/// rewritten, and the person must remove the old entry by hand.
+pub type HostKeyProblem {
+    pub str host;
+    pub int port;
+    pub str key_type;
+    /// The key the server presented.
+    pub str fingerprint;
+    /// The fingerprints the file lists for this host (empty for a revoked
+    /// key).
+    pub List<str> known_fingerprints;
+    pub str known_hosts_path;
+}
+
+/// Why `connect_detailed` did not connect.
+pub enum ConnectFailure {
+    /// The host is not in `known_hosts` (and the policy did not say to trust it).
+    UnknownHost(PendingHost);
+    /// The server presented a key other than the one on file.
+    HostKeyChanged(HostKeyProblem);
+    /// The key presented, or every key on file, is marked `@revoked`.
+    HostKeyRevoked(HostKeyProblem);
+    /// Anything else: the line `connect_configured` would have returned.
+    Other(str);
+}
+
+pub str ConnectFailure.to_str() {
+    match (this) {
+        case UnknownHost(PendingHost pending): {
+            return "ssh: the authenticity of host '" + pending.host + "' can't be established (" + pending.fingerprint + ")";
+        }
+        case HostKeyChanged(HostKeyProblem problem): {
+            return "ssh: host key for " + problem.host + " has changed (" + problem.fingerprint + ")";
+        }
+        case HostKeyRevoked(HostKeyProblem problem): {
+            return "ssh: host key for " + problem.host + " is revoked (" + problem.fingerprint + ")";
+        }
+        case Other(str message): {
+            return "ssh: " + message;
+        }
+    }
+}
+
+/// What `connect_detailed` collects besides its result: the `Warning:` lines
+/// when `is_silent` was true. Hold the object and read it afterwards.
+pub type Detail {
+    pub bool is_silent;
+    pub List<str> warnings = [];
+}
+
+// The failure for `message`, structured when the host-key check said why.
+ConnectFailure failure_of(sshconnect.Report report, str message) {
+    if (report.refusal == "" || report.presented.size() == 0) {
+        return ConnectFailure.Other(message);
+    }
+    ssh.HostKey key = report.presented[0];
+    if (report.refusal == "unknown") {
+        return ConnectFailure.UnknownHost(PendingHost(report.refusal_host, report.refusal_port, key.algorithm, key.fingerprint(), report.refusal_path, report.is_hashed, key));
+    }
+    HostKeyProblem problem = HostKeyProblem(report.refusal_host, report.refusal_port, key.algorithm, key.fingerprint(), report.known_fingerprints, report.refusal_path);
+    if (report.refusal == "changed") {
+        return ConnectFailure.HostKeyChanged(problem);
+    }
+    return ConnectFailure.HostKeyRevoked(problem);
+}
+
+/// `connect_configured` with the failure as data. The arguments are the same
+/// (see there), plus:
+///
+/// * `is_quiet` is `m31ssh --quiet`: the notices that option hides (the
+///   server banner, "permanently added", unsupported-option warnings) are not
+///   produced;
+/// * `detail`: pass a `Detail(is_silent: true)` to have every remaining
+///   `Warning:` line appended to `detail.warnings` instead of being written to
+///   standard error, which a program with the terminal in raw mode must not
+///   have written under it.
+///
+/// With `is_interactive` false (the default) nothing is ever asked of a
+/// person and nothing is read from the terminal. An unknown host is
+/// `UnknownHost` under the default policy; this function never decides to
+/// trust a host key itself.
+pub Result<Session, ConnectFailure> connect_detailed(str host, int port, str user, List<str> identities = [], List<str> options = [], str config_file = "", bool is_interactive = false, int timeout_ms = 0, bool is_quiet = false, Detail detail = Detail(false)) {
+    sshconnect.Params parameters = sshconnect.Params(host, port, user, identities, options, config_file, "", is_quiet, is_interactive);
+    sshconnect.Report report = sshconnect.Report(is_silent: detail.is_silent);
+    Result<sshconnect.Connection, str> outcome = sshconnect.connect_reporting(parameters, report);
+    for (str line in report.warnings) {
+        detail.warnings.push(line);
+    }
+    match (outcome) {
+        case Ok(sshconnect.Connection connection): {
+            Session session = Session(connection.transport, "");
+            if (timeout_ms > 0) {
+                match (session.set_read_timeout(timeout_ms)) {
+                    case Ok: {
+                    }
+                    case Err(Error error): {
+                        return Result<Session, ConnectFailure>.Err(ConnectFailure.Other(error.to_str()));
+                    }
+                }
+            }
+            return Result<Session, ConnectFailure>.Ok(session);
+        }
+        case Err(str message): {
+            return Result<Session, ConnectFailure>.Err(failure_of(report, message));
+        }
+    }
+}
+
+/// What a destination resolves to under `~/.ssh/config` (or `config_file`),
+/// with `Include`s expanded, `options` applied and the explicit `host`, `port`
+/// (0: the configuration's) and `user` ("": the configuration's) given.
+pub type Resolved {
+    pub str alias;
+    /// `HostName`, or `alias`.
+    pub str host;
+    pub int port;
+    pub str user;
+    /// `IdentityFile`s in order, or the default key files when none is
+    /// configured (`is_default_identities`).
+    pub List<str> identity_files;
+    pub bool is_default_identities;
+    /// `UserKnownHostsFile`, else `~/.ssh/known_hosts`.
+    pub str known_hosts_file;
+    /// `StrictHostKeyChecking`: yes, ask (the default), accept-new or no.
+    pub str host_key_policy;
+    pub bool is_hashed;
+    /// `ProxyJump` hops as `host:port`, outermost first.
+    pub List<str> jump_hosts;
+}
+
+/// Resolves a destination like `connect_configured` would, without
+/// connecting or writing anything. `Err` is the configuration error line
+/// `connect_configured` would return.
+pub Result<Resolved, str> resolve(str host, int port = 0, str user = "", List<str> identities = [], List<str> options = [], str config_file = "") {
+    sshconnect.Params parameters = sshconnect.Params(host, port, user, identities, options, config_file, "", true, false);
+    match (sshconnect.resolve(parameters)) {
+        case Ok(sshconnect.Resolved found): {
+            return Result<Resolved, str>.Ok(Resolved(found.alias, found.host, found.port, found.user, found.identity_files, found.is_default_identities, found.known_hosts_file, found.host_key_policy, found.is_hashed, found.jump_hosts));
+        }
+        case Err(str message): {
+            return Result<Resolved, str>.Err(message);
         }
     }
 }

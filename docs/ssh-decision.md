@@ -261,3 +261,76 @@ hashed, new directory, no trailing newline) are found by `ssh-keygen -F` and
 accepted by the real `ssh` with `StrictHostKeyChecking=yes`; a second sshd
 with a different host key makes a changed key a `HostKeyMismatch`, which the
 real `ssh` also refuses.
+
+## Structured connection failures (`sshclient.connect_detailed`)
+
+`connect_configured` reports a host-key problem as `Error.Configured(line)`,
+which a program with a confirm dialog would have to parse. The sibling
+`sshclient.connect_detailed` returns `Result<Session, ConnectFailure>`
+instead, and changes nothing else: same resolution (`sshconnect.prepare`,
+the code `connect` always ran), same host-key policy, same agent and
+identity handling. `connect_configured`, `Error` and `m31ssh`, `m31scp` and
+`m31sftp` (which call `sshconnect.connect`) are untouched.
+
+```
+pub enum ConnectFailure {
+    UnknownHost(PendingHost);        // not in known_hosts
+    HostKeyChanged(HostKeyProblem);  // another key than the file's
+    HostKeyRevoked(HostKeyProblem);  // the key, or every key, is @revoked
+    Other(str);                      // the line connect_configured gives
+}
+```
+
+**What is data and what is still policy.** The failure only *reports* the
+decision the existing check already made; no outcome changed. In
+particular the library still never trusts a host key on its own:
+
+- `is_interactive` false (the default) means nothing is read from the
+  terminal and no prompt is written. Under the default `ask` an unknown host
+  is `UnknownHost` and the file is not written. (`StrictHostKeyChecking
+  yes` is also reported as `UnknownHost`; the person's answer is the same
+  `PendingHost.record()` and a second connection.)
+- `accept-new` and `no` in the person's own `ssh_config` still record the key
+  on first use, exactly as `connect_configured` and `ssh` do: that is the
+  person's configuration, not a decision of the library. A caller that wants
+  to make every unknown host a question refuses those policies itself, after
+  `resolve` (below) shows `host_key_policy`.
+- `HostKeyChanged` and `HostKeyRevoked` have no record path: the file is
+  never rewritten and the caller has nothing to call.
+
+**`PendingHost`** carries the *resolved* host (`HostName` after the
+configuration) and port, the key type (`ssh-ed25519`, ...), the
+`SHA256:` fingerprint `ssh-keygen -lf` prints, the `known_hosts` path, whether
+`HashKnownHosts` applies, and the key itself. `record()` appends the line
+(`sshhosts.add`, plain or hashed) and nothing else; the flow is
+`connect_detailed` -> `UnknownHost` -> show -> on yes `record()` -> connect
+again. The second connection is the same refusing check, so only the key the
+person approved can succeed. `HostKeyProblem` carries the same fields minus
+`record`, plus the fingerprints the file lists for the host.
+
+**Mechanism.** The host-key check (`HostCheck`) writes the facts into a
+`sshconnect.Report` the caller holds, at the moment it refuses; the
+`Err(str)` line is unchanged. There is no module state (`docs/module-state-
+decision.md`): the report is an object passed down. A jump host's refusal is
+reported with that hop's host and port.
+
+**`Warning:` lines.** `Detail(is_silent: true)` collects every `Warning:`
+line in `detail.warnings` and writes nothing to standard error, for a
+program that has the terminal in raw mode. `is_quiet` is `m31ssh --quiet`
+passed through: it hides the notices that option always hid (the server
+banner, "permanently added", unsupported-option warnings); a warning
+`--quiet` never hid (a loose key file, an unreachable agent) still appears,
+and `is_silent` routes it. The one thing `is_silent` does not touch is the
+interactive prompt, which is only ever written when `is_interactive` is
+true.
+
+**`sshclient.resolve(host, port:, user:, identities:, options:,
+config_file:)`** returns `Resolved` (alias, `host`, `port`, `user`,
+`identity_files` and whether they are the defaults, `known_hosts_file`,
+`host_key_policy`, `is_hashed`, `jump_hosts`), after `Include` expansion,
+without connecting, reading a key or writing a file.
+
+Tested live in `tests/ssh/test_client_failure.sh` against a disposable `sshd`:
+fingerprints equal `ssh-keygen -lf`, the recorded line (plain and hashed) is
+found by `ssh-keygen -F`, a changed or revoked key leaves the file byte
+for byte as it was, a silent connection writes nothing to stderr.

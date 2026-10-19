@@ -11,6 +11,27 @@ The release workflow now publishes a `SHA256SUMS` file beside the platform
 tarballs, so an installer can check what it downloads. v0.7.0 has one
 uploaded by hand.
 
+### Added
+
+- `sshclient.connect_detailed`: `connect_configured` with the failure as data
+  (`ConnectFailure`: `UnknownHost(PendingHost)`, `HostKeyChanged`,
+  `HostKeyRevoked`, `Other(str)`), so a program can show a confirm overlay
+  instead of parsing a line. `PendingHost` carries the resolved host, port, key
+  type, fingerprint and `known_hosts` path and has `record()` for after the
+  person said yes. `Detail(is_silent: true)` collects `Warning:` lines instead
+  of writing to standard error; `is_quiet` is passed through. Never prompts
+  unless `is_interactive`, and never trusts a host key on its own: the
+  host-key policy is unchanged, only reported (`docs/ssh-decision.md`,
+  "Structured connection failures").
+- `sshclient.resolve`: the host, port, user, identity files, `UserKnownHostsFile`
+  and `StrictHostKeyChecking` a destination resolves to, after `Include`
+  expansion, without connecting.
+- `sshconnect.connect_reporting` and `sshconnect.resolve` under them.
+  `connect_configured`, `sshconnect.connect`, `Error` and `m31ssh`, `m31scp`,
+  `m31sftp` are unchanged.
+
+## 0.6.0 (unreleased)
+
 ## 0.7.0 (2026-10-18)
 
 ### Added -- streamed bodies on the server side

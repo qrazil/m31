@@ -1,0 +1,137 @@
+import ssh;
+import ssh.sshclient;
+import ssh.sshexec;
+import os;
+
+// The program half of tests/ssh/test_client_failure.sh: `connect_detailed`
+// and `resolve`, everything from the environment (HOME, ~/.ssh/config).
+//
+//   connect HOST PORT USER silent|loud|quiet
+//                                        one connection attempt (quiet: is_quiet)
+//   approve HOST PORT USER               connect; on UnknownHost record the
+//                                        key (a person said yes) and connect
+//                                        again
+//   twice HOST PORT USER                 two attempts in one program
+//   resolve HOST PORT USER               what the destination resolves to
+//
+// "-" for USER means the configuration's.
+
+void show_failure(sshclient.ConnectFailure failure) {
+    match (failure) {
+        case UnknownHost(sshclient.PendingHost pending): {
+            print("unknown " + pending.host + " " + pending.port.to_str() + " " + pending.key_type + " " + pending.fingerprint + " " + pending.known_hosts_path + " hashed=" + pending.is_hashed.to_str());
+        }
+        case HostKeyChanged(sshclient.HostKeyProblem problem): {
+            print("changed " + problem.host + " " + problem.port.to_str() + " " + problem.key_type + " " + problem.fingerprint + " known=" + problem.known_fingerprints.join(",") + " " + problem.known_hosts_path);
+        }
+        case HostKeyRevoked(sshclient.HostKeyProblem problem): {
+            print("revoked " + problem.host + " " + problem.port.to_str() + " " + problem.key_type + " " + problem.fingerprint + " known=" + problem.known_fingerprints.join(",") + " " + problem.known_hosts_path);
+        }
+        case Other(str message): {
+            print("other " + message);
+        }
+    }
+}
+
+// One attempt; the output of `echo hi` on success.
+Result<void, sshclient.ConnectFailure> attempt(str host, int port, str user, bool is_silent, bool is_quiet = false) {
+    sshclient.Detail detail = sshclient.Detail(is_silent);
+    Result<sshclient.Session, sshclient.ConnectFailure> outcome = sshclient.connect_detailed(host, port, user, is_quiet: is_quiet, detail: detail);
+    for (str line in detail.warnings) {
+        print("warning-line " + line);
+    }
+    match (outcome) {
+        case Ok(sshclient.Session session): {
+            match (session.exec("echo hi")) {
+                case Ok(sshexec.Channel channel): {
+                    match (channel.read_all()) {
+                        case Ok(bytes data): {
+                            print("connected " + data.utf8().or("?").trim());
+                        }
+                        case Err(sshexec.Error error): {
+                            print("read failed " + error.to_str());
+                        }
+                    }
+                    match (channel.wait()) {
+                        case Ok(sshexec.Exit status): {
+                        }
+                        case Err(sshexec.Error error): {
+                        }
+                    }
+                }
+                case Err(sshclient.Error error): {
+                    print("exec failed " + error.to_str());
+                }
+            }
+            match (session.close()) {
+                case Ok(bool done): {
+                }
+                case Err(sshclient.Error error): {
+                }
+            }
+            return Result<void, sshclient.ConnectFailure>.Ok;
+        }
+        case Err(sshclient.ConnectFailure failure): {
+            show_failure(failure);
+            return Result<void, sshclient.ConnectFailure>.Err(failure);
+        }
+    }
+}
+
+List<str> argv = os.arguments();
+str mode = argv[1];
+str host = argv[2];
+int port = argv[3].parse_int().or(0);
+str user = argv[4];
+if (user == "-") {
+    user = "";
+}
+if (mode == "connect") {
+    Result<void, sshclient.ConnectFailure> done = attempt(host, port, user, argv[5] == "silent", is_quiet: argv[5] == "quiet");
+} else if (mode == "twice") {
+    Result<void, sshclient.ConnectFailure> first = attempt(host, port, user, true);
+    Result<void, sshclient.ConnectFailure> second = attempt(host, port, user, true);
+} else if (mode == "approve") {
+    match (attempt(host, port, user, true)) {
+        case Ok: {
+        }
+        case Err(sshclient.ConnectFailure failure): {
+            match (failure) {
+                case UnknownHost(sshclient.PendingHost pending): {
+                    match (pending.record()) {
+                        case Ok: {
+                            print("recorded");
+                        }
+                        case Err(str message): {
+                            print("record failed " + message);
+                        }
+                    }
+                    Result<void, sshclient.ConnectFailure> again = attempt(host, port, user, true);
+                }
+                case HostKeyChanged(sshclient.HostKeyProblem problem): {
+                }
+                case HostKeyRevoked(sshclient.HostKeyProblem problem): {
+                }
+                case Other(str message): {
+                }
+            }
+        }
+    }
+} else if (mode == "resolve") {
+    match (sshclient.resolve(host, port: port, user: user)) {
+        case Ok(sshclient.Resolved found): {
+            print("alias=" + found.alias);
+            print("host=" + found.host);
+            print("port=" + found.port.to_str());
+            print("user=" + found.user);
+            print("identities=" + found.identity_files.join(",") + " default=" + found.is_default_identities.to_str());
+            print("known_hosts=" + found.known_hosts_file);
+            print("policy=" + found.host_key_policy);
+            print("hashed=" + found.is_hashed.to_str());
+            print("jumps=" + found.jump_hosts.join(","));
+        }
+        case Err(str message): {
+            print("resolve failed " + message);
+        }
+    }
+}
