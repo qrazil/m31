@@ -1,0 +1,56 @@
+// A field or element read straight out of a frozen object is passed to a
+// call without the caller retaining it (src/middle/lower/hold.rs,
+// `frozen_place`): while the object is frozen nothing can overwrite the
+// place, so the value it holds stays alive for the whole call. These calls
+// must behave, and release, exactly as the held ones did -- inside a `const`
+// block, through a `const` local, out of a module constant -- beside the
+// reads that are still held: one step deeper (`h.ps[1]`, whose list the
+// block did not freeze), and the same read after the block, where the
+// object can change once more.
+
+type P {
+    int x;
+}
+
+type H {
+    P p;
+    List<P> ps;
+    Map<str, P> m;
+}
+
+const List<List<str>> NAMES = [["ada", "bob"], ["cy"]];
+
+int sum(P a, H h) {
+    return a.x * 100 + h.p.x * 10 + h.ps.size();
+}
+
+str shout(str s, H h) {
+    return concat(s, "!");
+}
+
+void run() {
+    Map<str, P> m = {};
+    m.set("k", P(4));
+    H h = H(P(1), [P(2), P(3)], m);
+    const h {
+        print(sum(h.p, h));
+        print(sum(h.ps[1], h));
+        print(h.m.contains("k"));
+        print(sum(h.p, H(P(7), h.ps, h.m)));
+    }
+    // Mutable again: replace the field the reads above were taken from.
+    h.p = P(5);
+    h.ps.push(P(6));
+    print(sum(h.p, h));
+    List<P> ps = [P(2), P(3)];
+    const ps {
+        print(sum(ps[1], h));
+    }
+    const H c = H(P(8), [P(9)], {});
+    print(sum(c.p, c));
+    print(sum(c.ps[0], c));
+    print(shout(NAMES[0][1], h));
+    print(shout(NAMES[1][0], c));
+}
+
+run();

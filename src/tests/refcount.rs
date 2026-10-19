@@ -173,3 +173,102 @@ fn a_releasing_receiver_is_held_only_when_a_destructor_exists() {
     let g = func_ir(&with, "g");
     assert_eq!(g.matches("rc_inc").count(), 1, "{g}");
 }
+
+#[test]
+fn a_field_of_a_const_local_is_not_held() {
+    // The object a `const` local names is frozen for as long as the name is
+    // in scope, so nothing -- `f` included -- can overwrite `c.p`: the store
+    // traps first. The only traffic is the local's own +1 and its release.
+    let out = ir(&format!(
+        "{HOLD_DECLS}void g(H h) {{ const H c = h; f(c.p, c); }}\n"
+    ));
+    let g = func_ir(&out, "g");
+    let call = g.find("call f(").unwrap();
+    assert!(!g[..call].contains("rc_inc v2"), "c.p is not held:\n{g}");
+    assert_eq!(g.matches("rc_inc").count(), 1, "{g}");
+    assert_eq!(g.matches("rc_dec").count(), 1, "{g}");
+}
+
+#[test]
+fn a_field_of_a_value_frozen_by_a_const_block_is_held_only_outside_it() {
+    // Inside `const h { .. }` the object is frozen until the block ends,
+    // which cannot happen in the middle of the call: no hold. The same
+    // expression after the block is an ordinary place read, and is held.
+    let out = ir(&format!(
+        "{HOLD_DECLS}void g(H h) {{ const h {{ f(h.p, h); }} f(h.p, h); }}\n"
+    ));
+    let g = func_ir(&out, "g");
+    let leave = g.find("call rt_freeze_leave(").unwrap();
+    let (inside, after) = g.split_at(leave);
+    assert!(inside.contains("call rt_freeze_enter("), "{g}");
+    assert!(inside.contains("call f("), "{g}");
+    assert!(
+        !inside.contains("rc_inc") && !inside.contains("rc_dec"),
+        "{g}"
+    );
+    assert_eq!(after.matches("rc_inc").count(), 1, "{g}");
+    assert_eq!(after.matches("rc_dec").count(), 1, "{g}");
+}
+
+#[test]
+fn a_field_of_a_mutable_local_is_still_held() {
+    // `m` names the same object as the parameter, but nothing froze it.
+    let out = ir(&format!(
+        "{HOLD_DECLS}void g(H h) {{ H m = h; f(m.p, m); }}\n"
+    ));
+    let g = func_ir(&out, "g");
+    let call = g.find("call f(").unwrap();
+    // `m`'s own retain, then the hold on `m.p`; two releases after.
+    assert_eq!(g[..call].matches("rc_inc").count(), 2, "{g}");
+    assert_eq!(g[call..].matches("rc_dec").count(), 2, "{g}");
+}
+
+#[test]
+fn only_the_first_step_out_of_a_frozen_root_is_unheld() {
+    // A `const` block freezes the named object alone: `o.h` is not frozen,
+    // so `o.h.p` can still be overwritten while `o` cannot, and is held.
+    // An element of a frozen list is not; a promoted field, read through
+    // the embedded object, is held like any field of an unfrozen object.
+    let out = ir(&format!(
+        "{HOLD_DECLS}type O {{ H h; }}\n\
+         type E {{ P q; }}\n\
+         type W {{ E; }}\n\
+         void j(P p, O o) {{ o.h.p = P(1); print(p.x); }}\n\
+         void E.reset() {{ q = P(1); }}\n\
+         void m(P p, W w) {{ w.reset(); print(p.x); }}\n\
+         void deep(O o) {{ const o {{ j(o.h.p, o); }} }}\n\
+         void elem(List<P> xs, H h) {{ const xs {{ f(xs[0], h); }} }}\n\
+         void promoted(W w) {{ const w {{ m(w.q, w); }} }}\n"
+    ));
+    let deep = func_ir(&out, "deep");
+    assert_eq!(deep.matches("rc_inc").count(), 1, "{deep}");
+    let elem = func_ir(&out, "elem");
+    assert_eq!(elem.matches("rc_inc").count(), 0, "{elem}");
+    let promoted = func_ir(&out, "promoted");
+    assert_eq!(promoted.matches("rc_inc").count(), 1, "{promoted}");
+}
+
+#[test]
+fn a_field_read_through_the_receiver_is_still_held() {
+    // Whether `this` is frozen is the caller's knowledge: nothing at the
+    // call site inside the method can show it, so a bare field is held.
+    let out = ir(&format!(
+        "{HOLD_DECLS}void H.go() {{ f(p, this); }}\n\
+         void g(H h) {{ const h {{ h.go(); }} }}\n"
+    ));
+    let go = func_ir(&out, "H.go");
+    assert_eq!(go.matches("rc_inc").count(), 1, "{go}");
+}
+
+#[test]
+fn an_element_of_a_module_constant_is_not_held() {
+    // A constant's graph is static and immortal, at every depth.
+    let out = ir(&format!(
+        "{HOLD_DECLS}const List<List<str>> T = [[\"a\"], [\"b\"]];\n\
+         void say(str s, H h) {{ h.s = s; print(s); }}\n\
+         void g(H h) {{ say(T[1][0], h); }}\n"
+    ));
+    let g = func_ir(&out, "g");
+    assert_eq!(g.matches("rc_inc").count(), 0, "{g}");
+    assert_eq!(g.matches("rc_dec").count(), 0, "{g}");
+}

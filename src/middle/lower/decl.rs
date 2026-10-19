@@ -496,6 +496,7 @@ impl Lowerer {
         // name a different value entirely.
         self.stmt_temps.clear();
         self.freezes.clear();
+        self.snapshots.clear();
         self.synth = 0;
         self.cur = 0;
         self.ret_ty = f.ret;

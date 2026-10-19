@@ -3,6 +3,25 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased
+
+### Changed
+
+- **A field or element of a frozen object is passed without a retain.** A
+  call argument (or any other operand) read out of a place is held -- an
+  `rc_inc` after the load and an `rc_dec` after the operation -- so the callee
+  cannot free it by overwriting the place (docs/ir-v0.md §5.1). A place in a
+  frozen object cannot be overwritten, since the store traps first, so that
+  pair is now skipped for any chain of elements read out of a module constant
+  (`T[i][j]`), and for one step -- a field declared on the type, or a List or
+  Array element -- out of a local or parameter that an active `const` block
+  names or that a `const` declaration bound (`const h { f(h.p, h); }`). Deeper
+  reads (`h.q.p`, `h.ps[i]`), promoted fields and fields read through `this`
+  are still held: a `const` block freezes the named object alone, and a
+  snapshot can share a part only a `const` block froze
+  (`frozen_place` in src/middle/lower/hold.rs; corpus
+  `1313-frozen-place-argument-is-not-held`, trap
+  `1314-frozen-place-argument-overwrite-traps`).
 ## 0.9.0 (2026-10-19)
 
 Additive; nothing existing changes.

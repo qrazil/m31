@@ -62,6 +62,7 @@ impl Lowerer {
                         func: "rt_snapshot".to_string(),
                         args: vec![val.val()],
                     });
+                    self.snapshots.push(d);
                     d
                 } else {
                     val.val()

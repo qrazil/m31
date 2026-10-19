@@ -1,0 +1,26 @@
+// `h.p` is passed without the caller retaining it, because `h` is frozen for
+// the block (src/middle/lower/hold.rs, `frozen_place`). That is safe only
+// because the callee cannot replace the field: the store traps before the
+// old value could be released, so `p` is never read after being freed.
+
+type P {
+    int x;
+}
+
+type H {
+    P p;
+}
+
+void f(P p, H h) {
+    h.p = P(0);
+    print(p.x);
+}
+
+void run() {
+    H h = H(P(1));
+    const h {
+        f(h.p, h);
+    }
+}
+
+run();

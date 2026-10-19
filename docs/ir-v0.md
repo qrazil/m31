@@ -224,6 +224,23 @@ code" is syntactic and conservative: any call, construction or `?` can; a
 field, element or local read, a literal and a built-in operator cannot. The
 rule and its reasoning live in `src/middle/lower/hold.rs`.
 
+A hold is also skipped when the place cannot be written while the operation
+runs, because the object it is read from is frozen (docs/const-decision.md)
+and a store into a frozen object traps before anything is released:
+
+  - any chain of elements read out of a module constant (`T[i]`, `G[i][j]`,
+    `lib.T[i]`): a constant's whole graph is static and immortal;
+  - ONE step -- a field declared on the type itself (`c.p`), or an element
+    of a List or an Array (`xs[i]`) -- out of a local or parameter that is
+    named by a `const` block active at that point, or that was bound by a
+    `const` declaration.
+
+Only one step for the second, because a `const` block freezes the named
+object alone and a snapshot shares, unfrozen-by-it, any part of the graph a
+`const` block had already frozen. So `h.q.p`, `h.ps[i]` and a promoted
+field stay held, as does a field read through `this` or a bare field name
+inside a method: whether the receiver is frozen is not visible there.
+
 ### 5.2 Returns are **owned (+1)**
 
 The callee hands back a value the caller is responsible for eventually

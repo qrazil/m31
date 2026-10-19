@@ -414,6 +414,27 @@ Recorded here rather than fixed silently because the hoisting pass does not
 exist yet, and whoever writes it would otherwise find the old justification
 and believe it.
 
+### What the compiler already relies on: one step out of a frozen object
+
+The caller's hold on a borrowed argument (docs/ir-v0.md §5.1) is skipped for
+a place that cannot be overwritten during the call: a direct field or List
+element of a local or parameter named by an active `const` block or bound
+by a `const` declaration, and any element chain out of a module constant
+(`frozen_place`, src/middle/lower/hold.rs). Only one step is trusted, and
+the reason is worth stating because it is narrower than this record's
+"freezes the object and everything reachable from it":
+
+  - `rt_freeze_enter` sets the flag on the named object alone. Inside
+    `const h { .. }`, `h.p = x` traps but `h.q.p = x` does not.
+  - `rt_snapshot` leaves out of its walk any object already frozen, so a
+    snapshot can share a part that only a `const` block froze, and that part
+    thaws when the block ends.
+
+So `h.p` is safe to borrow while `h` is frozen, and `h.q.p` is not, and the
+compiler holds the latter. Whether the block form should freeze deeply, as
+the reference's wording suggests, is a separate question; the hold rule does
+not depend on the answer.
+
 ---
 
 ## What is open

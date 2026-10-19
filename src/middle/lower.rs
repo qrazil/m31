@@ -230,6 +230,14 @@ pub struct Lowerer {
     /// blocks without unwinding this call stack, so each of those emits the
     /// restoring calls itself (`restore_freezes_to`) before jumping.
     freezes: Vec<(Value, Value)>,
+    /// The values `rt_snapshot` returned for the `const` locals bound so far
+    /// in this function: the object each such name holds is frozen for as
+    /// long as the name is in scope, which is what lets a direct field or
+    /// element read through it go unheld (src/middle/lower/hold.rs,
+    /// `frozen_place`). Only ever consulted together with the binding's
+    /// `is_const` bit -- a mutable local can be assigned the same value and
+    /// outlive the freeze -- and cleared per function, like `freezes`.
+    snapshots: Vec<Value>,
     loops: Vec<LoopCtx>,
     /// The loop variables of the `for` loops currently being lowered,
     /// innermost last. They are bound `const`, like any other name that
@@ -831,6 +839,7 @@ impl Lowerer {
             owned: Vec::new(),
             stmt_temps: Vec::new(),
             freezes: Vec::new(),
+            snapshots: Vec::new(),
             loops: Vec::new(),
             loop_vars: Vec::new(),
             synth: 0,
