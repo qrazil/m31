@@ -1,6 +1,6 @@
 [package]
 name = "m31c"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2021"
 
 # No dependencies. Not "few" -- none. The whole compiler is std Rust, and the

@@ -3,6 +3,26 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## 0.9.0 (2026-10-19)
+
+Recommended version: 0.9.0 (additive; nothing existing changes).
+
+### Added
+
+- `term.Reader.read_keys(timeout_ms, escape_ms)`: `read` with the escape wait
+  as its own number. A held incomplete prefix (a lone ESC, half of
+  `ESC [ 1 ; 5 A`) is resolved only after `escape_ms` of no further input,
+  restarted by every arrival, and `timeout_ms` bounds the call: when it runs
+  out first the answer is `Timeout` and the prefix stays held with its
+  escape wait still running, so the next call continues it. A loop with a
+  ticker passes its tick as `timeout_ms` and a fixed 25 to 50 as
+  `escape_ms`: a lone Escape no longer takes 1 to one tick to resolve
+  and a sequence split by a slow link no longer comes out as Escape plus characters.
+  Zero and negative values are documented on the method. `read` is
+  unchanged. `Reader.pending()` already existed and says whether a prefix is
+  held. Tested by `runtime/tests/term_keys_wait_test.sh` (a pipe with delayed
+  writes), which `gates.sh` runs.
+
 ## 0.8.1 (2026-10-19)
 
 ### Fixed

@@ -1,0 +1,78 @@
+import io;
+import os;
+import term;
+import text;
+import timer;
+
+// The program runtime/tests/term_keys_wait_test.sh drives over a pipe on
+// standard input, writing to it at chosen times. A pipe is enough: the
+// reader waits on any descriptor, and raw mode is not involved.
+//
+// Arguments are triples, `KIND A B`, run in order:
+//
+//   k T E    term.Reader.read_keys(T, E)
+//   r T 0    term.Reader.read(T)
+//   s MS 0   sleep MS milliseconds
+//
+// Each `k` and `r` prints one line on standard error, which is flushed as
+// it is written: `<n> <outcome> pending=<held bytes> t=<ms>`, where t is
+// the milliseconds since `ready` was printed. The driver starts its clock
+// at the `ready` line, so t is never smaller than the driver's own reading:
+// a lower bound that passes is a real one.
+
+int to_number(str word) {
+    match (text.parse_int(word)) {
+        case Ok(int value): {
+            return value;
+        }
+        case Err(_): {
+            trap("not a number: " + word);
+        }
+    }
+}
+
+// arguments[0] is the program itself.
+List<str> arguments = os.arguments();
+term.Reader reader = term.reader();
+int origin = timer.monotonic_ns();
+io.eprint("ready");
+int line_number = 0;
+int cursor = 1;
+while (cursor + 2 < arguments.size()) {
+    str kind = arguments[cursor];
+    int first = to_number(arguments[cursor + 1]);
+    int second = to_number(arguments[cursor + 2]);
+    cursor = cursor + 3;
+    if (kind == "s") {
+        timer.sleep_ms(first);
+        continue;
+    }
+    Result<term.Input, term.Error> result = Result<term.Input, term.Error>.Err(term.Error.NotATerminal);
+    if (kind == "k") {
+        result = reader.read_keys(first, second);
+    } else {
+        result = reader.read(first);
+    }
+    int elapsed = (timer.monotonic_ns() - origin) / 1000000;
+    str outcome = "";
+    match (result) {
+        case Ok(term.Input got): {
+            match (got) {
+                case Got(term.Event event): {
+                    outcome = "got " + event.to_str();
+                }
+                case Timeout: {
+                    outcome = "timeout";
+                }
+                case End: {
+                    outcome = "end";
+                }
+            }
+        }
+        case Err(term.Error failure): {
+            outcome = "error " + failure.to_str();
+        }
+    }
+    line_number = line_number + 1;
+    io.eprint(line_number.to_str() + " " + outcome + " pending=" + reader.pending().to_str() + " t=" + elapsed.to_str());
+}

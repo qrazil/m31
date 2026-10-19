@@ -151,6 +151,9 @@ run "socket timeouts do not stall carriers" bash runtime/tests/net_timeout_stall
 # each on ONE and on TWO carriers, against the corpus's own expected output.
 run "parked waits on 1 and 2 carriers" bash runtime/tests/parked_waits_carriers_test.sh
 run "terminal reads park only the green thread" bash runtime/tests/term_wait_test.sh
+# term.Reader.read_keys: the escape wait is separate from the timeout, over a
+# pipe with delayed writes (lower bounds strict, upper bounds loose).
+run "term read_keys escape wait" bash runtime/tests/term_keys_wait_test.sh
 
 # Child processes (docs/proc-decision.md): lib/proc.m31 over the sys layer's
 # pipes and the reactor, against Python's subprocess module and coreutils,

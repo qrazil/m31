@@ -22,7 +22,9 @@
 ///     table of real sequences with no terminal anywhere near it.
 ///   - **`Reader`**, the `Decoder` over a descriptor, with a timeout. An
 ///     event loop that also has other work to do polls with `read(0)` or
-///     `read(16)` rather than blocking.
+///     `read(16)` rather than blocking. `read_keys(timeout, escape)` is the
+///     read for a loop with a ticker: the time to wait for a key and the
+///     time a lone Escape waits for company are two numbers there.
 ///   - **`Writer`**, a buffer that goes to the terminal as ONE write. A
 ///     redrawing program builds its whole frame and flushes it; a write per
 ///     cell is what makes a terminal application flicker.
@@ -83,6 +85,7 @@ import io;
 prim int __read(int descriptor, bytes buffer, int off, int byte_count);
 prim int __write_str(int descriptor, str text, int off, int byte_count);
 prim int __wait_io_timeout(int descriptor, int events, int timeout_ms);
+prim int __clock_monotonic();
 prim void __out_flush();
 // The terminal itself.
 prim int __isatty(int descriptor);
@@ -1115,7 +1118,7 @@ Step paste(bytes input, int from, bool is_last) {
 }
 
 // --- reading ---------------------------------------------------------------
-/// What one call to `Reader.read` found.
+/// What one call to `Reader.read` or `Reader.read_keys` found.
 ///
 /// Three outcomes and not an `Option<Event>`, because "nothing yet" and "the
 /// terminal is gone" are different answers and an event loop acts differently
@@ -1135,6 +1138,11 @@ pub type Reader {
     int descriptor;
     Decoder dec = decoder();
     bytes buffer = [0; CHUNK];
+    // Monotonic nanoseconds at which the escape wait of the held prefix
+    // began (the last arrival of bytes, or the first `read_keys` call that
+    // found one held), or -1 when no escape wait is running. Only
+    // `read_keys` looks at it.
+    int escape_from = -1;
 }
 
 /// How many undecoded bytes are held. A loop that wants to drain what has
@@ -1219,6 +1227,124 @@ pub Result<Input, Error> Reader.read(int timeout_ms) {
             return Result<Input, Error>.Ok(finish(Input.End));
         }
         dec.feed(buffer.substr(0, read_result));
+    }
+}
+
+/// `read` with an escape wait that is its own, and not the timeout: the next
+/// event, waiting at most `timeout_ms` for it, where an unfinished sequence
+/// is resolved only after `escape_ms` of no further input.
+///
+/// This is the read for a loop that has a ticker. `read`'s one timeout does
+/// two jobs -- how long to wait for a key and how long a lone Escape may
+/// wait for company -- so a loop that wakes every 100 ms to redraw would
+/// resolve an Escape 1 to 100 ms after the key, and a sequence split by a
+/// slow link would come out as Escape and characters. Here the loop passes
+/// its tick as `timeout_ms` and a fixed 25 to 50 as `escape_ms`.
+///
+///   - Whole events are returned at once, whatever `escape_ms` is.
+///   - **`escape_ms` runs from the last arrival of bytes.** A prefix is
+///     resolved (a bare ESC becomes `Escape`, as `flush` says) only when
+///     `escape_ms` have passed with nothing more arriving; every arrival
+///     restarts it, as a slow `ESC [ 1 ; 5 A` needs. A prefix already held
+///     when the call is made -- left by `read(0)`, say -- starts its wait at
+///     the call.
+///   - **`timeout_ms` is the whole call and is not restarted.** When it runs
+///     out the answer is `Timeout` and **a held prefix stays held, with its
+///     escape wait still running**: the next call continues it, counting the
+///     time between the calls, so a ticker can keep ticking while an Escape
+///     is being waited out. When `timeout_ms` is the shorter of the two the
+///     call returns `Timeout` at `timeout_ms`; when the escape wait is
+///     shorter it returns the resolved event at `escape_ms`. If the escape
+///     wait has run out by the time of a call, the first look at the
+///     descriptor finds nothing more and the prefix is resolved.
+///   - **`timeout_ms` 0** reads what has arrived already, waiting for
+///     nothing, and resolves a held prefix only if its escape wait has run
+///     out. It never resolves a prefix that arrived less than `escape_ms`
+///     ago, unlike `escape_ms` of 0 (below).
+///   - **A negative `timeout_ms`** waits for ever for the first byte; a held
+///     prefix is still resolved by `escape_ms`.
+///   - **`escape_ms` of 0** resolves a held prefix as soon as nothing more
+///     can be read without waiting. **A negative `escape_ms`** never resolves
+///     one: the prefix waits for the rest of itself, and only the end of the
+///     input resolves it.
+///   - The end of the input resolves a prefix, as it does for `read`.
+///
+/// `read` is unchanged and the two may be mixed on one `Reader`; `pending()`
+/// says whether a prefix is held.
+pub Result<Input, Error> Reader.read_keys(int timeout_ms, int escape_ms) {
+    int started = __clock_monotonic();
+    while (true) {
+        match (dec.next()) {
+            case Some(Event event): {
+                if (dec.pending() == 0) {
+                    escape_from = -1;
+                }
+                return Result<Input, Error>.Ok(Input.Got(event));
+            }
+            case None: {
+            }
+        }
+        int now = __clock_monotonic();
+        // The wait for this step, and whether it is the escape wait that ends
+        // it. Milliseconds are floored when counting what has passed, so the
+        // wait is never shorter than asked.
+        int wait_ms = -1;
+        if (timeout_ms >= 0) {
+            wait_ms = timeout_ms - (now - started) / 1000000;
+            if (wait_ms < 0) {
+                wait_ms = 0;
+            }
+        }
+        bool is_escape = false;
+        if (dec.pending() == 0) {
+            escape_from = -1;
+        } else {
+            if (escape_from < 0) {
+                escape_from = now;
+            }
+            if (escape_ms >= 0) {
+                int left_ms = escape_ms - (now - escape_from) / 1000000;
+                if (left_ms < 0) {
+                    left_ms = 0;
+                }
+                if (wait_ms < 0 || left_ms <= wait_ms) {
+                    wait_ms = left_ms;
+                    is_escape = true;
+                }
+            }
+        }
+        int wait_result = __wait_io_timeout(descriptor, IO_READABLE, wait_ms);
+        if (wait_result == -EPERM) {
+            wait_result = 0;
+        }
+        if (wait_result < 0) {
+            return Result<Input, Error>.Err(from_errno(-wait_result));
+        }
+        if (wait_result == 1) {
+            if (!is_escape) {
+                return Result<Input, Error>.Ok(Input.Timeout);
+            }
+            Input resolved = finish(Input.Timeout);
+            if (dec.pending() > 0) {
+                escape_from = __clock_monotonic();
+            } else {
+                escape_from = -1;
+            }
+            return Result<Input, Error>.Ok(resolved);
+        }
+        int read_result = __read(descriptor, buffer, 0, buffer.size());
+        if (read_result == -EINTR) {
+            continue;
+        }
+        if (read_result < 0) {
+            return Result<Input, Error>.Err(from_errno(-read_result));
+        }
+        if (read_result == 0) {
+            escape_from = -1;
+            return Result<Input, Error>.Ok(finish(Input.End));
+        }
+        dec.feed(buffer.substr(0, read_result));
+        escape_from = __clock_monotonic();
     }
 }
 
