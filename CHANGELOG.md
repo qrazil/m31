@@ -27,6 +27,17 @@ directions, which a git server, a proxy or an upload endpoint needs:
   writes its own loop, because only it knows whether an unread body means
   drain or close.
 
+### Changed -- `crypto/sha512` over plain 64-bit words
+
+`lib/crypto/sha512.m31` kept every word as a `Word64` object of two 32-bit
+halves, because `>>` used to branch on its operand's sign. `rt_ishr` is
+branchless now, so the words are plain `int`s with `wrapping_add`, and
+nothing is allocated per block. A 5000-round SHA-512-crypt verify drops from
+about 650 ms to about 30 ms; Ed25519, SHA-384 and TLS get the same speedup.
+The API is unchanged, except that `digest` now restarts the hasher, so the
+next `update` begins a new message (before, a hasher was unusable after
+`digest`).
+
 ### Fixed
 
 - `BodyStream` (`fetch_stream`, `read_response_stream`) refused a declared
