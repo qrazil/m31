@@ -1652,7 +1652,9 @@ impl Lowerer {
                 None
             };
             let differs = match (a, b) {
-                (Some(x), Some(y)) => x != y,
+                // Agreeing with each other is not enough: both arms may agree
+                // on a value that is not the one from before the `if`.
+                (Some(x), Some(y)) => x != y || x != *v0,
                 (Some(x), None) => x != *v0,
                 (None, Some(y)) => y != *v0,
                 (None, None) => false,

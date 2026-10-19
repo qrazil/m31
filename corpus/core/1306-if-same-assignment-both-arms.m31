@@ -1,0 +1,42 @@
+// Both arms of an `if` assign the SAME value to a variable. The join used to
+// see "the arms agree" and keep the value from before the `if`, so the store
+// was lost -- visible only when the value differs from the pre-branch one.
+// Regression for lower_if's disagreement test in src/middle/lower/stmt.rs.
+
+int pick(bool c, int v, int old) {
+    int x = old;
+    if (c) {
+        x = v;
+    } else {
+        x = v;
+    }
+    return x;
+}
+
+int first = -1;
+int last = -1;
+int i = 0;
+while (i < 3) {
+    int v = i;
+    if (i > 0) {
+        last = v;
+    } else {
+        last = v;
+    }
+    if (i == 0) {
+        first = v;
+    }
+    i = i + 1;
+}
+print(first);
+print(last);
+print(pick(true, 5, 9));
+print(pick(false, 5, 9));
+
+int k = 1;
+if (first == 0) {
+    k = last;
+} else {
+    k = last;
+}
+print(k);

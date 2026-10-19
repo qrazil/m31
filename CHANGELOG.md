@@ -3,6 +3,17 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased
+
+### Fixed
+
+- **`if (c) { x = v; } else { x = v; }` never wrote `x`.** The join of an `if`
+  decided which variables to carry as block parameters by asking whether the
+  two arms disagreed, and two arms that agreed on a new value were treated as
+  "unchanged", so `x` came out of the `if` with its old value. It now also
+  compares with the value from before the `if`
+  (`lower_if`, corpus `1306-if-same-assignment-both-arms`).
+
 ## 0.8.0 (2026-10-19)
 
 ### Added -- `SHA256SUMS` on every release
