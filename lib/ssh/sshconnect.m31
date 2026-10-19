@@ -7,6 +7,9 @@
 // API
 // ---
 //   sshconnect.connect(parameters)   -> Result<Connection, str>
+//   sshconnect.connect_reporting(parameters, report)
+//                                    -> Result<Connection, str>   see `Report`
+//   sshconnect.resolve(parameters)   -> Result<Resolved, str>   no connection
 //   sshconnect.sanitize(text)    -> str      server text made safe to print
 //   sshconnect.home_directory()  -> str
 //   sshconnect.local_user()      -> str
@@ -47,8 +50,45 @@ import ssh.sshjump;
 
 const int HANDSHAKE_TIMEOUT_MS = 30000;
 
-void warn(str message) {
-    io.eprint("Warning: " + message);
+// One `Warning: ...` line: to standard error, or into `report.warnings` when
+// the caller asked for them to be collected (a program with the terminal in
+// raw mode must not have stderr written under it).
+void warn(Report report, str message) {
+    if (report.is_silent) {
+        report.warnings.push("Warning: " + message);
+    } else {
+        io.eprint("Warning: " + message);
+    }
+}
+
+/// What a connection attempt reports besides its result, for a caller that
+/// holds the object: the `Warning:` lines it would have written to standard
+/// error (collected when `is_silent`), and, when a host key was refused, the
+/// facts a program needs to ask a person about it instead of parsing the
+/// error line. Used by `sshclient.connect_detailed`; `connect` makes its own
+/// (noisy, no collection), so `m31ssh`, `m31scp` and `m31sftp` behave as
+/// before.
+pub type Report {
+    /// true: `Warning:` lines are appended to `warnings` and nothing is
+    /// written to standard error by the library (interactive prompts are only
+    /// ever written when `Params.is_interactive` is true).
+    pub bool is_silent = false;
+    pub List<str> warnings = [];
+    /// Why a host key was refused: "" (not for that reason), "unknown",
+    /// "changed" or "revoked".
+    pub str refusal = "";
+    /// The host as checked (after `HostName`), its port and the known_hosts
+    /// file consulted; set with `refusal`.
+    pub str refusal_host = "";
+    pub int refusal_port = 0;
+    pub str refusal_path = "";
+    /// HashKnownHosts for this host: how a recorded key should be written.
+    pub bool is_hashed = false;
+    /// The key the server presented (a list of zero or one).
+    pub List<ssh.HostKey> presented = [];
+    /// For "changed": the fingerprints of the keys the file lists for the
+    /// host.
+    pub List<str> known_fingerprints = [];
 }
 
 /// What to connect to and how to treat it.
@@ -187,6 +227,7 @@ type HostCheck {
     /// HashKnownHosts: record a new host hashed.
     bool is_hashed;
     sshhosts.KnownHosts hosts;
+    Report report;
     /// Why the key was refused ("" while it has not been).
     str failure = "";
 }
@@ -226,8 +267,18 @@ bool HostCheck.is_confirmed(ssh.HostKey key) {
     return false;
 }
 
+void HostCheck.refuse(str kind, ssh.HostKey key) {
+    report.refusal = kind;
+    report.refusal_host = host;
+    report.refusal_port = port;
+    report.refusal_path = path;
+    report.is_hashed = is_hashed;
+    report.presented = [key];
+}
+
 pub bool HostCheck.is_acceptable(ssh.HostKey key) {
     if (hosts.is_revoked(host, port, key)) {
+        refuse("revoked", key);
         failure = "the host key " + key.fingerprint() + " for " + display_name(host, port) + " is marked revoked in " + path;
         return false;
     }
@@ -238,6 +289,16 @@ pub bool HostCheck.is_acceptable(ssh.HostKey key) {
                     return true;
                 }
             }
+            refuse("changed", key);
+            for (bytes known in trusted) {
+                match (ssh.parse_host_key(known)) {
+                    case Ok(ssh.HostKey listed): {
+                        report.known_fingerprints.push(listed.fingerprint());
+                    }
+                    case Err(_): {
+                    }
+                }
+            }
             failure = "REMOTE HOST IDENTIFICATION HAS CHANGED for " + display_name(host, port) + ": the server presented " + key_label(key) + " key " + key.fingerprint() + ", which is not any of the keys in " + path + " for this host. Refusing to connect (nothing was modified; if the change is expected, remove the old entry yourself)";
             return false;
         }
@@ -246,6 +307,7 @@ pub bool HostCheck.is_acceptable(ssh.HostKey key) {
                 case UnknownHost: {
                 }
                 case Revoked: {
+                    refuse("revoked", key);
                     failure = "every key listed for " + display_name(host, port) + " in " + path + " is revoked";
                     return false;
                 }
@@ -274,11 +336,13 @@ pub bool HostCheck.is_acceptable(ssh.HostKey key) {
     }
     // Unknown host.
     if (policy == "yes") {
+        refuse("unknown", key);
         failure = "host key verification failed: " + display_name(host, port) + " is not in " + path + " and StrictHostKeyChecking is yes (key " + key.fingerprint() + ")";
         return false;
     }
     if (policy == "ask") {
         if (!is_interactive) {
+            refuse("unknown", key);
             failure = "host key verification failed: " + display_name(host, port) + " is not in " + path + " and there is no terminal to ask on (key " + key.fingerprint() + "); use StrictHostKeyChecking=accept-new to trust it on first use";
             return false;
         }
@@ -290,11 +354,11 @@ pub bool HostCheck.is_acceptable(ssh.HostKey key) {
     match (sshhosts.add(path, host, port, key, is_hashed)) {
         case Ok(_): {
             if (!is_quiet) {
-                warn("permanently added '" + display_name(host, port) + "' (" + key_label(key) + ") to the list of known hosts.");
+                warn(report, "permanently added '" + display_name(host, port) + "' (" + key_label(key) + ") to the list of known hosts.");
             }
         }
         case Err(sshhosts.Error error): {
-            warn("could not record the host key in " + path + ": " + error.to_str());
+            warn(report, "could not record the host key in " + path + ": " + error.to_str());
         }
     }
     return true;
@@ -421,12 +485,12 @@ Option<bytes> read_passphrase(str prompt) {
 
 // The key of an encrypted candidate, asking for the passphrase up to three
 // times; None when it cannot be had.
-Option<sshkey.PrivateKey> unlock(Candidate candidate) {
+Option<sshkey.PrivateKey> unlock(Candidate candidate, Report report) {
     int attempts = 0;
     while (attempts < 3) {
         match (read_passphrase("Enter passphrase for key '" + candidate.file + "': ")) {
             case None: {
-                warn("no passphrase for " + candidate.file + " (no terminal to ask on, or cancelled); skipping this key");
+                warn(report, "no passphrase for " + candidate.file + " (no terminal to ask on, or cancelled); skipping this key");
                 return Option<sshkey.PrivateKey>.None;
             }
             case Some(bytes passphrase): {
@@ -445,47 +509,47 @@ Option<sshkey.PrivateKey> unlock(Candidate candidate) {
                                 io.eprint("Permission denied, please try again.");
                             }
                             case Io: {
-                                warn(candidate.file + ": " + error.to_str());
+                                warn(report, candidate.file + ": " + error.to_str());
                                 return Option<sshkey.PrivateKey>.None;
                             }
                             case NotOpenSshKey: {
-                                warn(candidate.file + ": " + error.to_str());
+                                warn(report, candidate.file + ": " + error.to_str());
                                 return Option<sshkey.PrivateKey>.None;
                             }
                             case Encrypted: {
-                                warn(candidate.file + ": " + error.to_str());
+                                warn(report, candidate.file + ": " + error.to_str());
                                 return Option<sshkey.PrivateKey>.None;
                             }
                             case Truncated: {
-                                warn(candidate.file + ": " + error.to_str());
+                                warn(report, candidate.file + ": " + error.to_str());
                                 return Option<sshkey.PrivateKey>.None;
                             }
                             case UnsupportedKeyType: {
-                                warn(candidate.file + ": " + error.to_str());
+                                warn(report, candidate.file + ": " + error.to_str());
                                 return Option<sshkey.PrivateKey>.None;
                             }
                             case UnsupportedKeyCount: {
-                                warn(candidate.file + ": " + error.to_str());
+                                warn(report, candidate.file + ": " + error.to_str());
                                 return Option<sshkey.PrivateKey>.None;
                             }
                             case BadCheck: {
-                                warn(candidate.file + ": " + error.to_str());
+                                warn(report, candidate.file + ": " + error.to_str());
                                 return Option<sshkey.PrivateKey>.None;
                             }
                             case BadKey: {
-                                warn(candidate.file + ": " + error.to_str());
+                                warn(report, candidate.file + ": " + error.to_str());
                                 return Option<sshkey.PrivateKey>.None;
                             }
                             case BadPadding: {
-                                warn(candidate.file + ": " + error.to_str());
+                                warn(report, candidate.file + ": " + error.to_str());
                                 return Option<sshkey.PrivateKey>.None;
                             }
                             case UnsupportedCipher: {
-                                warn(candidate.file + ": " + error.to_str());
+                                warn(report, candidate.file + ": " + error.to_str());
                                 return Option<sshkey.PrivateKey>.None;
                             }
                             case UnsupportedKdf: {
-                                warn(candidate.file + ": " + error.to_str());
+                                warn(report, candidate.file + ": " + error.to_str());
                                 return Option<sshkey.PrivateKey>.None;
                             }
                         }
@@ -495,7 +559,7 @@ Option<sshkey.PrivateKey> unlock(Candidate candidate) {
         }
         attempts = attempts + 1;
     }
-    warn(candidate.file + ": too many incorrect passphrases; skipping this key");
+    warn(report, candidate.file + ": too many incorrect passphrases; skipping this key");
     return Option<sshkey.PrivateKey>.None;
 }
 
@@ -508,7 +572,7 @@ bool has_blob(List<Candidate> list, bytes blob) {
     return false;
 }
 
-List<Candidate> gather(sshconfig.Settings settings, str home, bool is_quiet) {
+List<Candidate> gather(sshconfig.Settings settings, str home, bool is_quiet, Report report) {
     List<Candidate> out = [];
     List<str> files = settings.identity_files;
     bool is_default = false;
@@ -524,14 +588,14 @@ List<Candidate> gather(sshconfig.Settings settings, str home, bool is_quiet) {
     for (str file in files) {
         if (!fs.is_present(file)) {
             if (!is_default && !is_quiet) {
-                warn("identity file " + file + " not accessible: No such file or directory.");
+                warn(report, "identity file " + file + " not accessible: No such file or directory.");
             }
             continue;
         }
         match (fs.stat(file)) {
             case Ok(fs.Stat info): {
                 if (info.perm() & 0o077 != 0) {
-                    warn("private key " + file + " is accessible by others (mode " + info.perm().to_str() + " decimal); ignoring it. Run: chmod 600 " + file);
+                    warn(report, "private key " + file + " is accessible by others (mode " + info.perm().to_str() + " decimal); ignoring it. Run: chmod 600 " + file);
                     continue;
                 }
             }
@@ -540,12 +604,12 @@ List<Candidate> gather(sshconfig.Settings settings, str home, bool is_quiet) {
         }
         match (io.read(file)) {
             case Err(io.Error error): {
-                warn("" + file + ": " + error.to_str());
+                warn(report, "" + file + ": " + error.to_str());
             }
             case Ok(str text): {
                 match (sshkey.inspect(text)) {
                     case Err(sshkey.Error error): {
-                        warn("" + file + ": " + error.to_str());
+                        warn(report, "" + file + ": " + error.to_str());
                     }
                     case Ok(sshkey.Info info): {
                         if (info.is_encrypted) {
@@ -556,7 +620,7 @@ List<Candidate> gather(sshconfig.Settings settings, str home, bool is_quiet) {
                                     from_files.push(Candidate(info.blob, "", [key], file, file, false));
                                 }
                                 case Err(sshkey.Error error): {
-                                    warn("" + file + ": " + error.to_str());
+                                    warn(report, "" + file + ": " + error.to_str());
                                 }
                             }
                         }
@@ -581,12 +645,12 @@ List<Candidate> gather(sshconfig.Settings settings, str home, bool is_quiet) {
                                 }
                             }
                             case Err(sshagent.Error error): {
-                                warn("ssh-agent: " + error.to_str());
+                                warn(report, "ssh-agent: " + error.to_str());
                             }
                         }
                     }
                     case Err(sshagent.Error error): {
-                        warn("ssh-agent: " + error.to_str());
+                        warn(report, "ssh-agent: " + error.to_str());
                     }
                 }
             }
@@ -613,7 +677,7 @@ type Hop {
 }
 
 // `[user@]host[:port]` of a ProxyJump entry.
-Result<Hop, str> hop_of(str spec, str base_config, str login, str home) {
+Result<Hop, str> hop_of(str spec, str base_config, str login, str home, Report report) {
     str text = spec.trim();
     str user = "";
     int at_sign = -1;
@@ -662,7 +726,7 @@ Result<Hop, str> hop_of(str spec, str base_config, str login, str home) {
     if (settings.errors.size() > 0) {
         return Result<Hop, str>.Err("configuration error: " + settings.errors[0]);
     }
-    check_ignored(settings, text, false)?;
+    check_ignored(settings, text, false, report)?;
     if (user == "") {
         user = settings.user;
     }
@@ -679,7 +743,7 @@ Result<Hop, str> hop_of(str spec, str base_config, str login, str home) {
 }
 
 // The host-key policy object for one hop.
-Result<HostCheck, str> check_for(Hop hop, str home, bool is_quiet, bool is_interactive) {
+Result<HostCheck, str> check_for(Hop hop, str home, bool is_quiet, bool is_interactive, Report report) {
     str known_hosts_path = hop.settings.known_hosts_file;
     if (known_hosts_path == "") {
         if (home == "") {
@@ -707,7 +771,7 @@ Result<HostCheck, str> check_for(Hop hop, str home, bool is_quiet, bool is_inter
     }
     match (sshhosts.parse(known_text)) {
         case Ok(sshhosts.KnownHosts loaded): {
-            return Result<HostCheck, str>.Ok(HostCheck(hop.host_name, hop.port, known_hosts_path, policy, is_interactive, is_quiet, hop.settings.is_hash_known_hosts, loaded));
+            return Result<HostCheck, str>.Ok(HostCheck(hop.host_name, hop.port, known_hosts_path, policy, is_interactive, is_quiet, hop.settings.is_hash_known_hosts, loaded, report));
         }
         case Err(sshhosts.Error error): {
             return Result<HostCheck, str>.Err(known_hosts_path + ": " + error.to_str() + "; refusing to continue");
@@ -717,7 +781,7 @@ Result<HostCheck, str> check_for(Hop hop, str home, bool is_quiet, bool is_inter
 
 // Tries each candidate identity over the transport; `Ok` carries the
 // server's banner.
-Result<str, str> authenticate(ssh.Transport transport, str user, str host_name, List<Candidate> candidates) {
+Result<str, str> authenticate(ssh.Transport transport, str user, str host_name, List<Candidate> candidates, Report report) {
     match (sshauth.start(transport)) {
         case Ok: {
         }
@@ -731,7 +795,7 @@ Result<str, str> authenticate(ssh.Transport transport, str user, str host_name, 
         sshauth.Signer signer = sshagent.AgentSigner(candidate.agent_path, candidate.blob);
         if (candidate.agent_path == "") {
             if (candidate.is_encrypted) {
-                match (unlock(candidate)) {
+                match (unlock(candidate, report)) {
                     case Some(sshkey.PrivateKey unlocked): {
                         signer = sshauth.KeySigner(unlocked);
                     }
@@ -759,7 +823,7 @@ Result<str, str> authenticate(ssh.Transport transport, str user, str host_name, 
                         case AuthFailed: {
                         }
                         case SignerFailed: {
-                            warn("signing with " + candidate.label + " failed");
+                            warn(report, "signing with " + candidate.label + " failed");
                         }
                         case Transport(ssh.Error inner): {
                             return Result<str, str>.Err("connection lost during authentication: " + inner.to_str());
@@ -790,9 +854,9 @@ Result<str, str> authenticate(ssh.Transport transport, str user, str host_name, 
 
 // Handshake, host-key decision and authentication over `wire` for one hop;
 // the authenticated transport, or a one-line reason.
-Result<ssh.Transport, str> open_hop(ssh.Wire wire, Hop hop, str home, bool is_quiet, bool is_interactive, bool is_target) {
-    HostCheck check = check_for(hop, home, is_quiet, is_interactive)?;
-    List<Candidate> candidates = gather(hop.settings, home, is_quiet);
+Result<ssh.Transport, str> open_hop(ssh.Wire wire, Hop hop, str home, bool is_quiet, bool is_interactive, bool is_target, Report report) {
+    HostCheck check = check_for(hop, home, is_quiet, is_interactive, report)?;
+    List<Candidate> candidates = gather(hop.settings, home, is_quiet, report);
     if (candidates.size() == 0) {
         return Result<ssh.Transport, str>.Err("no usable identity for " + hop.alias + ": no key file and no agent key (tried IdentityFile and ~/.ssh/id_ed25519, id_ecdsa, id_rsa)");
     }
@@ -809,7 +873,7 @@ Result<ssh.Transport, str> open_hop(ssh.Wire wire, Hop hop, str home, bool is_qu
             return Result<ssh.Transport, str>.Err("connection to " + display_name(hop.host_name, hop.port) + " failed: " + error.to_str());
         }
         case Ok(ssh.Transport transport): {
-            match (authenticate(transport, hop.user, hop.host_name, candidates)) {
+            match (authenticate(transport, hop.user, hop.host_name, candidates, report)) {
                 case Err(str reason): {
                     return Result<ssh.Transport, str>.Err(reason);
                 }
@@ -859,12 +923,12 @@ Result<ssh.Wire, str> first_wire(Hop first) {
 // over a direct-tcpip channel on the previous one. Every hop's host key is
 // checked against its own `known_hosts` entry and every hop authenticates
 // for itself.
-Result<ssh.Transport, str> establish(List<Hop> hops, str home, bool is_quiet, bool is_interactive) {
+Result<ssh.Transport, str> establish(List<Hop> hops, str home, bool is_quiet, bool is_interactive, Report report) {
     ssh.Wire wire = first_wire(hops[0])?;
     int index = 0;
     while (true) {
         bool is_target = index == hops.size() - 1;
-        match (open_hop(wire, hops[index], home, is_quiet, is_interactive, is_target)) {
+        match (open_hop(wire, hops[index], home, is_quiet, is_interactive, is_target, report)) {
             case Err(str reason): {
                 return Result<ssh.Transport, str>.Err(reason);
             }
@@ -915,7 +979,7 @@ bool is_unsafe_to_ignore(str keyword) {
 
 // What to do about the lines of `settings` that were understood by nobody:
 // `Err` for any that cannot safely be ignored, a `Warning:` line for the rest.
-Result<void, str> check_ignored(sshconfig.Settings settings, str name, bool is_quiet) {
+Result<void, str> check_ignored(sshconfig.Settings settings, str name, bool is_quiet, Report report) {
     List<str> seen = [];
     for (str keyword in settings.ignored) {
         if (seen.contains(keyword)) {
@@ -926,15 +990,26 @@ Result<void, str> check_ignored(sshconfig.Settings settings, str name, bool is_q
             return Result<void, str>.Err("configuration for " + name + " uses '" + keyword + "', which this client does not support and cannot ignore safely; remove it from the configuration");
         }
         if (!is_quiet) {
-            warn("configuration option '" + keyword + "' is not supported and is ignored (" + name + ")");
+            warn(report, "configuration option '" + keyword + "' is not supported and is ignored (" + name + ")");
         }
     }
     return Result<void, str>.Ok;
 }
 
-/// Resolves the configuration for `parameters.host`, connects through any jump
-/// hosts, checks every host key, and authenticates. `Err` is one line.
-pub Result<Connection, str> connect(Params parameters) {
+/// The configuration of a destination, resolved: everything `connect` decides
+/// before any byte goes on the wire.
+type Prepared {
+    str home;
+    str login;
+    sshconfig.Settings settings;
+    str user;
+    int port;
+    List<Hop> hops;
+}
+
+// The resolution half of `connect`: option lines, the configuration file with
+// its `Include`s expanded, the destination's settings, and the chain of hops.
+Result<Prepared, str> prepare(Params parameters, Report report) {
     str home = home_directory();
     str login = local_user();
     str options_text = "";
@@ -947,14 +1022,14 @@ pub Result<Connection, str> connect(Params parameters) {
         }
         key_end = lower.substr(0, cut);
         if (key_end == "host" || key_end == "match" || key_end == "include" || option.contains("\n") || option.contains("\r")) {
-            return Result<Connection, str>.Err("-o " + option + " is not supported");
+            return Result<Prepared, str>.Err("-o " + option + " is not supported");
         }
         options_text = options_text + option + "\n";
     }
     str file_text = "";
     if (parameters.config_file != "") {
         if (!fs.is_file(parameters.config_file)) {
-            return Result<Connection, str>.Err("cannot read configuration file " + parameters.config_file);
+            return Result<Prepared, str>.Err("cannot read configuration file " + parameters.config_file);
         }
         file_text = read_text(parameters.config_file) + "\n";
     } else if (home != "") {
@@ -973,29 +1048,29 @@ pub Result<Connection, str> connect(Params parameters) {
         target_config = target_config + "User " + parameters.user + "\n";
     }
     if (!is_plain_word(parameters.host) || parameters.host.starts_with("-")) {
-        return Result<Connection, str>.Err("bad host name");
+        return Result<Prepared, str>.Err("bad host name");
     }
     if (!is_plain_word(parameters.user)) {
-        return Result<Connection, str>.Err("bad user name");
+        return Result<Prepared, str>.Err("bad user name");
     }
     str identity_lines = "";
     for (str identity in parameters.identities) {
         if (identity.contains("\"") || identity.contains("\n") || identity.contains("\r")) {
-            return Result<Connection, str>.Err("bad identity file name");
+            return Result<Prepared, str>.Err("bad identity file name");
         }
         identity_lines = identity_lines + "IdentityFile \"" + identity + "\"\n";
     }
     sshconfig.Settings settings = sshconfig.resolve(target_config + options_text + identity_lines + file_text, parameters.host, login, home);
     if (settings.errors.size() > 0) {
-        return Result<Connection, str>.Err("configuration error: " + settings.errors[0]);
+        return Result<Prepared, str>.Err("configuration error: " + settings.errors[0]);
     }
-    check_ignored(settings, parameters.host, parameters.is_quiet)?;
+    check_ignored(settings, parameters.host, parameters.is_quiet, report)?;
     str user = settings.user;
     if (user == "") {
         user = login;
     }
     if (user == "") {
-        return Result<Connection, str>.Err("cannot determine the login name; use -l or user@host");
+        return Result<Prepared, str>.Err("cannot determine the login name; use -l or user@host");
     }
     int port = settings.port;
     if (port == 0) {
@@ -1008,14 +1083,89 @@ pub Result<Connection, str> connect(Params parameters) {
     }
     if (jump_text != "" && jump_text.to_lower() != "none") {
         for (str spec in jump_text.split(",")) {
-            Hop jump = hop_of(spec, base_config, login, home)?;
+            Hop jump = hop_of(spec, base_config, login, home, report)?;
             hops.push(jump);
         }
     }
     hops.push(Hop(parameters.host, settings.host_name, port, user, settings));
-    ssh.Transport transport = establish(hops, home, parameters.is_quiet, parameters.is_interactive)?;
+    return Result<Prepared, str>.Ok(Prepared(home, login, settings, user, port, hops));
+}
+
+/// The destination as it will be connected to, after `~/.ssh/config` (with
+/// `Include`s expanded), `-o` lines and the other parameters have been
+/// resolved. Nothing is connected and nothing is written.
+pub type Resolved {
+    /// The name as given.
+    pub str alias;
+    /// `HostName`, or the name as given.
+    pub str host;
+    pub int port;
+    pub str user;
+    /// `IdentityFile`s in order; the default key files when none is
+    /// configured (`is_default_identities`).
+    pub List<str> identity_files;
+    pub bool is_default_identities;
+    /// `UserKnownHostsFile`, else `~/.ssh/known_hosts` ("" when neither can
+    /// be known).
+    pub str known_hosts_file;
+    /// `StrictHostKeyChecking`: yes, ask (the default), accept-new or no.
+    pub str host_key_policy;
+    /// `HashKnownHosts`.
+    pub bool is_hashed;
+    /// The jump hosts, as `host:port`, outermost first.
+    pub List<str> jump_hosts;
+}
+
+/// Resolves `parameters` like `connect` does, without connecting. `Err` is
+/// the same one-line configuration error `connect` would return.
+pub Result<Resolved, str> resolve(Params parameters) {
+    Report report = Report(is_silent: true);
+    Prepared prepared = prepare(parameters, report)?;
+    sshconfig.Settings settings = prepared.settings;
+    List<str> files = settings.identity_files;
+    bool is_default = false;
+    if (files.size() == 0) {
+        is_default = true;
+        if (prepared.home != "") {
+            files.push(prepared.home + "/.ssh/id_ed25519");
+            files.push(prepared.home + "/.ssh/id_ecdsa");
+            files.push(prepared.home + "/.ssh/id_rsa");
+        }
+    }
+    str known_hosts = settings.known_hosts_file;
+    if (known_hosts == "" && prepared.home != "") {
+        known_hosts = prepared.home + "/.ssh/known_hosts";
+    }
+    str policy = settings.strict_host_key_checking;
+    if (policy == "") {
+        policy = "ask";
+    }
+    if (policy == "off") {
+        policy = "no";
+    }
+    List<str> jumps = [];
+    for (int index in 0 .. prepared.hops.size() - 1) {
+        jumps.push(prepared.hops[index].host_name + ":" + prepared.hops[index].port.to_str());
+    }
+    return Result<Resolved, str>.Ok(Resolved(parameters.host, settings.host_name, prepared.port, prepared.user, files, is_default, known_hosts, policy, settings.is_hash_known_hosts, jumps));
+}
+
+/// Resolves the configuration for `parameters.host`, connects through any jump
+/// hosts, checks every host key, and authenticates. `Err` is one line.
+pub Result<Connection, str> connect(Params parameters) {
+    return connect_reporting(parameters, Report());
+}
+
+/// `connect`, reporting into `report` (see `Report`): warnings can be
+/// collected instead of written, and a refused host key is described there
+/// in structured form as well as in the `Err` line. The policy is the same:
+/// nothing is trusted that the configuration does not say to trust.
+pub Result<Connection, str> connect_reporting(Params parameters, Report report) {
+    Prepared prepared = prepare(parameters, report)?;
+    sshconfig.Settings settings = prepared.settings;
+    ssh.Transport transport = establish(prepared.hops, prepared.home, parameters.is_quiet, parameters.is_interactive, report)?;
     if (settings.rekey_limit >= 0) {
         transport.set_rekey_limit(settings.rekey_limit);
     }
-    return Result<Connection, str>.Ok(Connection(transport, settings, settings.host_name, port, user));
+    return Result<Connection, str>.Ok(Connection(transport, settings, settings.host_name, prepared.port, prepared.user));
 }
