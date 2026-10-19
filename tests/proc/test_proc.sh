@@ -248,7 +248,10 @@ def pty_oracle(argv, rows=24, cols=80, until=b"", typed=b""):
     return code, seen
 
 def norm(data):
-    return re.sub(rb"/dev/(pts/\d+|tty[a-z0-9]+)", b"/dev/pts/N", data)
+    data = re.sub(rb"/dev/(pts/\d+|tty[a-z0-9]+)", b"/dev/pts/N", data)
+    # `until=` stops at the text it names; whether the line break after it has
+    # already arrived when ^C is typed is a race between two processes
+    return re.sub(rb"\r\n(?=\^C)", b"", data)
 
 def m31_pty(argv, rows=24, cols=80, until="", typed=b""):
     words = ["pty", "rows=%d" % rows, "columns=%d" % cols]
