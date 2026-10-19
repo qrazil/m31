@@ -151,9 +151,16 @@ near = build_deep(mk("deepnear"), 17, 200)
 want = os.path.realpath(mk("deepnear")) + "/" + "/".join(near)
 check("long path under PATH_MAX is built (%d bytes)" % len(want), 3000 < len(want) < 4096, str(len(want)))
 done = subprocess.run([binary, "cwd"], cwd=mk("deepnear"), preexec_fn=deep(near), capture_output=True, text=True, stdin=subprocess.DEVNULL)
-check("getcwd in a %d-byte path" % len(want), done.stdout.splitlines() == [want, want], repr(done.stdout[:200]))
+# macOS's getcwd(3) refuses a path past its PATH_MAX (1024): there the libc
+# answer is the host's, whole or an error, never a cut name.
+host_limited = sys.platform == "darwin" and backend != "-DRT_SYS_RAW"
+def whole_or_host_error(lines, expect, count):
+    if host_limited:
+        return len(lines) == count and all(l == expect or l.startswith("error ") for l in lines)
+    return lines == [expect] * count
+check("getcwd in a %d-byte path" % len(want), whole_or_host_error(done.stdout.splitlines(), want, 2), repr(done.stdout[:200]))
 done = subprocess.run([binary, "real", "../" + near[-1] + "/../" + near[-1]], cwd=mk("deepnear"), preexec_fn=deep(near), capture_output=True, text=True, stdin=subprocess.DEVNULL)
-check("a relative realpath in the long directory", done.stdout.splitlines() == [want], repr(done.stdout[:200]))
+check("a relative realpath in the long directory", whole_or_host_error(done.stdout.splitlines(), want, 1), repr(done.stdout[:200]))
 far = build_deep(mk("deepfar"), 22, 200)
 farwant = os.path.realpath(mk("deepfar")) + "/" + "/".join(far)
 done = subprocess.run([binary, "cwd"], cwd=mk("deepfar"), preexec_fn=deep(far), capture_output=True, text=True, stdin=subprocess.DEVNULL)
