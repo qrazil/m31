@@ -1,6 +1,12 @@
 # Heap watch: one ledger for every object
 
-Status: **proposal, not decided.** Revision 2, 2026-10-19. Nothing is built.
+Status: **proposal, not decided.** Revision 3, 2026-10-20. Nothing is built.
+
+Revision 3: the owner confirmed all three parts are wanted -- the age
+ledger, epoch close and trace mode -- and asked for a way to mark objects
+that live long on purpose (a game engine's assets and entities). Added:
+"Three parts, one ledger", "Long-lived on purpose", "Trace: who holds it",
+"Fixing a leak", "Walk-through: a game engine", "Feasibility" and "Phases".
 
 ## Starting point
 
@@ -23,7 +29,28 @@ queue, is hard to know at compile time and easy to measure at run time.
    and must survive a crash or `kill -9`. A report printed at exit is not
    enough.
 3. **One stop.** A single mechanism answers "what is leaking, from where, and
-   since when".
+   since when" -- and, on request, **who is holding it**.
+4. **Long-lived on purpose is not a leak.** A developer can say, in code or
+   in configuration, that an object or a type lives as long as it likes.
+5. **Trace on the fly.** Who holds a leaked type can be asked of a running
+   process, by an environment variable at start or a command at any time,
+   with no rebuild and no restart.
+
+---
+
+## Three parts, one ledger
+
+| Part | Question it answers | When it answers | Always on? |
+|---|---|---|---|
+| **Age ledger** | which site is leaking, how many, how old | once survivors outlive the site's normal lifetime | yes |
+| **Epoch close** | this unit of work certainly leaked, and what | the moment the unit ends | yes |
+| **Trace** | who holds the leaked object, up to a root | from the moment it is turned on | no, per type, on request |
+
+They overlap only where it helps: a leaked cycle inside a request shows up
+at once in epoch close, and later in the age ledger as well. Neither of the
+first two can say who holds an object; trace cannot say what to look at
+without them. All three write to the same ledger and are read by the same
+tool, `m31 heapwatch`.
 
 ### Rules the design keeps
 
@@ -99,7 +126,8 @@ objects normally live:
   freed, N alive", not flagged as a suspect, and the developer can see it
   and decide.
 - Overrides are configuration, so changing them needs no rebuild:
-  `M31_AGE=Conn:10m,Config:forever`.
+  `M31_AGE=Conn:10m,Config:forever`. See "Long-lived on purpose" for the
+  full set of ways to say an object is meant to live.
 
 This is the queue-size argument made automatic: the runtime measures each
 site's normal lifetime and flags the objects that fall far outside it.
@@ -128,6 +156,32 @@ site's normal lifetime and flags the objects that fall far outside it.
 
 So after a redeploy, the old process's ledger is still on disk, and so is its
 answer.
+
+### Long-lived on purpose
+
+Some programs are mostly long-lived objects: a game engine's textures,
+meshes and world, a server's connection pool. Age alone would flag them, or
+leave them in the "never freed" list for a human to wave through every time.
+There are three ways to say "this lives as long as it likes", from the
+broadest to the narrowest, and all of them cost nothing per operation:
+
+| Scope | How | Effect |
+|---|---|---|
+| a type | `M31_AGE=Texture:forever` (environment or the config file `M31_HEAPWATCH_CONF`) | every site of that type is exempt from age |
+| a site | `M31_AGE=Texture@assets.m31:40:forever`, or a duration instead of `forever` | that site only; a duration replaces the learned threshold |
+| one object | `heapwatch.forever(x)` in code, which returns `x` | that object only |
+
+`heapwatch.forever(x)` moves the object from its birth-minute bucket to a
+**forever** bucket by setting `BIRTH` to a reserved value (all ones), so it
+needs no new bit. It is still counted, still listed (`forever  Texture
+assets.m31:40  812 alive`), and still checked by epoch close and trace --
+being marked long-lived exempts it from age and nothing else. A forever
+object that is freed is simply uncounted; that is not an error.
+
+A level, a scene or a match that *ends* is better described as an epoch than
+as an age: `epoch "level" { play(level); }` reports everything the level
+made and did not keep, the moment the level is unloaded (see the game engine
+walk-through).
 
 ---
 
@@ -178,11 +232,10 @@ adoption rule gets caught.
 
 - **Prove that nothing leaks.** It reports what happened in the runs that
   happened. Code paths that never ran report nothing.
-- **Say who holds the leaked object.** It names the type, the allocation
-  site, the age and the unit of work, but not the path of references that
-  keeps it alive. Finding that path is exactly the heap walk ruled out above.
-  The site, plus which epoch leaked, is meant to be enough to find it in the
-  code.
+- **Say who holds the leaked object, by itself.** The ledger names the type,
+  the allocation site, the age and the unit of work. The path of references
+  that keeps it alive is trace's job, below, and trace has to be turned on
+  for the type first.
 - **Flag a young leak.** An age suspect needs time to age. Epoch close has no
   such delay, but only for objects that were never kept.
 - **Tell apart objects that live long on purpose from those that leaked,
@@ -191,6 +244,146 @@ adoption rule gets caught.
 
 Within those limits this is one tool, one file and one report for every
 object in the heap.
+
+---
+
+## Trace: who holds it
+
+The ledger says *what* leaked. Trace says *who is holding it*, without a heap
+walk: it records reference edges **as they are made and broken**, for the
+types it is asked to watch, and nothing else.
+
+### Turning it on
+
+- At start: `M31_HEAPWATCH_TRACE=Conn,Session@app/session.m31:12`.
+- On a running process: `m31 heapwatch trace <pid> Conn` (and `untrace`).
+  The tool writes the request into a **control page** at the start of the
+  process's ledger file. The scheduler tick reads that page once a second --
+  one load -- and applies it. No signal, no restart, no rebuild.
+- The trace set is a per-site byte array `traced[site]` in the ledger, not
+  a flag in the read-only `TypeInfo`.
+
+### What it records
+
+Every reference store already knows the holder (the object or global being
+written into) and the value. With trace on, the store path does one extra
+load and compare -- `traced[v->ty->site]` -- next to the `rc_inc` that
+already touches `v`'s header. When it is set, the slow path updates an
+**edge table**:
+
+| Event | Edge table |
+|---|---|
+| store `v` into slot `h.f` (field, element, map value, global) | add `v ← h.f` |
+| overwrite or clear that slot | remove the old value's edge |
+| holder `h` freed (its drop releases its children) | remove every edge from `h` |
+| `v` freed | remove `v`'s row |
+
+The field name is not stored at the call site: the slow path computes it
+from the slot's offset in the holder and the holder's `TypeInfo` field table.
+Collection internals (a List's element buffer, a Map's buckets) are recorded
+against the collection object, which is the holder a reader cares about.
+
+**Locals are not recorded, and do not need to be.** A leaked object outlives
+every frame that made it, so whatever keeps it alive is a heap object or a
+global -- exactly what trace sees. An object held only by a local is not a
+leak.
+
+### Expanding to a root
+
+One edge says "Conn is held by `Session.conn`". That is often not enough: the
+question is who keeps the Session. With `--depth N` (default 3), when a
+traced object becomes a suspect or is left at an epoch close, trace turns
+itself on for the **holder's site** too, and so on up to N levels. The
+answer grows into a path that ends in one of:
+
+- a **global or module-level holder**, which is a retained-by-mistake leak
+  (a cache never cleared);
+- a **cycle** -- the path comes back to an object already on it -- which is
+  a leaked cycle, printed as the cycle;
+- an **untraced holder** beyond the depth limit, printed as such.
+
+### Its limit
+
+Trace sees only edges made **after** it was turned on. An object leaked an
+hour earlier, whose holder stored it an hour earlier, has no recorded edge.
+In practice a leak repeats -- the site that leaked once leaks again -- so the
+next occurrence is caught. `M31_HEAPWATCH_TRACE` at start avoids the wait
+when the type is already known.
+
+### Output
+
+Appended to `<program>.<pid>.trace`, read by the same tool:
+
+```
+$ m31 heapwatch trace server.81234
+Conn  net/server.m31:40  (37 alive > 40m)
+  held by  Session.conn      app/session.m31:12
+  held by  Map value         app/cache.m31:5   SessionCache.by_id   (global)
+  -> retained: SessionCache.by_id never removes closed sessions
+Node  graph/build.m31:22  (epoch "request" left 2)
+  held by  Node.next  graph/build.m31:22
+  held by  Node.prev  graph/build.m31:22  <- cycle
+```
+
+---
+
+## Fixing a leak
+
+1. **See it.** `m31 heapwatch <ledger>` on the live process, or on the dead
+   one's ledger after a crash or a redeploy: a suspect site, or an epoch
+   that closed with leaks.
+2. **Judge it.** Long-lived on purpose? Mark it (`M31_AGE`,
+   `heapwatch.forever`) and it stops being reported. Otherwise it is a bug.
+3. **Find the holder.** `m31 heapwatch trace <pid> <Type>` on the running
+   process, or `M31_HEAPWATCH_TRACE=<Type>` on the next start. Wait for the
+   next occurrence; read the path.
+4. **Fix it**, by what the path ends in:
+   - a cycle among throwaway objects: break it, or put the structure in an
+     `Arena<T>` if it is cyclic on purpose;
+   - something that should have left the epoch: **return** it, **pass** it
+     (send it to the task that owns it), or **clone** what is kept, so the
+     unit of work holds nothing at its end;
+   - a holder that never lets go: remove the entry when its owner ends.
+5. **Prove it.** In tests, an epoch that closes with leaks traps, so the
+   fix gets a test that fails without it.
+
+---
+
+## Walk-through: a game engine
+
+A game loop is the hard case for age: most of what matters lives a long
+time on purpose.
+
+```c
+Texture t = heapwatch.forever(load_texture("grass.png"));   // assets: forever
+
+while running {
+    epoch "level" {                      // everything a level made...
+        Level lv = load_level(n);
+        while !lv.done {
+            epoch "frame" {              // ...and everything a frame made
+                tick(lv, input());
+                draw(lv);
+            }
+        }
+    }                                    // ...is checked when it ends
+}
+```
+
+- **Per-frame temporaries** that leak are reported at the end of the frame
+  that leaked them. Sixty epoch closes a second cost a few microseconds in
+  total.
+- **Entities** that live for the level are adopted into the level epoch when
+  they are stored in the level, and checked when the level unloads: a
+  monster that is still held after its level is gone is reported then, with
+  no age threshold to tune.
+- **Assets** loaded once are marked forever and drop out of the age report;
+  a texture cache keyed by name can be marked by type (`M31_AGE=Texture:forever`).
+- **The world graph** -- parents and children that point at each other -- is
+  cyclic on purpose and belongs in an `Arena<T>`; the arena is one object to
+  the ledger, and its handles are integers that hold nothing.
+- **A leak found in play testing** gets `M31_HEAPWATCH_TRACE=Monster` on the
+  next run, or `m31 heapwatch trace <pid> Monster` while the game is open.
 
 ---
 
@@ -246,6 +439,8 @@ For scale: a `malloc`/`free` pair is roughly 20–50 ns.
 | `live[site][minute]` | dense row for the current minute (sites × 4 B ≈ 20 KB); older minutes sparse, bounded by the number of distinct (site, minute) pairs that still have survivors. Typically tens of KB, and at most 1 entry per live object. |
 | `epoch` rows | sites × 4 B per open depth per thread, allocated lazily; ≈ 20 KB × 1–3 open per task |
 | ledger file on disk | the above, mapped: typically 1–5 MB per process |
+| trace edge table | only while tracing: ~32 B per edge to a traced object, capped (default 1 M edges ≈ 32 MB; past the cap new edges are dropped and the report says so) |
+| per-thread shards | each OS thread keeps its own counters so updates stay non-atomic; the tool sums them. An object made on one thread and freed on another leaves +1 on one shard and −1 on the other, which sums correctly. |
 
 ### CPU
 
@@ -256,6 +451,11 @@ For scale: a `malloc`/`free` pair is roughly 20–50 ns.
 | reference store | 1 compare, usually not taken: **~0.3–1 ns**, plus the spreading walk when it adopts (amortised) |
 | `rc_inc` / `rc_dec` | unchanged. The count mask widens; overflow is checked by a compare `rc_inc` can fold in. |
 | epoch enter / close | tens of ns |
+| trace off (the default) | one load and compare on each reference store, next to the `rc_inc` that already touches `v`: **~0.3 ns** |
+| trace on, store of a traced value | an edge-table insert (a hash probe): **~20–50 ns**, for that type only |
+| trace on, overwrite or free of a traced value | an edge-table remove: **~20–50 ns** |
+| `heapwatch.forever(x)` | a counter move: **~2 ns**, once per object |
+| control page | one load per scheduler tick |
 | scheduler tick (~1/s) | advance the minute; once a minute, check each site's oldest survivor against its threshold: **O(sites)**, never O(objects) |
 | disk | none on the hot path (mmap); suspect log appends are rare |
 
@@ -266,6 +466,35 @@ because a server is exactly where it is needed. The benchmark must confirm
 this before anything is decided.
 
 ---
+
+## Feasibility
+
+| Piece | Feasible? | Main risk | How it is caught |
+|---|---|---|---|
+| Count word split (60 → 33 bits + BIRTH, DEPTH, KEPT) | yes; `rc_inc`/`rc_dec` are out-of-line functions in `runtime/rt.h`, so the mask changes in one place | a path that reads the count word raw | sanitizers + an RC_DEBUG check that the flag bits survive every operation |
+| Per-site `TypeInfo` with `canon` | yes; the compiler already emits one `TypeInfo` per type | the 18 `->ty ==` identity checks in `runtime/` must all go through `canon` | a gate that greps for a raw `->ty ==` |
+| `live` / `lifetime` counters, mmap ledger, suspect log | yes; plain memory writes, one file per process | thread shards and file layout versioning | corpus run with the ledger read back by the tool |
+| Forever marks | yes; a reserved `BIRTH` value, no new bit | none notable | corpus |
+| Epoch close | yes, but the **hardest** part | an incomplete adoption list gives false reports (closures, sends, globals, future escape routes) | every corpus program must close clean; a false report fails the gate |
+| Trace | yes; event-based, no heap walk | holders inside runtime collections must be attributed to the collection; edge table memory | corpus programs with a known holder path, checked against the trace output |
+| On-the-fly control page | yes; the tool writes the page, the tick reads it | two tools writing at once | a lock word in the page |
+| Green threads (in progress) | yes; shards become per worker thread, not per task | task migration between workers | same summing rule as OS threads |
+
+Nothing here needs a heap walk, a pause, or a change to program behaviour.
+The real work is in two places: the epoch adoption rules, and auditing the
+runtime for raw type checks and raw count reads.
+
+## Phases
+
+1. **Ledger**: count split, per-site `TypeInfo`, `live`/`lifetime`, mmap
+   ledger, suspect log, `m31 heapwatch`, forever marks and `M31_AGE`. Useful
+   on its own.
+2. **Trace**: edge table, control page, `--depth`, `.trace` output. Needs
+   the per-site ids from phase 1, not epochs.
+3. **Epoch close**: spawned tasks first, then `epoch` blocks, then the
+   test-build trap. Last because its adoption rules are the riskiest part.
+
+Each phase is measured in qrazil/benchmark before the next starts.
 
 ## Open questions
 
@@ -279,3 +508,8 @@ this before anything is decided.
    on any leaked cycle?
 6. Should a stdlib API expose the ledger, so a server can serve it as
    metrics (such as `/debug/heap`)?
+7. The `heapwatch.forever` spelling: a stdlib call, or a keyword on the
+   allocation?
+8. Trace `--depth` default (3) and edge cap (1 M).
+9. Who can turn trace on for a running process: anyone who can write the
+   ledger file (its permissions), or a separate check?
