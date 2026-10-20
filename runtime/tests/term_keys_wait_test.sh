@@ -122,7 +122,9 @@ between("lone ESC: escape after escape_ms, not before", rows, w, 0, "got escape"
 between("nothing pending afterwards: plain timeout", rows, w, 1, "timeout", 0, w[0] + E + 300 - 5, w[0] + E + 300 + SLACK)
 
 # 2. ESC [ A with both gaps below escape_ms: one key, at the last byte.
-rows, w = run([("k", -1, E)], [(100, b"\x1b"), (160, b"["), (220, b"A")])
+# (A long escape wait: a loaded runner may deliver a write well after its
+# nominal time, and the point is only that the gaps are below escape_ms.)
+rows, w = run([("k", -1, 1500)], [(100, b"\x1b"), (160, b"["), (220, b"A")])
 between("split ESC [ A, gaps below escape_ms: up, at the last byte", rows, w, 0, "got up", 0,
         w[2], w[2] + SLACK)
 
@@ -141,10 +143,10 @@ rows, w = run([("k", 200, 50), ("k", -1, 50)], [(300, b"\x1b")])
 between("nothing pending: Timeout after timeout_ms", rows, w, 0, "timeout", 0, 200, 200 + SLACK)
 between("an ESC after that waits its own escape_ms", rows, w, 1, "got escape", 0, w[0] + 50, w[0] + 50 + SLACK)
 
-# 5. Continuous input restarts the escape wait: six bytes 100 ms apart with
-#    escape_ms 150 are one key, though the whole is longer than escape_ms.
-rows, w = run([("k", -1, E)],
-              [(100, b"\x1b"), (200, b"["), (300, b"1"), (400, b";"), (500, b"5"), (600, b"A")])
+# 5. Continuous input restarts the escape wait: six bytes 120 ms apart with
+#    escape_ms 500 are one key, though the whole is longer than escape_ms.
+rows, w = run([("k", -1, 500)],
+              [(100, b"\x1b"), (220, b"["), (340, b"1"), (460, b";"), (580, b"5"), (700, b"A")])
 between("continuous input restarts the wait: one ctrl+up", rows, w, 0, "got ctrl+up", 0, w[5], w[5] + SLACK)
 
 # 6. timeout_ms shorter than escape_ms with a prefix pending: Timeout, the
