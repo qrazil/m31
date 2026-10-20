@@ -34,12 +34,11 @@
 //!   - owned temporaries (above);
 //!   - a place in a frozen object, which a store would trap on before it
 //!     released anything (docs/const-decision.md): any chain of elements
-//!     read out of a module constant, whose whole graph is immortal; and one
-//!     step -- a direct field or a List/Array element -- out of a local or
-//!     parameter that an active `const` block names or that a `const`
-//!     declaration bound. One step only: see `frozen_place` for why `a.b.c`,
-//!     `a.xs[0]`, a promoted field and anything read through `this` are
-//!     still held;
+//!     read out of a module constant, whose whole graph is immortal; and any
+//!     chain of fields and List/Array elements out of a local or parameter
+//!     that an active `const` block names or that a `const` declaration
+//!     bound, since every freeze is deep. Anything read through `this` is
+//!     still held: see `frozen_place`;
 //!   - a place read that nothing after it can disturb: `may_run_code` is false
 //!     for every later operand and the operation itself runs no user code.
 //!     Between the read and its last use only the runtime executes, and the
@@ -131,55 +130,70 @@ impl Lowerer {
         }
     }
 
-    /// One step -- a direct field `a.f`, or an element `a[i]` of a List or
-    /// an Array -- out of a local or parameter `a` whose object is frozen
-    /// for at least as long as the operation runs:
+    /// A chain of fields and List/Array elements -- `a.f`, `a[i]`, `a.b.c`,
+    /// `a.ps[i].x`, a promoted field -- read out of a local or parameter `a`
+    /// whose object is frozen for at least as long as the operation runs:
     ///
     ///   - named by a `const` block that is active here (`freezes`): the
     ///     block cannot be left in the middle of a statement, and a block in
-    ///     a callee that meets the object already frozen does not clear the
-    ///     flag when it ends (`rt_freeze_enter` reports it did not take it);
+    ///     a callee that meets the object already frozen leaves it frozen
+    ///     when it ends (`rt_freeze_leave` thaws only what its own
+    ///     `rt_freeze_enter` froze);
     ///   - or bound by a `const` declaration (`snapshots`, with the binding
-    ///     still `const`): `rt_snapshot` returns an object that is either
-    ///     frozen for good or -- when it met one already frozen by a `const`
-    ///     block -- frozen by a block active for the whole life of the name.
+    ///     still `const`): `rt_snapshot` returns an object frozen for good.
     ///
-    /// A store into a frozen object traps (`rt_check_mutable`: field stores,
-    /// `rt_index_set`, and every List and Map method that drops or moves an
-    /// element), so the slot read keeps the value it had, and the local or
-    /// parameter keeps the object alive -- the same reason it is stable
-    /// itself. A SSA value names one object for its whole life, so whichever
-    /// name the frozen object is reached by, the answer is about the object.
+    /// Every freeze is deep (docs/const-decision.md, "The third decision"):
+    /// a block freezes everything the named object reaches, and a snapshot
+    /// shares only parts that are frozen for good, copying any part a block
+    /// froze. So every object on the chain is frozen too, and a store into
+    /// any of them traps (`rt_check_mutable`: field stores, `rt_index_set`,
+    /// and every List and Map method that drops or moves an element). Each
+    /// slot read keeps the value it had, and each object is kept alive by
+    /// the frozen slot it was read from, down from the local or parameter
+    /// that keeps the root alive -- the same reason it is stable itself. A
+    /// SSA value names one object for its whole life, so whichever name the
+    /// frozen object is reached by, the answer is about the object.
     ///
-    /// Only ONE step, deliberately. A `const` block freezes the named object
-    /// alone, not what it reaches (`rt_freeze_enter` sets one flag), and a
-    /// snapshot shares rather than freezes any part of the graph already
-    /// frozen -- including a part only a `const` block froze, which thaws
-    /// when that block ends. So `a.b.c` and `a.xs[0]` may be overwritten
-    /// through `a.b` and `a.xs` while `a` itself cannot, and stay held. For
-    /// the same reason a promoted field -- read through the embedded object,
-    /// which is a separate object -- stays held, and so does anything read
-    /// through `this` or a bare field name inside a method: whether the
-    /// receiver is frozen is the caller's knowledge, not this function's.
+    /// A promoted field is read through the embedded object, which is a
+    /// separate object but reachable from the root, so it is frozen with it.
+    ///
+    /// Still held: anything read through `this` or a bare field name inside
+    /// a method, because whether the receiver is frozen is the caller's
+    /// knowledge, not this function's; and a step this function does not
+    /// know the type of (`static_ty` gives up), since it cannot tell whether
+    /// the step is a field of an object at all.
     fn frozen_place(&self, e: &Expr) -> bool {
-        let (root, field) = match e {
+        let (obj, field) = match e {
             Expr::Field(o, f, _) => (&**o, Some(f)),
             Expr::Index(o, _, _) => (&**o, None),
             _ => return false,
         };
-        let Expr::Var(name, _) = root else {
-            return false;
+        let ty = match obj {
+            Expr::Var(name, _) => {
+                let Some((ty, val, is_const)) = self.binding(name) else {
+                    return false;
+                };
+                let frozen = self.freezes.iter().any(|(v, _)| *v == val)
+                    || (is_const && self.snapshots.contains(&val));
+                if !frozen {
+                    return false;
+                }
+                ty
+            }
+            Expr::Field(..) | Expr::Index(..) => {
+                if !self.frozen_place(obj) {
+                    return false;
+                }
+                let Some(ty) = self.static_ty(obj, true) else {
+                    return false;
+                };
+                ty
+            }
+            _ => return false,
         };
-        let Some((ty, val, is_const)) = self.binding(name) else {
-            return false;
-        };
-        let frozen = self.freezes.iter().any(|(v, _)| *v == val)
-            || (is_const && self.snapshots.contains(&val));
-        if !frozen {
-            return false;
-        }
         match field {
-            // A field of a user struct, declared on the type itself.
+            // A field of a user struct, declared on the type or promoted
+            // from an embedded one.
             Some(f) => {
                 if self.seq_elem(ty).is_some() || self.map_kv(ty).is_some() {
                     return false;
@@ -188,9 +202,7 @@ impl Lowerer {
                     return false;
                 };
                 let td = &self.typedefs[tid as usize];
-                !td.is_enum
-                    && !td.has_no_object()
-                    && self.field_path(tid, f).is_some_and(|p| p.len() == 1)
+                !td.is_enum && !td.has_no_object() && self.field_path(tid, f).is_some()
             }
             // An element of a List or an Array, which the runtime refuses to
             // change while it is frozen. A `bytes` element is an int, and

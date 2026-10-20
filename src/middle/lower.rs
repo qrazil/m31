@@ -220,10 +220,10 @@ pub struct Lowerer {
     /// Owned temporaries produced while lowering the current statement.
     stmt_temps: Vec<Value>,
     /// Objects currently frozen by an active `const` block, innermost last:
-    /// the object and the bool `rt_freeze_enter` returned for it, which
-    /// `rt_freeze_leave` needs to decide whether to actually clear the flag
-    /// again (docs/const-decision.md, "Corrected 2026-09-27" -- restore,
-    /// don't unconditionally clear). Popped back to its length on entry once
+    /// the object and what `rt_freeze_enter` returned for it -- the objects
+    /// that call froze, which `rt_freeze_leave` thaws and no others
+    /// (docs/const-decision.md, "Corrected 2026-09-27" -- restore, don't
+    /// unconditionally clear). Popped back to its length on entry once
     /// `lower_const_block` returns, so it never outlives the Rust call that
     /// pushed it -- the same discipline `scopes` and `owned` already keep.
     /// `return`, `break`, `continue` and `?` leave one or more `const`

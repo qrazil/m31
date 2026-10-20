@@ -1,0 +1,149 @@
+// A `const` block freezes everything the named object reaches, not the
+// object alone, and on the way out thaws exactly what it froze
+// (docs/const-decision.md, "The third decision"). Every change here goes
+// through a parameter, where the compiler cannot see the freeze; made inside
+// the block, each one traps (corpus/traps/1316 to 1321).
+
+type P {
+    int x;
+}
+
+type Q {
+    P p;
+}
+
+type H {
+    Q q;
+    List<Q> qs;
+}
+
+type Node {
+    int v;
+    List<Node> next;
+}
+
+type E {
+    P e;
+}
+
+type W {
+    E;
+    int n;
+}
+
+void set(Q q, int x) {
+    q.p = P(x);
+}
+
+void grow(List<Q> qs, int x) {
+    qs.push(Q(P(x)));
+}
+
+int read(P p, H h) {
+    return p.x * 10 + h.qs.size();
+}
+
+// After the block, every object it froze is mutable again, at every depth.
+void thaw() {
+    H h = H(Q(P(1)), [Q(P(2))]);
+    const h {
+        print(h.q.p.x + h.qs[0].p.x);
+    }
+    set(h.q, 10);
+    set(h.qs[0], 20);
+    grow(h.qs, 30);
+    print(h.q.p.x + h.qs[0].p.x + h.qs[1].p.x);
+}
+
+// A read at any depth out of the frozen object is passed without the caller
+// retaining it (src/middle/lower/hold.rs, `frozen_place`), a promoted field
+// included; it must behave, and release, exactly as a held one did.
+void chain() {
+    H h = H(Q(P(1)), [Q(P(2)), Q(P(3))]);
+    W w = W(E(P(4)), 5);
+    const h, w {
+        print(read(h.q.p, h));
+        print(read(h.qs[1].p, h));
+        print(read(w.e, H(h.q, h.qs)));
+    }
+}
+
+// An inner block over a value that shares a part with the outer one takes
+// only what the outer one had not frozen, and gives back only that.
+void nested() {
+    H h = H(Q(P(1)), []);
+    H g = H(h.q, []);
+    const h {
+        const g {
+            print(g.q.p.x);
+        }
+        // `g` and its list are the inner block's, and mutable again;
+        // `g.q` is `h.q`, still frozen by this block.
+        grow(g.qs, 2);
+        print(g.qs.size());
+    }
+    set(g.q, 3);
+    print(h.q.p.x);
+}
+
+// A block in a callee, meeting a value its caller froze, leaves it frozen
+// when it ends; meeting a mutable one, it gives it back mutable.
+void look(H h) {
+    const h {
+        print(h.q.p.x);
+    }
+}
+
+void callee() {
+    H h = H(Q(P(1)), []);
+    const h {
+        look(h);
+        print(h.qs.size());
+    }
+    look(h);
+    set(h.q, 2);
+    print(h.q.p.x);
+}
+
+// A snapshot taken inside the block copies what the block froze -- it will
+// thaw -- so the constant keeps its value when the original changes after.
+void snapshot() {
+    H h = H(Q(P(1)), [Q(P(2))]);
+    H kept = H(Q(P(0)), []);
+    Q part = Q(P(0));
+    const h {
+        const H c = h;
+        const Q d = h.q;
+        kept = c;
+        part = d;
+    }
+    set(h.q, 5);
+    set(h.qs[0], 6);
+    print(kept.q.p.x + kept.qs[0].p.x);
+    print(part.p.x);
+    print(h.q.p.x + h.qs[0].p.x);
+}
+
+// A cycle: the walk meets the first node again, already frozen, and stops.
+void cycle() {
+    Node a = Node(1, []);
+    Node b = Node(2, []);
+    a.next.push(b);
+    b.next.push(a);
+    const a {
+        print(a.next[0].next[0].v);
+        const b {
+            print(b.next[0].v);
+        }
+    }
+    // Mutable again: break the cycle, so both nodes are freed.
+    b.next.clear();
+    print(a.next[0].v);
+}
+
+thaw();
+chain();
+nested();
+callee();
+snapshot();
+cycle();

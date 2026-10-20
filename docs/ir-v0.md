@@ -230,16 +230,17 @@ and a store into a frozen object traps before anything is released:
 
   - any chain of elements read out of a module constant (`T[i]`, `G[i][j]`,
     `lib.T[i]`): a constant's whole graph is static and immortal;
-  - ONE step -- a field declared on the type itself (`c.p`), or an element
-    of a List or an Array (`xs[i]`) -- out of a local or parameter that is
+  - any chain of fields and List or Array elements (`c.p`, `h.q.p`,
+    `h.ps[i].x`, a promoted field) out of a local or parameter that is
     named by a `const` block active at that point, or that was bound by a
     `const` declaration.
 
-Only one step for the second, because a `const` block freezes the named
-object alone and a snapshot shares, unfrozen-by-it, any part of the graph a
-`const` block had already frozen. So `h.q.p`, `h.ps[i]` and a promoted
-field stay held, as does a field read through `this` or a bare field name
-inside a method: whether the receiver is frozen is not visible there.
+The whole chain for the second, because every freeze is deep: a `const`
+block freezes everything the named object reaches, and a snapshot shares
+only parts frozen for good, copying any part a block froze
+(docs/const-decision.md, "The deep freeze, as implemented"). A field read
+through `this` or a bare field name inside a method is still held: whether
+the receiver is frozen is not visible there.
 
 ### 5.2 Returns are **owned (+1)**
 

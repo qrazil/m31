@@ -3,6 +3,37 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased
+
+### Changed
+
+- **A `const` block freezes everything the named value reaches.** It froze
+  the named object alone, so inside `const h { .. }` a store into `h.p`
+  trapped but one into `h.q.p` -- made through a parameter, where the
+  compiler cannot see it -- did not. Now every object reachable from `h` is
+  frozen for the block, and on the way out exactly the objects this block
+  froze are thawed: anything frozen before it began (a module constant, a
+  `const` binding, an enclosing block, a block in a caller) stays frozen.
+  The objects a block takes are marked with a new header bit, `RC_HELD`,
+  beside `RC_FROZEN`, and listed for the exit; the walk stops at anything
+  already frozen, which also ends it on a cycle. It costs a walk of the part
+  of the graph not frozen yet at entry and a pass over it at exit; a value
+  with no references, such as a `bytes` buffer, still costs a flag set and
+  cleared (docs/const-decision.md, "The deep freeze, as implemented";
+  reference §4.1a).
+- **A `const` binding inside a `const` block copies what the block froze.**
+  `rt_snapshot` shared any part that was already frozen, including one only
+  a block had frozen, so after `const b { const T c = b; }` the constant
+  changed when `b` did. It now shares only parts frozen for good and copies
+  the rest, so that binding costs a deep copy of `b`; one that reaches a
+  value owning a resource traps, as it does outside a block.
+- **Any chain read out of a frozen local or parameter is passed without a
+  retain.** 0.9.1 skipped the hold for one step out of a `const` local or a
+  name in an active `const` block; with the freeze deep, `h.q.p`,
+  `h.ps[i].x` and promoted fields are skipped too. Reads through `this` are
+  still held (`frozen_place` in src/middle/lower/hold.rs; corpus
+  `1315-const-block-deep-freeze`, traps `1316` to `1321`).
+
 ## 0.9.1 (2026-10-20)
 
 ### Changed

@@ -52,8 +52,19 @@
 #define RC_PROBING (LONG_MAX / 8 + 1)
 #define RC_BUSY    (RC_SORTING | RC_PROBING)
 
+/* Frozen by a `const` BLOCK, and so frozen only until that block ends
+ * (rt_freeze_enter below). Always set together with RC_FROZEN, never alone:
+ * every mutation path tests RC_FROZEN and needs no second test. What it adds
+ * is the difference between a freeze that will be undone and one that will
+ * not, which is the one thing rt_snapshot has to know -- it may share a part
+ * frozen for good, and must copy a part that a block froze and will thaw
+ * (docs/const-decision.md, "The third decision"). An immortal object has
+ * this bit set too, as it has every bit; rt.c's rc_permanent tests for
+ * RC_IMMORTAL first. */
+#define RC_HELD (LONG_MAX / 16 + 1)
+
 /* Everything in the header word that is not the count. */
-#define RC_FLAGS (RC_FROZEN | RC_BUSY)
+#define RC_FLAGS (RC_FROZEN | RC_HELD | RC_BUSY)
 
 typedef struct Obj Obj;
 
@@ -180,14 +191,15 @@ void rt_drop_leave(RcDrain *save);
 
 /* A `const` binding takes a frozen snapshot of its value
  * (docs/const-decision.md). Takes the caller's +1 on `o` and returns a +1 on
- * a frozen value equal to it:
- *   - already frozen (or immortal, or a str): `o` itself;
+ * a value equal to it, frozen for good:
+ *   - already frozen for good (or immortal, or a str): `o` itself;
  *   - reachable from nothing but `o` -- a literal, a fresh construction, a
  *     call's result nobody else holds: `o`, frozen in place, no copy;
  *   - otherwise: a deep copy of `o`, frozen, and `o` released. The original
  *     stays mutable and later changes to it do not reach the snapshot.
- * Frozen and immortal parts, and every str, are shared rather than copied:
- * they cannot change. */
+ * Parts frozen for good, and every str, are shared rather than copied: they
+ * cannot change. A part a `const` block froze (RC_HELD) is copied like a
+ * mutable one, because it thaws when the block ends. */
 Obj *rt_snapshot(Obj *o);
 
 /* For emitted CopyFns only -- see CopyFn above. rt_copy_child returns a +1
@@ -220,24 +232,36 @@ static inline void rt_check_mutable(Obj *o) {
 }
 
 /* A `const` BLOCK's runtime half (docs/const-decision.md, "`const` is also a
- * block"): freeze `o` for a lexical region rather than for good. The
- * mechanism is exactly the one docs/reentrancy-decision.md already uses for
- * RC_SORTING/RC_PROBING -- mark, trap on reentrant mutation through
- * rt_check_mutable and rt_frozen_trap above, restore -- applied to RC_FROZEN
- * instead.
+ * block" and "The third decision"): freeze `o` and everything reachable from
+ * it for a lexical region rather than for good. Every object this freezes
+ * gets RC_FROZEN and RC_HELD, so rt_check_mutable traps on a change to any
+ * of them, at any depth, and rt_snapshot knows not to share them.
  *
- * rt_freeze_enter sets the flag and reports whether IT did: false when `o`
- * arrived already frozen (a module constant, or an enclosing `const` block),
- * including immortal. The compiler emits one call per named value on entry
- * to the block and passes what it returned straight to rt_freeze_leave on
+ * The walk stops at an object that is already frozen -- for good, or by an
+ * enclosing block -- because whatever froze it froze everything it reaches
+ * too: every freeze is deep. That also makes the flag the walk's visited
+ * mark, so a cycle ends without a table of its own. The cost is a walk of
+ * the part of the graph that was not frozen yet, at entry and again at exit;
+ * a value that arrives frozen costs one test.
+ *
+ * rt_freeze_enter returns what rt_freeze_leave needs to undo exactly this
+ * freeze and nothing else -- "restore, don't unconditionally clear": 0 when
+ * it froze nothing (`o` arrived frozen, or is a str, which is immutable
+ * anyway), 1 when it froze `o` alone (a leaf: a List<int>, a bytes, a type
+ * with no reference fields), and otherwise the address of the list of the
+ * objects it froze. The compiler emits one call per named value on entry to
+ * the block and passes what it returned straight to rt_freeze_leave on
  * every path out -- normal fall-through, `return`, `break`, `continue`, and
- * `?` propagation -- which clears the flag only if this call was the one
- * that set it. That is "restore, don't unconditionally clear": freezing a
- * value that was already const is then a no-op rather than a temporary hole
- * in its guarantee. Nothing calls this pair for a trap: nothing runs after
- * one, so nothing depends on the flag. */
-bool rt_freeze_enter(Obj *o);
-void rt_freeze_leave(Obj *o, bool took);
+ * `?` propagation -- which thaws exactly those objects and frees the list.
+ * An object an outer block or a snapshot froze before this one is not in it,
+ * so it stays frozen. Nothing calls this pair for a trap: nothing runs after
+ * one, so nothing depends on the flag.
+ *
+ * The list holds no reference: every object in it is reachable from `o`
+ * through objects the block froze, so none of them can be dropped before the
+ * block ends, and `o` is held by the local or parameter the block names. */
+int64_t rt_freeze_enter(Obj *o);
+void rt_freeze_leave(Obj *o, int64_t took);
 
 /* Allocate `size` bytes of object, refcount 1, with the given drop function
  * (NULL if the type holds no references). The header is initialised; the

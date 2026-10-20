@@ -3,10 +3,10 @@
 // `frozen_place`): while the object is frozen nothing can overwrite the
 // place, so the value it holds stays alive for the whole call. These calls
 // must behave, and release, exactly as the held ones did -- inside a `const`
-// block, through a `const` local, out of a module constant -- beside the
-// reads that are still held: one step deeper (`h.ps[1]`, whose list the
-// block did not freeze), and the same read after the block, where the
-// object can change once more.
+// block, through a `const` local, out of a module constant -- at any depth,
+// since every freeze is deep (`h.ps[1]`, whose list the block froze with
+// `h`), beside the read that is still held: the same read after the block,
+// where the object can change once more.
 
 type P {
     int x;

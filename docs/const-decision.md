@@ -61,15 +61,18 @@ a reference type other than `str` calls it after the local has taken its
 
 | the value at the binding | result | cost |
 |---|---|---|
-| already frozen: another `const`, a module constant, a path through one | itself | none |
+| already frozen for good: another `const`, a module constant, a path through one | itself | none |
 | reachable from nothing but itself: a literal, a fresh construction, a call's result nobody kept | itself, **frozen in place** | a walk of the graph |
 | anything in it held from outside: `const T a = b;`, `[p]` while `p` names the Point | a **deep copy**, frozen; the original released and left mutable | a walk, plus a copy of every unfrozen object reached |
 
 "Reachable from nothing but itself" is the count `rt_check_unique` already
 makes at a thread boundary — the references into each object from within
 the graph must equal its refcount — walking with the per-type `WalkFn`. A
-`str` and anything already frozen are left out of the count and out of the
-copy: nobody can change them, so sharing them changes nothing.
+`str` and anything already frozen for good are left out of the count and out
+of the copy: nobody can change them, so sharing them changes nothing. A part
+that only a `const` block froze is not frozen for good — it thaws when the
+block ends — so it is counted and copied like a mutable one (the third
+decision, below).
 
 **Nothing is refused** -- except a value that owns a resource, below. The first version refused `const T a = b;` at
 compile time ("bind `clone(b)`") and trapped on a fresh value with a shared
@@ -368,8 +371,10 @@ does not indicate, and it would have meant nothing at all about an escaped
 permanent `const`: set `RC_FROZEN` on entry, restore whatever it was before
 on exit — restore rather than unconditionally clear, so freezing a value
 that arrived already-const (a module constant, say) is a no-op rather than
-a temporary hole in its guarantee. The compiler refuses the mutations it can
-see; the runtime traps on the rest. No count is read anywhere in this.
+a temporary hole in its guarantee. (Since the freeze became deep, "restore"
+means thawing exactly the objects this block froze; see "The deep freeze, as
+implemented", below.) The compiler refuses the mutations it can see; the
+runtime traps on the rest. No count is read anywhere in this.
 
 **And on reflection, there is no separate hazard to detect.** The scenario
 the refcount check was reaching for — some code retains a reference to `b`
@@ -414,31 +419,39 @@ Recorded here rather than fixed silently because the hoisting pass does not
 exist yet, and whoever writes it would otherwise find the old justification
 and believe it.
 
-### What the compiler already relies on: one step out of a frozen object
+### What the compiler relies on: everything a frozen object reaches
 
 The caller's hold on a borrowed argument (docs/ir-v0.md §5.1) is skipped for
-a place that cannot be overwritten during the call: a direct field or List
-element of a local or parameter named by an active `const` block or bound
-by a `const` declaration, and any element chain out of a module constant
-(`frozen_place`, src/middle/lower/hold.rs). Only one step is trusted, and
-the reason is worth stating because it is narrower than this record's
-"freezes the object and everything reachable from it":
+a place that cannot be overwritten during the call: any chain of fields and
+List or Array elements — `h.p`, `h.q.p`, `h.ps[i].x`, a promoted field —
+out of a local or parameter named by an active `const` block or bound by a
+`const` declaration, and any element chain out of a module constant
+(`frozen_place`, src/middle/lower/hold.rs). Every object on such a chain is
+frozen, because every freeze is deep (the third decision, below), so no slot
+on it can be written while the operation runs, and each object is kept alive
+by the frozen slot it was read from.
 
-  - `rt_freeze_enter` sets the flag on the named object alone. Inside
-    `const h { .. }`, `h.p = x` traps but `h.q.p = x` does not.
-  - `rt_snapshot` leaves out of its walk any object already frozen, so a
-    snapshot can share a part that only a `const` block froze, and that part
-    thaws when the block ends.
+Until the deep freeze was implemented only ONE step was trusted, and the
+reason is worth keeping, because it is what the deep freeze had to fix:
 
-So `h.p` is safe to borrow while `h` is frozen, and `h.q.p` is not, and the
-compiler holds the latter. Whether the block form should freeze deeply was
-settled the same day; see the third decision below.
+  - `rt_freeze_enter` set the flag on the named object alone. Inside
+    `const h { .. }`, `h.p = x` trapped but `h.q.p = x` did not.
+  - `rt_snapshot` left out of its walk any object already frozen, so a
+    snapshot could share a part that only a `const` block froze, and that
+    part thawed when the block ended.
+
+Both are gone; see "The deep freeze, as implemented". What is still held is
+anything read through `this` or a bare field name inside a method: whether
+the receiver is frozen is the caller's knowledge, and nothing at the read
+shows it.
 
 ---
 
 # The third decision: the freeze is deep, and a parameter can be `const`
 
-Decided **2026-10-19** by the author. Not yet implemented.
+Decided **2026-10-19** by the author. The deep freeze is implemented
+(2026-10-20; "The deep freeze, as implemented", below); `const` parameters,
+user-type module constants and `const` types are not yet.
 
 **The freeze is deep, everywhere.** `const` already means "the value never
 changes, deeply"; the runtime is brought into line with that. A `const`
@@ -490,6 +503,77 @@ depth -- ever changes; the block form alone ends, when the block does.
 Order: user-type module constants after `const` parameters, then `const`
 types.
 
+## The deep freeze, as implemented
+
+**Two kinds of frozen, one more bit.** A `const` block's freeze ends and a
+snapshot's does not, and `rt_snapshot` has to tell them apart: it may share
+a part frozen for good, and must not share a part that will thaw. So a block
+sets a second bit beside `RC_FROZEN`, `RC_HELD` (`runtime/rt.h`, directly
+below `RC_PROBING`), on every object it freezes. Every mutation path still
+tests `RC_FROZEN` alone and pays nothing new; `RC_HELD` is never set without
+it. Frozen for good is `RC_FROZEN` without `RC_HELD`, or `RC_IMMORTAL`
+(which has every bit set, so it is tested first). The count keeps 59 bits.
+
+**Entry.** `rt_freeze_enter` freezes the named object and walks what it
+reaches with the per-type `WalkFn`, marking each object `RC_FROZEN |
+RC_HELD` and appending it to a list the first time it is met. The walk does
+not go into an object already frozen -- by a snapshot, a module constant or
+an enclosing block -- because every freeze is deep, so whatever froze it
+froze everything below it too. That makes the flag the walk's visited set:
+a cycle or a diamond is met frozen the second time, and the walk ends with
+no table of its own. A `str` is skipped, being immutable already.
+
+**Exit.** The list is what the block took, and `rt_freeze_leave` thaws
+exactly those objects, clearing both bits, and frees it. An object an outer
+block, a snapshot or a module constant froze is not in it, so it stays
+frozen: nested blocks, an inner block over a value that shares a part with
+the outer one, and a callee's block meeting its caller's frozen value are
+all the same case. Blocks end in the reverse of the order they began --
+they are lexical, and a callee's ends before its caller's -- so a list
+never names an object a later block still needs frozen. The list holds no
+reference: every object in it stays reachable from the named one through
+frozen slots until the block ends, and the named one is held by its local
+or parameter. What `rt_freeze_enter` returns, and the compiler keeps for
+the exit, is now an `int` rather than a bool: 0 when it froze nothing, 1
+when it froze the named object alone (a `bytes`, a `List<int>`, a type with
+no reference fields -- no list is allocated), and otherwise the list's
+address.
+
+A mark that tells one block from another, in place of the list, was
+considered and dropped: there are no bits left to number blocks with, and a
+walk on exit cannot tell an inner block's objects from an outer one's that
+the inner graph reaches.
+
+**The snapshot.** `rt_snapshot` now shares only what is frozen for good.
+A part with `RC_HELD` is counted and walked like a mutable one, and a graph
+with any such part is copied rather than frozen in place: freezing it in
+place would leave the block's object frozen after the block, and sharing it
+would let the block's end thaw a part of the constant. So `const T c = b;`
+inside `const b { .. }` costs a deep copy of `b`, where it used to cost
+nothing -- and used to be wrong.
+
+**Resources.** A block freezes an object that owns a resource like any
+other, for the block: a File read inside it traps, because a read changes
+the File -- as it already did when the block named the File itself. Its
+destructor cannot run while it is frozen, since the block keeps it
+reachable. A snapshot inside the block of a part that owns a resource now
+traps (`refuse_resource` runs over every object the walk counts, and the
+walk now counts these); before, the frozen part was shared, and a resource
+left the block inside a permanent constant (corpus/traps/1321).
+
+**Cost.** A block costs a walk of the part of its graph not frozen yet, at
+entry, and a pass over the same objects at exit: O(objects reached and not
+already frozen), plus a list of them for the life of the block. A value
+that arrives frozen costs one test, and a leaf a flag set and cleared, as
+before. A block over a large mutable graph in a hot loop is therefore no
+longer free; a block over the buffer the second decision was written for --
+a `bytes` -- still is.
+
+**What the compiler gains.** `frozen_place` follows the whole chain, as
+above. `refuse_const_write` already refused a change through any chain
+starting at a frozen name, so the compile-time half needed no change: it
+had been deeper than the runtime all along.
+
 ---
 
 ## What is open
@@ -501,5 +585,6 @@ types.
     f(CONSTANT)` now is: a string literal is immortal for the same reason.
     Today it is refused as borrowed; unchanged here.
   - The frozen bit assumes a two's-complement `long` of at least 32 bits.
-    On a 32-bit `long` the count has 30 bits, which a program would need a
-    billion references to one object to exhaust.
+    On a 32-bit `long` the four flags leave the count 27 bits, which a
+    program would need over a hundred million references to one object to
+    exhaust.

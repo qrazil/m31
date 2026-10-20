@@ -1,0 +1,34 @@
+// A `const` local is frozen for good. A `const` block in a callee that meets
+// it finds it frozen already, freezes nothing, and so thaws nothing when it
+// ends: the constant's parts stay frozen (docs/const-decision.md, "The third
+// decision").
+
+type P {
+    int x;
+}
+
+type Q {
+    P p;
+}
+
+type H {
+    Q q;
+}
+
+void set(Q q, int x) {
+    q.p = P(x);
+}
+
+void look(H h) {
+    const h {
+        print(h.q.p.x);
+    }
+}
+
+void run() {
+    const H c = H(Q(P(1)));
+    look(c);
+    set(c.q, 2);
+}
+
+run();

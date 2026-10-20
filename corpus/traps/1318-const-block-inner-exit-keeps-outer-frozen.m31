@@ -1,0 +1,33 @@
+// When an inner block ends it thaws only what IT froze. `g.q` is the same
+// object as `h.q`, which the outer block froze first, so the inner block
+// did not take it and does not give it back: it stays frozen until the
+// outer block ends (docs/const-decision.md, "The third decision").
+
+type P {
+    int x;
+}
+
+type Q {
+    P p;
+}
+
+type H {
+    Q q;
+}
+
+void set(Q q, int x) {
+    q.p = P(x);
+}
+
+void run() {
+    H h = H(Q(P(1)));
+    H g = H(h.q);
+    const h {
+        const g {
+            print(g.q.p.x);
+        }
+        set(g.q, 2);
+    }
+}
+
+run();

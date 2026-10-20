@@ -130,8 +130,9 @@ with `rc_guard_take` stubbed out:
 All three came out marginally *faster* with the guard, which is to say the
 cost is below the noise floor of this machine — the two builds differ by two
 stores per `sort()` call and two per map operation, against 20 000 000
-comparisons and 600 000 probes. The count keeps 60 bits, which is 10^18
-references to one object.
+comparisons and 600 000 probes. The count kept 60 bits, which is 10^18
+references to one object; since `RC_HELD` (docs/const-decision.md, "The
+third decision") it keeps 59, which is still over 10^17.
 
 An immortal object is never marked: `RC_IMMORTAL` is every bit set, so the
 bits could not be cleared again. It does not need them — it reads as frozen,

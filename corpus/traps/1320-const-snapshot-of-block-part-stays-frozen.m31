@@ -1,0 +1,31 @@
+// A snapshot taken inside a `const` block copies what the block froze,
+// because that thaws when the block ends; the copy is frozen for good. So
+// after the block the original part changes and the snapshot's does not
+// (docs/const-decision.md, "The third decision").
+
+type P {
+    int x;
+}
+
+type Q {
+    P p;
+}
+
+void set(Q q, int x) {
+    q.p = P(x);
+}
+
+void run() {
+    Q q = Q(P(1));
+    Q kept = Q(P(0));
+    const q {
+        const Q c = q;
+        kept = c;
+    }
+    set(q, 2);
+    print(q.p.x);
+    print(kept.p.x);
+    set(kept, 3);
+}
+
+run();

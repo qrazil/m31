@@ -1,0 +1,30 @@
+// A `const` block freezes everything the named object reaches
+// (docs/const-decision.md, "The third decision"), so a store two steps down
+// traps like a store into the object itself. Through a parameter, where the
+// compiler cannot see the freeze; written as `h.q.p = ..` inside the block,
+// it is refused at compile time.
+
+type P {
+    int x;
+}
+
+type Q {
+    P p;
+}
+
+type H {
+    Q q;
+}
+
+void set(Q q, int x) {
+    q.p = P(x);
+}
+
+void run() {
+    H h = H(Q(P(1)));
+    const h {
+        set(h.q, 2);
+    }
+}
+
+run();

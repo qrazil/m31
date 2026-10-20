@@ -314,16 +314,68 @@ static void rc_guard_drop(Obj *o, long bit, bool took) {
 }
 
 /* A `const` block's runtime half (docs/const-decision.md, "`const` is also a
- * block"; rt.h has the full comment). Thin wrappers over the guard above,
- * applied to RC_FROZEN instead of RC_SORTING/RC_PROBING: the compiler is the
- * caller here, one call per name on entry and on every exit, rather than the
- * runtime bracketing its own callback. */
-bool rt_freeze_enter(Obj *o) {
-    return rc_guard_take(o, RC_FROZEN);
+ * block" and "The third decision"; rt.h has the full comment). Not the guard
+ * above: that marks one object, and a block freezes everything the named
+ * one reaches.
+ *
+ * The objects frozen are recorded in a list that is also the walk's work
+ * queue: an object is marked and appended when first met, and walked when
+ * the loop reaches it. The mark is the visited set -- an object already
+ * frozen is never appended again, nor walked into -- so a cycle ends, and an
+ * object reached twice is frozen and thawed once. */
+typedef struct {
+    int64_t len;
+    int64_t cap;
+    Obj    *objs[];
+} Held;
+
+#define RC_HELD_BITS (RC_FROZEN | RC_HELD)
+
+static void held_visit(void *ctx, Obj *c) {
+    Held **hp = (Held **)ctx;
+    if (c == NULL || (c->rc & RC_FROZEN) != 0 || c->ty == &rt_str_type) return;
+    Held *h = *hp;
+    if (h->len == h->cap) {
+        int64_t cap = h->cap * 2;
+        h = realloc(h, sizeof(Held) + (size_t)cap * sizeof(Obj *));
+        if (h == NULL) rt_trap("out of memory");
+        h->cap = cap;
+        *hp = h;
+    }
+    c->rc |= RC_HELD_BITS;
+    h->objs[h->len++] = c;
 }
 
-void rt_freeze_leave(Obj *o, bool took) {
-    rc_guard_drop(o, RC_FROZEN, took);
+int64_t rt_freeze_enter(Obj *o) {
+    /* RC_IMMORTAL has every bit set, so an immortal object is frozen here. */
+    if ((o->rc & RC_FROZEN) != 0 || o->ty == &rt_str_type) return 0;
+    o->rc |= RC_HELD_BITS;
+    if (o->ty == NULL || o->ty->walk == NULL) return 1;
+    Held *h = malloc(sizeof(Held) + 16 * sizeof(Obj *));
+    if (h == NULL) rt_trap("out of memory");
+    h->len = 1;
+    h->cap = 16;
+    h->objs[0] = o;
+    for (int64_t i = 0; i < h->len; i++) {
+        Obj *cur = h->objs[i];
+        if (cur->ty != NULL && cur->ty->walk != NULL) cur->ty->walk(cur, held_visit, &h);
+    }
+    if (h->len == 1) {
+        free(h);
+        return 1;
+    }
+    return (int64_t)(intptr_t)h;
+}
+
+void rt_freeze_leave(Obj *o, int64_t took) {
+    if (took == 0) return;
+    if (took == 1) {
+        o->rc &= ~RC_HELD_BITS;
+        return;
+    }
+    Held *h = (Held *)(intptr_t)took;
+    for (int64_t i = 0; i < h->len; i++) h->objs[i]->rc &= ~RC_HELD_BITS;
+    free(h);
 }
 
 const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
@@ -2422,15 +2474,24 @@ typedef struct {
     int64_t  todo_cap;
     int64_t  cap;    /* a power of two */
     int64_t  len;
-    /* Collecting for rt_freeze rather than a thread crossing: skip what is
-     * already frozen and every str as well as immortals. Those may be shared
-     * by a const, because nobody can change them; they may NOT be shared by
-     * a value crossing threads, because two threads would still race on
-     * their counts. */
+    /* Collecting for rt_snapshot rather than a thread crossing: skip what
+     * is frozen for good and every str as well as immortals. Those may be
+     * shared by a const, because nobody can change them; they may NOT be
+     * shared by a value crossing threads, because two threads would still
+     * race on their counts. What a `const` block froze is NOT skipped: it
+     * thaws when the block ends, so a snapshot has to copy it. */
     bool     freezing;
 } Reach;
 
 static void reach_add(Reach *r, Obj *o);
+
+/* Frozen for good: immortal, or frozen by a snapshot -- not by a `const`
+ * block, which sets RC_HELD beside RC_FROZEN and will clear both (rt.h).
+ * RC_IMMORTAL has RC_HELD set too, as it has every bit, so it is tested
+ * first. */
+static inline bool rc_permanent(const Obj *o) {
+    return o->rc == RC_IMMORTAL || (o->rc & (RC_FROZEN | RC_HELD)) == RC_FROZEN;
+}
 
 static void reach_grow(Reach *r) {
     int64_t cap = r->cap == 0 ? 64 : r->cap * 2;
@@ -2460,7 +2521,7 @@ static void reach_grow(Reach *r) {
 /* Record one reference into `o`, and queue it for walking the first time. */
 static void reach_add(Reach *r, Obj *o) {
     if (o == NULL || o->rc == RC_IMMORTAL) return;
-    if (r->freezing && ((o->rc & RC_FROZEN) != 0 || o->ty == &rt_str_type)) return;
+    if (r->freezing && (rc_permanent(o) || o->ty == &rt_str_type)) return;
     if (r->cap == 0 || (r->len + 1) * 10 >= r->cap * 7) reach_grow(r);
 
     int64_t mask = r->cap - 1;
@@ -2557,8 +2618,14 @@ void rt_check_unique(Obj *o) {
  *   - anything in it is held from outside: deep-copy it and freeze the copy.
  *     The original stays exactly as mutable as it was.
  *
- * Frozen and immortal objects and every str are left out of both the count
- * and the copy: nobody can change them, so sharing them is harmless. */
+ * Objects frozen for good -- by an earlier snapshot, or immortal -- and every
+ * str are left out of both the count and the copy: nobody can change them,
+ * so sharing them is harmless. An object a `const` block froze is not one of
+ * them. It cannot change now, but it will once the block ends, so it is
+ * counted, and a graph with one in it is copied rather than frozen in place:
+ * freezing it in place would leave the block's object frozen for good after
+ * the block, and sharing it would let the block's end thaw a part of the
+ * snapshot (docs/const-decision.md, "The third decision"). */
 
 /* Old object -> its copy, open addressing on the old pointer. The new
  * objects are the keys' values, which is also the list to freeze. */
@@ -2608,7 +2675,7 @@ static Obj *copy_obj(CopyMap *m, Obj *o);
 Obj *rt_copy_child(void *ctx, Obj *c) {
     CopyMap *m = (CopyMap *)ctx;
     if (c == NULL) return NULL;
-    if ((c->rc & RC_FROZEN) != 0 || c->ty == &rt_str_type) {
+    if (rc_permanent(c) || c->ty == &rt_str_type) {
         rc_inc(c);
         return c;
     }
@@ -2722,9 +2789,11 @@ static void refuse_resource(const Obj *o) {
 }
 
 Obj *rt_snapshot(Obj *o) {
-    if ((o->rc & RC_FROZEN) != 0 || o->ty == &rt_str_type) return o;
+    if (rc_permanent(o) || o->ty == &rt_str_type) return o;
     if (o->ty == NULL || o->ty->walk == NULL) {
         refuse_resource(o);
+        /* A leaf a block froze reads as more than 1 here, its flags being
+         * above the count, so it takes the copy below. */
         if (o->rc == 1) {
             o->rc |= RC_FROZEN;
             return o;
@@ -2733,7 +2802,12 @@ Obj *rt_snapshot(Obj *o) {
         Reach r = { NULL, NULL, NULL, 0, 0, 0, 0, true };
         bool private = reach_private(&r, o);
         for (int64_t i = 0; i < r.cap; i++) {
-            if (r.keys[i] != NULL) refuse_resource(r.keys[i]);
+            if (r.keys[i] == NULL) continue;
+            refuse_resource(r.keys[i]);
+            /* Something a `const` block froze: copy, see above. It is
+             * reachable from the block's own name, so the counts would
+             * nearly always say "shared" anyway; this makes it always. */
+            if ((r.keys[i]->rc & RC_HELD) != 0) private = false;
         }
         if (private) {
             for (int64_t i = 0; i < r.cap; i++) {

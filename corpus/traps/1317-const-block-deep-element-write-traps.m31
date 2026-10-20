@@ -1,0 +1,17 @@
+// An element of a list held by the frozen list is frozen too: the block
+// freezes everything the named object reaches (docs/const-decision.md, "The
+// third decision"), so writing into the inner list traps.
+
+void put(List<int> xs) {
+    xs[0] = 9;
+}
+
+void run() {
+    List<List<int>> grid = [[1, 2], [3, 4]];
+    const grid {
+        print(grid[1][0]);
+        put(grid[1]);
+    }
+}
+
+run();

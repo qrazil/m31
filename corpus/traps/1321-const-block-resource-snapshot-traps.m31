@@ -1,0 +1,33 @@
+// A `const` block freezes what the lambda captured, the `Res` included --
+// for the block only. A snapshot of it inside the block must not share that
+// part, which thaws when the block ends, and cannot copy it, because it owns
+// a resource: so the binding traps, as it does outside a block
+// (corpus/traps/1120). The static type is an interface, so only the runtime
+// can see the resource.
+interface Get {
+    int of();
+}
+
+type Res {
+    int id;
+}
+
+void Res.drop() {
+    print("closed");
+}
+
+int Res.id_of() {
+    return id;
+}
+
+void run() {
+    Res r = Res(7);
+    Get g = () => r.id_of();
+    const g {
+        print(g.of());
+        const Get kept = g;
+        print(kept.of());
+    }
+}
+
+run();

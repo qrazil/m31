@@ -224,28 +224,48 @@ fn a_field_of_a_mutable_local_is_still_held() {
 }
 
 #[test]
-fn only_the_first_step_out_of_a_frozen_root_is_unheld() {
-    // A `const` block freezes the named object alone: `o.h` is not frozen,
-    // so `o.h.p` can still be overwritten while `o` cannot, and is held.
-    // An element of a frozen list is not; a promoted field, read through
-    // the embedded object, is held like any field of an unfrozen object.
+fn a_whole_chain_out_of_a_frozen_root_is_unheld() {
+    // Every freeze is deep: a `const` block freezes everything the named
+    // object reaches, so `o.h.p`, `o.hs[0].p`, an element of a frozen list
+    // and a promoted field -- read through the embedded object -- can no
+    // more be overwritten during the call than `o.h` can. None is held.
     let out = ir(&format!(
-        "{HOLD_DECLS}type O {{ H h; }}\n\
+        "{HOLD_DECLS}type O {{ H h; List<H> hs; }}\n\
          type E {{ P q; }}\n\
          type W {{ E; }}\n\
          void j(P p, O o) {{ o.h.p = P(1); print(p.x); }}\n\
          void E.reset() {{ q = P(1); }}\n\
          void m(P p, W w) {{ w.reset(); print(p.x); }}\n\
-         void deep(O o) {{ const o {{ j(o.h.p, o); }} }}\n\
+         void deep(O o) {{ const o {{ j(o.h.p, o); j(o.hs[0].p, o); }} }}\n\
          void elem(List<P> xs, H h) {{ const xs {{ f(xs[0], h); }} }}\n\
-         void promoted(W w) {{ const w {{ m(w.q, w); }} }}\n"
+         void promoted(W w) {{ const w {{ m(w.q, w); }} }}\n\
+         void snap(O o) {{ const O c = o; j(c.hs[0].p, c); }}\n"
+    ));
+    for name in ["deep", "elem", "promoted"] {
+        let f = func_ir(&out, name);
+        assert_eq!(f.matches("rc_inc").count(), 0, "{f}");
+        assert_eq!(f.matches("rc_dec").count(), 0, "{f}");
+    }
+    // The local's own +1 and its release, and nothing for the argument.
+    let snap = func_ir(&out, "snap");
+    assert_eq!(snap.matches("rc_inc").count(), 1, "{snap}");
+    assert_eq!(snap.matches("rc_dec").count(), 1, "{snap}");
+}
+
+#[test]
+fn a_chain_out_of_a_mutable_root_is_still_held() {
+    // The same chains with nothing frozen: each one is held, once, for its
+    // own call.
+    let out = ir(&format!(
+        "{HOLD_DECLS}type O {{ H h; List<H> hs; }}\n\
+         void j(P p, O o) {{ o.h.p = P(1); print(p.x); }}\n\
+         void deep(O o) {{ j(o.h.p, o); j(o.hs[0].p, o); }}\n\
+         void after(O o) {{ const o {{ print(o.h.p.x); }} j(o.h.p, o); }}\n"
     ));
     let deep = func_ir(&out, "deep");
-    assert_eq!(deep.matches("rc_inc").count(), 1, "{deep}");
-    let elem = func_ir(&out, "elem");
-    assert_eq!(elem.matches("rc_inc").count(), 0, "{elem}");
-    let promoted = func_ir(&out, "promoted");
-    assert_eq!(promoted.matches("rc_inc").count(), 1, "{promoted}");
+    assert_eq!(deep.matches("rc_inc").count(), 2, "{deep}");
+    let after = func_ir(&out, "after");
+    assert_eq!(after.matches("rc_inc").count(), 1, "{after}");
 }
 
 #[test]

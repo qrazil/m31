@@ -1179,7 +1179,9 @@ frozen. The copy keeps the shape: two references to one object stay two
 references to one copy, and a cycle is copied as a cycle. Frozen and
 immortal parts (another `const`, a module constant) and every `str` are
 shared, not copied — so binding a `const` from another `const` costs
-nothing. A copied cycle can never be broken — breaking it is a change — so,
+nothing. A part frozen only by a `const` block (§4.1a) is not one of them:
+it thaws when the block ends, so it is copied like a mutable one, and
+`const T c = b;` inside `const b { .. }` costs a deep copy of `b`. A copied cycle can never be broken — breaking it is a change — so,
 as cycles are not collected (§7.1), it lives until the program ends.
   - **A change the compiler can see is an error**: assigning to the name,
     `a[i] = ..`, `a.f = ..`, or a method that changes a built-in collection
@@ -1246,14 +1248,25 @@ list and there is nothing for parentheses to disambiguate:
 const a, b, c { .. }
 ```
 
-`const NAME { .. }` freezes the object each name currently refers to, the
-same freeze §4.1 describes, **in place** — never a snapshot, so there is no
-copy and nothing beyond the check itself costs anything. Leaving the block,
-by any path — falling off the end, `return`, `break`, `continue`, or `?` —
-restores whatever the flag was immediately before the block; it is not
-unconditionally cleared. Freezing a value that arrived already frozen (a
-module constant, an enclosing `const` block) is then a no-op, not a hole in
-its guarantee for the rest of the block's life.
+`const NAME { .. }` freezes the object each name currently refers to and
+**everything reachable from it**, the same deep freeze §4.1 describes,
+**in place** — never a snapshot, so there is no copy. Leaving the block, by
+any path — falling off the end, `return`, `break`, `continue`, or `?` —
+thaws exactly the objects that block froze, and nothing else. Whatever was
+already frozen when it began (a module constant, a `const` binding, an
+enclosing `const` block) stays frozen, so a block is never a hole in
+another freeze's guarantee.
+
+The cost is a walk of the part of the graph that was not frozen yet, once
+on entry and once on exit: time proportional to it, and a list of the
+objects frozen, held for the block. A part already frozen is not walked
+into, so a value that arrives frozen costs one test, and a value with no
+references — a `bytes`, a `List<int>` — costs a flag set and cleared.
+
+An object that owns a resource (§4.4) is frozen with the rest, for the
+block: inside it, a method that changes the resource — reading a `File`
+moves its position — traps like any other change. Binding a `const` from
+such a value inside the block traps as it does anywhere (§4.1).
 
 Inside the region the rules are exactly §4.1's, scoped to it: a change the
 compiler can see through the name is refused at compile time, and one it
@@ -1269,6 +1282,10 @@ const buf {
     grow(buf);     // traps
 }
 ```
+
+The same holds when the inner block names a different value that shares a
+part with the outer one: it freezes, and afterwards thaws, only what the
+outer block had not frozen already.
 
 Only a local or a parameter may be named. A module constant is already
 frozen for the life of the program, and naming one is refused: there is
@@ -2364,7 +2381,10 @@ only when that whole graph is reachable from the value alone; otherwise the
 binding freezes a deep copy (§4.1). Either way it costs time proportional
 to the graph, once, at the binding. A graph containing an object that owns
 a resource is neither frozen nor copied: the binding is refused, or traps
-(§4.1), so no frozen object ever has a destructor.
+(§4.1), so no object frozen for good ever has a destructor. A `const`
+block (§4.1a) freezes transitively too, for the block only; an object it
+froze is reachable from the block's name until the block ends, so it is
+never freed while frozen.
 
 ### 7.4 Traps
 

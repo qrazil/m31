@@ -84,8 +84,10 @@ pub(super) fn emit_type_support(o: &mut String, m: &Module) {
             //
             // The plain store would also clear the frozen bit, but it never
             // has one to clear: a value that owns a resource can never be
-            // frozen -- the compiler refuses the `const` and rt_snapshot
-            // traps on what it cannot see -- so no frozen object reaches here.
+            // frozen for good -- the compiler refuses the `const` and
+            // rt_snapshot traps on what it cannot see -- and a `const` block
+            // that froze one keeps it reachable until it thaws it, so no
+            // frozen object reaches here.
             //
             // rt_drop_enter/rt_drop_leave bracket the call and nothing else.
             // This is the ONE place the runtime's iterative release reaches

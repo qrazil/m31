@@ -1194,7 +1194,9 @@ impl Lowerer {
             // be changed underneath that. Only a managed object gets the
             // runtime half.
             if self.is_managed(*ty) {
-                let took = self.new_val(IrTy::I1);
+                // What the block froze, for `rt_freeze_leave` to thaw: 0, 1
+                // or the address of a list (runtime/rt.h), so an `int`.
+                let took = self.new_val(IrTy::I64);
                 self.push(Inst::Call {
                     dst: Some(took),
                     func: "rt_freeze_enter".to_string(),
