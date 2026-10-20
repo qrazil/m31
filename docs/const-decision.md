@@ -431,9 +431,40 @@ the reason is worth stating because it is narrower than this record's
     thaws when the block ends.
 
 So `h.p` is safe to borrow while `h` is frozen, and `h.q.p` is not, and the
-compiler holds the latter. Whether the block form should freeze deeply, as
-the reference's wording suggests, is a separate question; the hold rule does
-not depend on the answer.
+compiler holds the latter. Whether the block form should freeze deeply was
+settled the same day; see the third decision below.
+
+---
+
+# The third decision: the freeze is deep, and a parameter can be `const`
+
+Decided **2026-10-19** by the author. Not yet implemented.
+
+**The freeze is deep, everywhere.** `const` already means "the value never
+changes, deeply"; the runtime is brought into line with that. A `const`
+block freezes everything reachable from the named object for the life of
+the block, and `rt_snapshot` no longer shares a part that a block froze and
+will thaw. Once this lands, a read at any depth out of a frozen object is
+safe to borrow, and `frozen_place` may follow the whole chain.
+
+**A `const` parameter accepts only a frozen argument.** `fn f(const T x)`
+is checked at every call site: the argument must be a `const` local, a
+module constant, or a name inside an active `const` block. Nothing happens
+at run time, so the parameter costs nothing, as the second decision
+promised, and every read through `x` inside `f` skips the hold. A caller
+with a mutable value writes `const x { f(x) }`. Two other meanings were
+rejected:
+
+  - a C-style promise that `f` does not write through `x`: free, but any
+    alias can still change the value, so nothing can be elided;
+  - freezing the argument for the length of each call: a deep walk on every
+    call.
+
+A function that changes its argument cannot take it `const`; it returns a
+new value instead.
+
+Order: the deep freeze first, since a `const` parameter's guarantee is only
+as deep as the freeze behind it.
 
 ---
 
