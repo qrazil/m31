@@ -3,7 +3,7 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
-## Unreleased
+## 0.9.1 (2026-10-20)
 
 ### Changed
 
@@ -22,6 +22,7 @@ change landed on master.
   (`frozen_place` in src/middle/lower/hold.rs; corpus
   `1313-frozen-place-argument-is-not-held`, trap
   `1314-frozen-place-argument-overwrite-traps`).
+
 ## 0.9.0 (2026-10-19)
 
 Additive; nothing existing changes.
