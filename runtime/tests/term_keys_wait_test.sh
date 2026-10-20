@@ -69,8 +69,11 @@ def run(calls, writes, close_at=None):
         if delay > 0:
             time.sleep(delay / 1000.0)
         if kind == "w":
-            child.stdin.write(data)
-            child.stdin.flush()
+            try:
+                child.stdin.write(data)
+                child.stdin.flush()
+            except BrokenPipeError:
+                pass   # the program is already gone: the checks below say so
             wrote.append(now())
         else:
             child.stdin.close()
@@ -151,21 +154,23 @@ between("continuous input restarts the wait: one ctrl+up", rows, w, 0, "got ctrl
 
 # 6. timeout_ms shorter than escape_ms with a prefix pending: Timeout, the
 #    prefix stays held, and the NEXT call continues the same escape wait.
-#    ESC arrives at 100 and the escape wait is 600, so it ends at 700 -- not
-#    at 1050, which a restarted wait would give.
-rows, w = run([("k", 150, 600), ("k", 300, 600), ("k", -1, 600)], [(100, b"\x1b")])
-between("short timeout, prefix held: Timeout at timeout_ms", rows, w, 0, "timeout", 1, 150, 150 + SLACK)
-between("short timeout again: Timeout, still held", rows, w, 1, "timeout", 1, 450, 450 + SLACK)
-between("the escape wait continued, not restarted", rows, w, 2, "got escape", 0, w[0] + 600, w[0] + 600 + 250)
+#    ESC arrives at 100 and the escape wait is 1500, so it ends at 1600 -- not
+#    at 2000, which a restarted wait would give.
+#    (Timeouts well after the write: a loaded runner may start the driver's
+#    clock late, and the ESC must have arrived before the first timeout.)
+rows, w = run([("k", 500, 1500), ("k", 400, 1500), ("k", -1, 1500)], [(100, b"\x1b")])
+between("short timeout, prefix held: Timeout at timeout_ms", rows, w, 0, "timeout", 1, 500, 500 + SLACK)
+between("short timeout again: Timeout, still held", rows, w, 1, "timeout", 1, 900, 900 + SLACK)
+between("the escape wait continued, not restarted", rows, w, 2, "got escape", 0, w[0] + 1500, w[0] + 1500 + 250)
 
 # 7. timeout_ms 0: nothing arrived -> immediate Timeout; a held prefix whose
 #    wait is still running stays; one whose wait has run out is resolved.
-rows, w = run([("k", 0, E), ("k", 150, 5000), ("k", 0, 300), ("k", 0, 300)], [(100, b"\x1b")])
+rows, w = run([("k", 0, E), ("k", 700, 5000), ("k", 0, 5000), ("k", 0, 5000)], [(100, b"\x1b")])
 between("timeout 0 with nothing: immediate Timeout", rows, w, 0, "timeout", 0, 0, 100 - 1 + SLACK)
-between("timeout 0, prefix with wait running: Timeout", rows, w, 2, "timeout", 1, 150, 150 + SLACK)
-rows, w = run([("k", 450, 5000), ("k", 0, 300)], [(100, b"\x1b")])
+between("timeout 0, prefix with wait running: Timeout", rows, w, 2, "timeout", 1, 700, 700 + SLACK)
+rows, w = run([("k", 800, 5000), ("k", 0, 300)], [(100, b"\x1b")])
 between("timeout 0, escape wait already run out: resolved at once", rows, w, 1, "got escape", 0,
-        450, 450 + SLACK)
+        800, 800 + SLACK)
 
 # 8. escape_ms 0 resolves as soon as nothing more can be read; a negative
 #    escape_ms never resolves (only the end of the input does).
