@@ -466,11 +466,34 @@ new value instead.
 Order: the deep freeze first, since a `const` parameter's guarantee is only
 as deep as the freeze behind it.
 
+**A module constant may be a user type.** `const Point ORIGIN = Point(0,
+0);` is allowed: a construction whose arguments are constant expressions is
+itself one, and the compiler lays the instance out as static, immortal data
+like any other module constant. The instance is frozen, deeply, for the
+life of the program -- not Java's `final`, which fixes only the name.
+
+**A type can be `const`.** `const type Money { .. }` makes every instance
+frozen, deeply, from the moment it is constructed. Its fields may be of any
+type, `const` or not: a field of a mutable type is frozen with the
+instance, and a value that is shared elsewhere is deep-copied at
+construction, as a `const` local initialised from a shared value already
+is. The cost is paid once, at construction, and only for fields of mutable
+types; every read after that is free at any depth. A change is written as a
+new instance.
+
+**So `const` has three forms, and they are meant to cover every use:** a
+`const` name (local, module constant, or parameter), a `const` block that
+freezes a value for a while, and a `const` type. In each, a `const` value is
+initialised where it is declared and nothing in it -- no field, at any
+depth -- ever changes; the block form alone ends, when the block does.
+
+Order: user-type module constants after `const` parameters, then `const`
+types.
+
 ---
 
 ## What is open
 
-  - A user-type module constant (a static struct or enum).
   - The hoisting above, now with the `const`-block barrier it needs.
   - Whether the required-`const` gate is too noisy in practice on locals
     that are provably unmutated but only incidentally so.
