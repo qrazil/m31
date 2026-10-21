@@ -1,0 +1,77 @@
+// A module constant may be a user type (reference §4.5): a construction
+// whose arguments are constant expressions is one itself, and the compiler
+// lays the instance out as static, immortal data, like a collection. Nested
+// types, collections of them, a map of them, a type that reaches itself, a
+// field default and a generic type all work the same way.
+type Point {
+    int x;
+    int y = 0;
+}
+
+int Point.sum() {
+    return x + y;
+}
+
+type Style {
+    str name;
+    float weight;
+    bool bold = false;
+    List<int> dashes = [];
+}
+
+type Shape {
+    Point at;
+    List<Point> path;
+    Style style;
+    Map<str, Point> marks;
+}
+
+type Node {
+    int v;
+    List<Node> next;
+}
+
+const Point ORIGIN = Point(0, y: 0);
+const Point UNIT = Point(1);
+const List<Point> CORNERS = [ORIGIN, Point(0, y: 1), Point(1, y: 1), UNIT];
+
+const Shape SQUARE = Shape(ORIGIN, CORNERS, Style("thin", 0.5, bold: true, dashes: [2, 1]), {"c": Point(1, y: 1)});
+
+const Node TREE = Node(1, [Node(2, []), Node(3, [Node(4, [])])]);
+const Map<str, Point> NAMED = {"origin": ORIGIN, "far": Point(100, y: -7)};
+
+int count(Node n) {
+    int c = 1;
+    for (Node k in n.next) {
+        c = c + count(k);
+    }
+    return c;
+}
+
+int px(const Point p) {
+    return p.x;
+}
+
+print(ORIGIN.x + UNIT.x);
+print(CORNERS[2].sum());
+print(SQUARE.style.name);
+print(SQUARE.style.weight);
+print(SQUARE.style.bold);
+print(SQUARE.style.dashes[0]);
+print(SQUARE.path.size());
+print(SQUARE.marks.get("c").or(ORIGIN).y);
+print(count(TREE));
+print(NAMED.get("far").or(ORIGIN).y);
+print(px(SQUARE.at) + px(CORNERS[3]));
+Point c = clone(ORIGIN);
+c.x = 5;
+print(c.x);
+print(ORIGIN.x);
+
+type Box<T> {
+    T v;
+}
+
+const Box<str> LABEL = Box<str>("boxed");
+
+print(LABEL.v);

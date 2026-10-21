@@ -1,4 +1,4 @@
-corpus/errors/765-const-struct.m31:8:1: a constant must be an int, float, bool, str or bytes, or an Array, List or Map of those; `Point` is not
-  |
-8 | const Point ORIGIN = Point(0, 0);
-  | ^
+corpus/errors/765-const-struct.m31:13:1: a constant must be an int, float, bool, str or bytes, an Array, List or Map of those, or a type whose fields are; `Kind` is not; it is the type of field `kind` of `Mark`
+   |
+13 | const Mark M = Mark(Kind.Dot);
+   | ^

@@ -1,0 +1,4 @@
+corpus/errors/1329-user-type-constant-owns-a-resource.m31:16:1: a constant cannot hold `Handle`: it owns a resource (it has a destructor), and a constant holds no I/O; it is the type of field `out` of `Log`
+   |
+16 | const Log LOG = Log("main", Handle(1));
+   | ^

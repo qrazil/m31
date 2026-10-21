@@ -185,8 +185,9 @@ written.
 Because a `const List<int>` local is legal, a module-level `const List<int>`
 is too, and so is `const bytes`: the first draft refused both ("a List that
 cannot grow is an Array"), which would have made `const` mean different
-things at different depths of the file. Only a user-type module constant is
-still refused, because the compiler cannot yet lay one out statically.
+things at different depths of the file. A user-type module constant was
+refused until 2026-10-21, because the compiler could not lay one out
+statically; see "User-type module constants, as implemented".
 
 ## Cost, measured
 
@@ -451,8 +452,9 @@ shows it.
 
 Decided **2026-10-19** by the author. The deep freeze is implemented
 (2026-10-20; "The deep freeze, as implemented", below), and so are `const`
-parameters (2026-10-21; "`const` parameters, as implemented"); user-type
-module constants and `const` types are not yet.
+parameters and user-type module constants (2026-10-21; "`const` parameters,
+as implemented", "User-type module constants, as implemented"); `const`
+types are not yet.
 
 **The freeze is deep, everywhere.** `const` already means "the value never
 changes, deeply"; the runtime is brought into line with that. A `const`
@@ -645,6 +647,54 @@ second half is the real question: under this decision a `const` parameter
 is not a promise the callee makes, it is a demand on the caller, so the
 gate as written would push `const` blocks into every call site of every
 read-only function. Left open (below).
+
+## User-type module constants, as implemented
+
+**What is accepted.** A module constant's type may be a user struct --
+generic or not, from this module or another -- whose fields are all of
+types a constant may be (`check_const_struct`, src/middle/lower/consts.rs),
+checked recursively and once per type, so a type that reaches itself
+through a `List` is fine: a constant of it is a finite tree, written out.
+The initialiser may construct one: `Point(0, 0)`, `geo.Point(3, 4)`, inside a
+collection literal, as a field of another construction, or naming another
+constant. Binding, the types of arguments, a type's visibility and its
+fields' privacy are checked as a run-time construction checks them -- the
+privacy check is the same function (`check_construct_privacy`). A field left
+out takes its default, evaluated as a constant expression in the type's
+module, so a private field with a default does not stop another module
+building a constant of the type, exactly as at run time.
+
+**What is refused, and why.**
+
+  - An **enum**, as the constant or as a field of one. A boxed enum's
+    payload is moved out by a `match` on a value nobody else holds, and
+    what that means for an immortal object is not settled; nothing waits on
+    it.
+  - An **interface** field, so a callback: the value behind it would be a
+    lambda's synthesised type or any type the compiler cannot lay out by
+    name, and a constant's type must say what it holds.
+  - A **channel**, as before.
+  - A type with a **destructor**, at any depth: a constant holds no I/O
+    (below), and an immortal object is never dropped, so its destructor
+    could never run.
+
+**Layout.** `StaticObj::Struct` (src/middle/ir.rs) holds the type and one
+slot per field; the emitter writes it as the type's own C struct, `static
+const T<n> k<i> = { { RC_IMMORTAL, &ti_T<n> }, .. }`, which is what
+`Inst::Alloc` and the field stores of a construction would have left, with a
+reference field pointing at another static (`(Obj *)&k<j>`, `&str<j>`). The
+parts are evaluated, and so emitted, before the object that holds them. A
+float field is written with 17 significant digits, which reads back as the
+same bits.
+
+**Nothing else changed.** A read is an ordinary field load. A write the
+compiler can see -- `ORIGIN.x = 1`, at any depth -- is refused by the
+existing `refuse_const_write`; one it cannot see, through a parameter or a
+method's receiver, traps in `rt_check_mutable`, since `RC_IMMORTAL` has the
+frozen bit. Retain and release are no-ops, `clone` is a mutable shallow
+copy, a snapshot of one shares it, and it crosses a thread unmoved, as a
+collection constant always did. A user-type constant passes a `const`
+parameter's check like any other module constant.
 
 ## Constants hold no I/O
 

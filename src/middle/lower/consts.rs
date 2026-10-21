@@ -573,15 +573,31 @@ impl Lowerer {
     /// Every built-in collection, `List` and `bytes` included, because a
     /// `const` means the same thing wherever it is written: a `const
     /// List<int>` local is legal and frozen, so one at module level is too.
-    /// No user type yet: a struct constant is straightforward, but an enum
-    /// constant raises what an immortal payload means for `match`, and
-    /// neither has a use that is waiting on it.
+    /// A user struct too, whose fields are all of these (`check_const_struct`),
+    /// laid out as a static instance (docs/const-decision.md, "The third
+    /// decision"). Not an enum yet: an enum constant raises what an immortal
+    /// payload means for `match`, which moves a payload out of an enum it
+    /// holds the only reference to.
     fn check_const_ty(&self, t: Ty, span: Span) -> Result<(), Diag> {
+        let mut seen = vec![false; self.typedefs.len()];
+        self.check_const_ty_in(t, span, &mut seen)
+    }
+
+    /// `check_const_ty`, with the structs already being checked in `seen`:
+    /// a type may reach itself (`type Node { List<Node> next; }`), and a
+    /// constant of it is still a finite tree, written out by hand.
+    fn check_const_ty_in(&self, t: Ty, span: Span, seen: &mut [bool]) -> Result<(), Diag> {
+        if let Some(tid) = self.const_struct(t) {
+            if std::mem::replace(&mut seen[tid as usize], true) {
+                return Ok(());
+            }
+            return self.check_const_struct(tid, span, seen);
+        }
         match t {
             Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes => return Ok(()),
             Ty::User(_) if self.base_of(t).is_none() => {
                 if let Some(e) = self.seq_elem(t) {
-                    return self.check_const_ty(e, span);
+                    return self.check_const_ty_in(e, span, seen);
                 }
                 if let Some((k, v)) = self.map_kv(t) {
                     if k != Ty::Int && k != Ty::Str {
@@ -618,7 +634,7 @@ impl Lowerer {
                             ),
                         ));
                     }
-                    return self.check_const_ty(v, span);
+                    return self.check_const_ty_in(v, span, seen);
                 }
             }
             _ => {}
@@ -626,11 +642,54 @@ impl Lowerer {
         Err(Diag::new(
             span,
             format!(
-                "a constant must be an int, float, bool, str or bytes, or an Array, List \
-                 or Map of those; `{}` is not",
+                "a constant must be an int, float, bool, str or bytes, an Array, List \
+                 or Map of those, or a type whose fields are; `{}` is not",
                 self.tyname(t)
             ),
         ))
+    }
+
+    /// The struct `t` names, if it is one a constant could be: a type with
+    /// fields and an object, not a collection, enum, interface, channel or
+    /// distinct type.
+    fn const_struct(&self, t: Ty) -> Option<u32> {
+        if self.base_of(t).is_some() || self.seq_elem(t).is_some() || self.map_kv(t).is_some() {
+            return None;
+        }
+        let tid = self.tdef_of(t)?;
+        let td = &self.typedefs[tid as usize];
+        (!td.is_enum && !td.has_no_object() && !td.name.starts_with("Chan$")).then_some(tid)
+    }
+
+    /// A struct a module constant can hold: no destructor -- a constant
+    /// holds no I/O (docs/const-decision.md, "Constants hold no I/O"), and
+    /// an immortal is never dropped, so its destructor would never run --
+    /// and every field of a type a constant can be.
+    fn check_const_struct(&self, tid: u32, span: Span, seen: &mut [bool]) -> Result<(), Diag> {
+        let shown = self.show_name(&self.typedefs[tid as usize].name);
+        if self.has_destructor(tid) {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "a constant cannot hold `{shown}`: it owns a resource (it has a \
+                     destructor), and a constant holds no I/O"
+                ),
+            ));
+        }
+        for f in &self.field_params[tid as usize] {
+            self.check_const_ty_in(f.ty, span, seen).map_err(|d| {
+                // Name the field: the type at fault may be far from the one
+                // the constant was declared with.
+                Diag::new(
+                    span,
+                    format!(
+                        "{}; it is the type of field `{}` of `{shown}`",
+                        d.msg, f.name
+                    ),
+                )
+            })?;
+        }
+        Ok(())
     }
 
     /// Evaluate `e` where a value of type `want` is expected. A collection
@@ -701,6 +760,23 @@ impl Lowerer {
                 }
                 Ok(self.add_map(kt, vt, entries))
             }
+            Expr::New(ty, args, span) => self.eval_new(*ty, want, args, *span),
+            // `lib.Point(1, 2)`: the parser cannot tell a construction from
+            // a call into another module, so it is settled here as in
+            // `lower_qualified`.
+            Expr::MethodCall(o, name, args, span)
+                if matches!(&**o, Expr::Var(m, _) if self.module_in_scope(m)
+                    && self.lookup(m).is_none()
+                    && self.ty_named(&format!("{m}#{name}")).is_some()) =>
+            {
+                let Expr::Var(m, _) = &**o else {
+                    unreachable!("matched above")
+                };
+                let ty = self
+                    .ty_named(&format!("{m}#{name}"))
+                    .expect("matched above");
+                self.eval_new(ty, want, args, *span)
+            }
             _ => {
                 let (v, t) = self.eval_any(e)?;
                 if t != want {
@@ -709,6 +785,55 @@ impl Lowerer {
                 Ok(v)
             }
         }
+    }
+
+    /// A construction in a constant expression, `Point(0, 0)`: every
+    /// argument, and every default left out, is itself a constant
+    /// expression, and the instance is laid out as static data like a
+    /// collection (`StaticObj::Struct`). The checks a run-time construction
+    /// makes are made here too -- the type, privacy, the arguments' binding
+    /// -- and a default is evaluated in the module that declared it, with
+    /// its names, as it is lowered there (`lower_slot`).
+    fn eval_new(&mut self, ty: Ty, want: Ty, args: &Args, span: Span) -> Result<CVal, Diag> {
+        let Some(tid) = self.const_struct(ty) else {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{}` cannot be built in a constant: only a type with fields is",
+                    self.tyname(ty)
+                ),
+            ));
+        };
+        if ty != want {
+            return Err(Diag::new(span, self.mismatch(want, ty)));
+        }
+        if !self.type_visible(tid) {
+            return Err(Diag::new(
+                span,
+                self.not_visible(tid, "it cannot be constructed from here"),
+            ));
+        }
+        self.check_construct_privacy(tid, args, span)?;
+        let name = self.typedefs[tid as usize].name.clone();
+        let fields = self.field_params[tid as usize].clone();
+        let module = self.type_module[tid as usize].clone();
+        let given = self.bind_args(&name, &fields, args, span)?;
+        let mut slots = Vec::with_capacity(fields.len());
+        for (e, f) in given.iter().zip(fields.iter()) {
+            let is_default = f.default.as_ref().is_some_and(|d| std::ptr::eq(d, *e));
+            let v = if is_default {
+                let saved = std::mem::replace(&mut self.cur_module, module.clone());
+                let r = self.eval_as(e, f.ty);
+                let elsewhere = saved != module;
+                self.cur_module = saved;
+                r.map_err(|d| if elsewhere { d.in_module(&module) } else { d })?
+            } else {
+                self.eval_as(e, f.ty)?
+            };
+            slots.push(self.static_slot(v));
+        }
+        self.static_objs.push(StaticObj::Struct { tid, slots });
+        Ok(CVal::Obj((self.static_objs.len() - 1) as u32))
     }
 
     /// The element type a sequence literal is written in: an Array's or a
@@ -829,8 +954,8 @@ impl Lowerer {
         Diag::new(
             e.span(),
             "not a constant expression: a constant's value is computed by the \
-             compiler, so it may use literals, operators and other constants, \
-             but not calls, fields or indexing",
+             compiler, so it may use literals, operators, constructions and other \
+             constants, but not calls, fields or indexing",
         )
     }
 

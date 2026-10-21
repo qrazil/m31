@@ -1,0 +1,20 @@
+// A module that exports a type and constants of it. `Pin`'s `id` is
+// private but defaulted, so another module can still build one in a
+// constant; the default is computed here, with this module's names.
+pub type Point {
+    pub int x;
+    pub int y;
+}
+
+pub type Pin {
+    pub str label;
+    int id = BASE + 1;
+}
+
+const int BASE = 40;
+
+pub const Point ORIGIN = Point(0, 0);
+
+pub int id_of(Pin p) {
+    return p.id;
+}

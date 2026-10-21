@@ -21,6 +21,17 @@ change landed on master.
   hold a resource is refused, and so is `const` on a field (reference §4.2;
   docs/const-decision.md, "`const` parameters, as implemented"; corpus
   `1322-const-parameters`, trap `1323`, errors `1324` and `1325`).
+- **User-type module constants.** `const Point ORIGIN = Point(0, 0);` at
+  the top level: a construction whose arguments are constant expressions is
+  one itself, and the instance is laid out as static, immortal data like a
+  collection constant -- nested types, collections and maps of them, a type
+  that reaches itself, generic types, another module's types (`geo.Point(3,
+  4)`), and field defaults, computed in the declaring module. Writes are
+  refused where the compiler sees them and trap elsewhere, as for any
+  constant. An enum, an interface field and a type with a destructor at any
+  depth are refused (reference §4.5; docs/const-decision.md, "User-type
+  module constants, as implemented"; corpus `1326`, trap `1327`, modules
+  `1328`, errors `765` (now an enum field) and `1329`).
 - **Recorded: a constant holds no I/O.** A value that owns a resource is
   refused in every permanent form of `const`; inside a `const` block,
   using one traps, as in 0.10.0, by design (docs/const-decision.md,

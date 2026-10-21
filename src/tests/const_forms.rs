@@ -176,3 +176,75 @@ fn a_field_cannot_be_const() {
     let e = err("type P { const int x; }\n");
     assert!(e.contains("a field cannot be `const`"), "{e}");
 }
+
+// ---- user-type module constants -------------------------------------------
+
+fn c(src: &str) -> String {
+    compile_str(src, "c").expect("expected this program to compile")
+}
+
+#[test]
+fn a_user_type_constant_is_static_data() {
+    let out = c("type P { int x; float w; bool b; str s; }\n\
+                 type L { P head; List<P> rest; }\n\
+                 const L LINE = L(P(1, 0.5, true, \"a\"), [P(2, -0.0, false, \"b\")]);\n\
+                 print(LINE.head.x);\n");
+    // Three structs and a list, all static and immortal, the parts first.
+    assert!(out.contains("static const T"), "{out}");
+    assert!(out.contains("RC_IMMORTAL, &ti_T"), "{out}");
+    assert!(out.contains("5.0000000000000000e-1"), "{out}");
+    assert!(out.contains("-0.0000000000000000e0"), "{out}");
+    assert!(out.contains("(Obj *)&str"), "{out}");
+    assert!(out.contains("(Obj *)&k"), "{out}");
+    // Nothing is built at run time.
+    let ir = ir("type P { int x; }\nconst P O = P(3);\nprint(O.x);\n");
+    let main = func_ir(&ir, "$main");
+    assert!(!main.contains("alloc"), "{main}");
+    assert!(main.contains("kconst"), "{main}");
+}
+
+#[test]
+fn a_user_type_constant_takes_defaults_from_its_declaration() {
+    ir("const int BASE = 4;\n\
+        type P { int x; int y = BASE * 2; List<int> zs = [BASE]; }\n\
+        const P O = P(1);\nconst P Q = P(1, y: 3);\nprint(O.y + Q.y + O.zs[0]);\n");
+    let e = err("int f() { return 1; }\ntype P { int x; int y = f(); }\nconst P O = P(1);\n");
+    assert!(e.contains("not a constant expression"), "{e}");
+}
+
+#[test]
+fn a_user_type_constant_never_changes() {
+    let e = err("type P { int x; }\ntype H { List<P> ps; }\n\
+                 const H C = H([P(1)]);\nC.ps[0].x = 2;\n");
+    assert!(e.contains("`C` is const and cannot be changed"), "{e}");
+    let e = err("type P { int x; }\nconst P C = P(1);\nC = P(2);\n");
+    assert!(e.contains("cannot assign to const `C`"), "{e}");
+}
+
+#[test]
+fn a_user_type_constant_refuses_what_cannot_be_static() {
+    let e = err(
+        "type R { int fd; }\nvoid R.drop() { }\ntype H { List<R> rs; }\n\
+                 const H C = H([]);\n",
+    );
+    assert!(e.contains("a constant cannot hold `R`"), "{e}");
+    assert!(e.contains("constant holds no I/O"), "{e}");
+    let e = err("enum E { A; B(int); }\ntype H { E e; }\nconst H C = H(E.A);\n");
+    assert!(
+        e.contains("`E` is not; it is the type of field `e` of `H`"),
+        "{e}"
+    );
+    let e = err("interface G { int of(); }\ntype H { G g; }\nconst H C = H(() => 1);\n");
+    assert!(e.contains("`G` is not"), "{e}");
+    let e = err("type P { int x; }\nint f() { return 1; }\nconst P C = P(f());\n");
+    assert!(e.contains("not a constant expression"), "{e}");
+    let e = err("type P { int x; }\ntype Q { int x; }\nconst P C = Q(1);\n");
+    assert!(e.contains("type mismatch"), "{e}");
+}
+
+#[test]
+fn a_type_that_reaches_itself_can_be_a_constant() {
+    ir("type N { int v; List<N> kids; }\n\
+        const N T = N(1, [N(2, []), N(3, [N(4, [])])]);\n\
+        print(T.kids[1].kids[0].v);\n");
+}

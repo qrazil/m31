@@ -1,0 +1,11 @@
+import geo;
+// A constant of another module's type, built with that module's name, and
+// one taken from it: both are static data, computed by the compiler.
+const geo.Point FAR = geo.Point(3, 4);
+const List<geo.Point> BOTH = [geo.ORIGIN, FAR];
+const geo.Pin HOME = geo.Pin("home");
+
+print(FAR.x + FAR.y);
+print(BOTH[0].x + BOTH[1].y);
+print(HOME.label);
+print(geo.id_of(HOME));

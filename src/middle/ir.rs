@@ -546,6 +546,11 @@ pub enum StaticObj {
         len: usize,
         table: Vec<Option<(StaticSlot, StaticSlot)>>,
     },
+    /// An instance of a user struct, `T{tid}`: one slot per field, in
+    /// declaration order. A `Word` in a float field is the float's bit
+    /// pattern, and in a bool field 0 or 1; the emitter reads the field's
+    /// type to write it back out as C.
+    Struct { tid: u32, slots: Vec<StaticSlot> },
 }
 
 #[derive(Debug, Clone)]

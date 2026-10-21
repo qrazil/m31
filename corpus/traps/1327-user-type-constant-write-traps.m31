@@ -1,0 +1,19 @@
+// A user-type module constant is frozen, at every depth, for the life of
+// the program. A change through a method's receiver is one the compiler
+// cannot see, so it traps.
+type P {
+    int x;
+}
+
+type Path {
+    List<P> ps;
+}
+
+const Path ROUTE = Path([P(1), P(2)]);
+
+void P.bump() {
+    x = x + 1;
+}
+
+print(ROUTE.ps[1].x);
+ROUTE.ps[1].bump();

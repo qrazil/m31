@@ -33,10 +33,10 @@ const Map<str, int> KEYWORDS = {"if": 1, "else": 2};
 | At the top level `const` always declares a module constant | One spelling, one meaning. Every top-level `const` in the corpus before this (`012`, `015`, `201`) was already a constant expression, so none had to change. |
 | The type is mandatory | The language writes every name's type. A constant is read far from its declaration, which is where a written type pays most. |
 | No naming rule | Nothing else in the language is case-checked (types may be lowercase, `017`). The standard library uses `UPPER_SNAKE_CASE` by convention, which keeps constants out of the way of locals — useful because a local may not take a constant's name. |
-| The initialiser is a constant expression: literals, other constants, operators, collection literals | Evaluated **by the compiler** (`src/middle/lower/consts.rs`). No calls: a compile-time call needs the whole language at compile time — a second implementation that can disagree with the first. |
+| The initialiser is a constant expression: literals, other constants, operators, collection literals, constructions (2026-10-21) | Evaluated **by the compiler** (`src/middle/lower/consts.rs`). No calls: a compile-time call needs the whole language at compile time — a second implementation that can disagree with the first. |
 | Arithmetic follows the run-time rules; what would trap is an error; a float result must be finite | A constant and the same expression at run time must not disagree. A non-finite constant follows the rule a float literal already follows (§1.5). |
 | Constants may reference each other in any order; a cycle is an error printing the whole chain | Declarations are order-independent everywhere else. The chain format is the import cycle's. |
-| Types: `int`, `float`, `bool`, `str`, `bytes`, and `Array`/`List`/`Map` of those, nested | Everything the compiler can lay out as static data. `List` and `bytes` are allowed because a `const List<int>` local is legal and `const` means one thing (`docs/const-decision.md`). A user type waits for a use. |
+| Types: `int`, `float`, `bool`, `str`, `bytes`, and `Array`/`List`/`Map` of those, nested | Everything the compiler can lay out as static data. `List` and `bytes` are allowed because a `const List<int>` local is legal and `const` means one thing (`docs/const-decision.md`). A user struct whose fields are all of these was added 2026-10-21 (`docs/const-decision.md`, "User-type module constants, as implemented"); an enum is not one yet, and a type with a destructor never is. |
 | A constant map may not repeat a key | In a hand-written table a duplicate is a mistake nothing would ever show at run time. |
 | At most 2^20 elements per collection | The collection is written out in the emitted C; the limit bounds compile time and file size, not run time. |
 | Private unless `pub`; reached as `mod.NAME`; one namespace with the module's functions and types; no local or parameter may take the name | The rules every other module-level name follows (§2.1, §4.1). A parameter is included because it would silently hide the constant for the whole body. |
@@ -57,7 +57,10 @@ a count of `RC_IMMORTAL` (`src/back/emit_c/mod.rs`, `emit_statics`):
   - `Map` — the runtime's `Map` and a static `MapSlot` table, **hashed by the
     compiler** with the runtime's hash and probe. That makes the hash part of
     the compiler–runtime contract; both copies say so, and corpus/core/742
-    looks up every key of maps large enough to have grown.
+    looks up every key of maps large enough to have grown;
+  - a user struct — the type's own `T<n>` struct, with its TypeInfo, as
+    `Inst::Alloc` would leave it after a construction; a reference field
+    points at another static (2026-10-21).
 
 All of it is `static const`, so it lands in read-only memory: a write that
 got past both the compiler and the runtime check would fault rather than

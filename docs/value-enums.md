@@ -247,9 +247,9 @@ skips it, and that is not a weakening: the binding is already a copy nothing
 else can reach, its payloads are scalars so nothing under it is mutable
 either, and a payload cannot be assigned in any case. `rt_snapshot` would have
 nothing to freeze. It also traps on a value that owns a resource, and a value
-enum cannot own one — see the next paragraph. A **module** constant of a user
-type is refused today (§4.5, "a user type is not allowed yet"), so that case
-does not arise.
+enum cannot own one — see the next paragraph. A **module** constant of an enum
+type is refused today (§4.5), and so is a user-type constant with an enum
+field, so that case does not arise.
 
 **A destructor.** An enum cannot declare one: `docs/reference.md` §4.4 says
 "only a struct may have one — not an enum", and

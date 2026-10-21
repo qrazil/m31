@@ -1,9 +1,14 @@
-// A module constant is a scalar, a str or bytes, or a built-in collection of
-// those. A user type is not one yet (docs/module-state-decision.md).
-type Point {
-    int x;
-    int y;
+// A module constant may be a user type whose fields a constant can hold,
+// but not an enum yet: matching on a constant enum would have to take a
+// payload out of an immortal value (docs/const-decision.md).
+enum Kind {
+    Dot;
+    Line(int);
 }
 
-const Point ORIGIN = Point(0, 0);
-print(ORIGIN.x);
+type Mark {
+    Kind kind;
+}
+
+const Mark M = Mark(Kind.Dot);
+print(1);

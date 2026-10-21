@@ -464,42 +464,7 @@ impl Lowerer {
         let name = name.as_str();
         let fields = self.field_params[tid as usize].clone();
         let module = self.type_module[tid as usize].clone();
-        // Construction writes every field, so from outside the module it is
-        // allowed only when every field it would write is one the caller
-        // could write anyway. A private field with a default is written by
-        // its own module's default and blocks nothing unless it is named; a
-        // private field without one would have to be passed, which is
-        // exactly what privacy forbids. That is the point: a type with an
-        // invariant hides a field, and then its module's own function is
-        // the only way to make one. Checked before binding, so the refusal
-        // is about privacy and not about how many arguments there are.
-        for (i, f) in fields.iter().enumerate() {
-            if self.field_visible(tid, i as u32) {
-                continue;
-            }
-            let shown = self.show_name(name);
-            if f.default.is_none() {
-                return Err(Diag::new(
-                    span,
-                    format!(
-                        "`{shown}` cannot be constructed outside `{module}`: its field `{}` \
-                         is private and has no default. `{module}` must provide a function \
-                         that builds one",
-                        f.name
-                    ),
-                ));
-            }
-            if let Some((_, e)) = args.named.iter().find(|(n, _)| *n == f.name) {
-                return Err(Diag::new(
-                    e.span(),
-                    format!(
-                        "field `{}` of `{shown}` is private to `{module}`; only a `pub` \
-                         field can be set from another module",
-                        f.name
-                    ),
-                ));
-            }
-        }
+        self.check_construct_privacy(tid, args, span)?;
         let slots = self.bind_args(name, &fields, args, span)?;
         // Allocating and storing run no user code, so only a later argument
         // can disturb an earlier one before it is stored.
@@ -549,5 +514,57 @@ impl Lowerer {
         }
         self.stmt_temps.push(obj);
         Ok(Val::new(obj, ty, true))
+    }
+
+    /// Refuse a construction of `tid` that writes a field the caller could
+    /// not write: shared by `lower_new` and a module constant's
+    /// construction (src/middle/lower/consts.rs).
+    pub(in crate::middle::lower) fn check_construct_privacy(
+        &self,
+        tid: u32,
+        args: &Args,
+        span: Span,
+    ) -> Result<(), Diag> {
+        let name = self.typedefs[tid as usize].name.clone();
+        let name = name.as_str();
+        let fields = &self.field_params[tid as usize];
+        let module = &self.type_module[tid as usize];
+        // Construction writes every field, so from outside the module it is
+        // allowed only when every field it would write is one the caller
+        // could write anyway. A private field with a default is written by
+        // its own module's default and blocks nothing unless it is named; a
+        // private field without one would have to be passed, which is
+        // exactly what privacy forbids. That is the point: a type with an
+        // invariant hides a field, and then its module's own function is
+        // the only way to make one. Checked before binding, so the refusal
+        // is about privacy and not about how many arguments there are.
+        for (i, f) in fields.iter().enumerate() {
+            if self.field_visible(tid, i as u32) {
+                continue;
+            }
+            let shown = self.show_name(name);
+            if f.default.is_none() {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "`{shown}` cannot be constructed outside `{module}`: its field `{}` \
+                         is private and has no default. `{module}` must provide a function \
+                         that builds one",
+                        f.name
+                    ),
+                ));
+            }
+            if let Some((_, e)) = args.named.iter().find(|(n, _)| *n == f.name) {
+                return Err(Diag::new(
+                    e.span(),
+                    format!(
+                        "field `{}` of `{shown}` is private to `{module}`; only a `pub` \
+                         field can be set from another module",
+                        f.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 }

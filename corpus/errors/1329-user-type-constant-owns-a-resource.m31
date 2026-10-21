@@ -1,0 +1,17 @@
+// A constant holds no I/O: a type with a destructor owns a resource, and
+// cannot be a module constant, at any depth.
+type Handle {
+    int fd;
+}
+
+void Handle.drop() {
+    print(fd);
+}
+
+type Log {
+    str name;
+    Handle out;
+}
+
+const Log LOG = Log("main", Handle(1));
+print(LOG.name);

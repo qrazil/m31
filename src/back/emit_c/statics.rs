@@ -90,6 +90,14 @@ pub(super) fn emit_immortals(o: &mut String, m: &Module) {
     }
 }
 
+/// A finite double as a C literal that reads back as the same bits: 17
+/// significant digits always round-trip, and C's conversion of a decimal
+/// literal is correctly rounded. A constant is never a NaN or an infinity
+/// (the compiler refuses one).
+fn c_double(x: f64) -> String {
+    format!("{x:.16e}")
+}
+
 /// Module constants' collections, as static data -- docs/reference.md §4.4.
 ///
 /// Each is laid out exactly as the runtime lays out the same collection
@@ -241,6 +249,32 @@ pub(super) fn emit_statics(o: &mut String, m: &Module) {
                     kind = if *key_is_str { "MK_STR" } else { "MK_INT" },
                     ks = key_is_str,
                     vr = val_is_ref,
+                )
+                .unwrap();
+            }
+            // A user struct, laid out as `Inst::Alloc` would leave it: the
+            // header, then each field as the struct declares it. A field
+            // pointing at another static is `(Obj *)&k{j}`, which comes
+            // first, because a constant's parts are laid out before it.
+            StaticObj::Struct { tid, slots } => {
+                let t = &m.types[*tid as usize];
+                assert_eq!(t.fields.len(), slots.len(), "one slot per field");
+                let mut parts = vec![format!("{{ RC_IMMORTAL, &ti_T{tid} }}")];
+                for ((_, fty), s) in t.fields.iter().zip(slots) {
+                    parts.push(match (fty, s) {
+                        (IrTy::F64, StaticSlot::Word(v)) => c_double(f64::from_bits(*v as u64)),
+                        (IrTy::I1, StaticSlot::Word(v)) => {
+                            (if *v != 0 { "true" } else { "false" }).to_string()
+                        }
+                        (IrTy::Ref, StaticSlot::Str(i)) => format!("(Obj *)&str{i}"),
+                        (IrTy::Ref, StaticSlot::Obj(i)) => format!("(Obj *)&k{i}"),
+                        (_, s) => slot(s),
+                    });
+                }
+                writeln!(
+                    o,
+                    "static const T{tid} k{i} __attribute__((unused)) = {{\n    {}\n}};",
+                    parts.join(",\n    ")
                 )
                 .unwrap();
             }

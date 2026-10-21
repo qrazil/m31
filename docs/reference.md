@@ -1664,24 +1664,40 @@ expression*:
     that would trap never runs — it must still be well typed. A string
     computed with `+` may be at most 2^20 bytes;
   - a collection literal of those, written into an `Array`, a `List`, a
-    `bytes` or a `Map` (§3.9): `[a, b]`, `[v; n]`, `{k: v}`.
+    `bytes` or a `Map` (§3.9): `[a, b]`, `[v; n]`, `{k: v}`;
+  - a construction of a user type (§3.3, §6.4) whose arguments are those:
+    `Point(0, 0)`, `geo.Point(3, 4)`, `Shape(ORIGIN, [Point(1, 1)])`. A
+    field left to its default takes the default, which must be a constant
+    expression too, computed in the module that declared the type. The
+    privacy rules of a construction hold (§3.3).
 
-No call, field, index, method or construction: a constant is never computed
-by running the program. Constants may refer to each other in any order but
+No call, field, index or method: a constant is never computed by running
+the program. Constants may refer to each other in any order but
 not in a circle; a cycle is an error that prints the whole chain.
 
-**A constant's type** is `int`, `float`, `bool`, `str` or `bytes`, or an
-`Array`, `List` or `Map` of those, nested to any depth. A map key is `int` or
-`str`, and a constant map may not repeat a key. A collection holds at most
-2^20 elements. A user type is not allowed yet.
+**A constant's type** is `int`, `float`, `bool`, `str` or `bytes`, an
+`Array`, `List` or `Map` of those, or a user type (a `type`, generic or not)
+whose fields are, nested to any depth; a type may reach itself (`type Node {
+List<Node> next; }`). A map key is `int` or `str`, and a constant map may not
+repeat a key. A collection holds at most 2^20 elements. Not allowed: an enum,
+an interface (and so a callback), a channel, and **a type with a destructor,
+at any depth — a constant holds no I/O** (§4.1).
 
-**The value is static data.** A collection constant is laid out by the
-compiler in the emitted program as an immortal object (§7.3), so there is no
-initialisation order and no cost at run time — reading `TABLE[i]` is an
-ordinary bounds-checked load. A scalar is folded into every use.
+```c
+type Point { int x; int y; }
+const Point ORIGIN = Point(0, 0);
+const List<Point> CORNERS = [ORIGIN, Point(1, 1)];
+```
+
+**The value is static data.** A collection or user-type constant is laid
+out by the compiler in the emitted program as an immortal object (§7.3), so
+there is no initialisation order and no cost at run time — reading
+`TABLE[i]` or `ORIGIN.x` is an ordinary load. A scalar is folded into every
+use.
 
 **It never changes**, by the rule every `const` follows (§4.1): assigning to
-it, `TABLE[0] = 1` and `TABLE.sort()` are errors, and a change the compiler
+it, `TABLE[0] = 1`, `ORIGIN.x = 1` and `TABLE.sort()` are errors, a method
+that assigns a field of its frozen receiver traps, and a change the compiler
 cannot see — the table passed to a parameter — traps. `clone(TABLE)` is a
 copy that can be changed (shallow: a cloned `Array<Array<int>>` holds the
 same constant rows).
@@ -2424,7 +2440,8 @@ The compiler inserts every retain and release. There is no manual
 
 A string literal is allocated once, statically, with a count that never
 reaches zero. Retaining and releasing one is a no-op, so a literal in a hot
-loop costs nothing. A module constant's collection is the same (§4.5):
+loop costs nothing. A module constant's collection or user-type instance is
+the same (§4.5):
 static, immortal, never freed, not counted as a leak, and in read-only
 memory.
 
@@ -2664,7 +2681,10 @@ item        = [ "pub" ] decl_item | stmt ;            (* stmt: entry file only;
                                                          never a `const` decl, §4.5 *)
 decl_item   = typedecl | interface | enumdecl | distinct | func | prim
             | constdecl ;
-constdecl   = "const" type IDENT "=" expr ";" ;       (* a constant expression, §4.5 *)
+constdecl   = "const" type IDENT "=" expr ";" ;       (* a constant expression, §4.5:
+                                                         literals, constants,
+                                                         operators, collection
+                                                         literals, constructions *)
 
 typedecl    = "type" IDENT [ tparams ] "{" { field ";" } "}" ;
 interface   = "interface" IDENT [ tparams ] "{" { sig ";" } "}" ;
