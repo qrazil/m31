@@ -1,9 +1,14 @@
 # Heap watch: one ledger for every object
 
-Status: **approved; being built.** Revision 5, 2026-10-21. Phase 1, the
-ledger, and phase 2, trace, are built; the ledger is on by default and trace
-on request ("As built" under each part says what differs from the
-proposal). Epoch close is next.
+Status: **approved and built.** Revision 6, 2026-10-21. All three parts
+are built: the ledger and epoch close are on by default, trace on request.
+"As built" under each part says what differs from the proposal, and the
+cost section has measurements in place of the estimates.
+
+Revision 6: phase 3 built. Every task is an epoch; blocks are the library
+calls `heapwatch.epoch` and `heapwatch.epoch_of` rather than a keyword; a
+test build traps on a leaky close, which makes every corpus program closing
+clean a gate.
 
 Revision 5: phase 2 built. Trace is turned on and off by
 `m31c -heapwatch --trace` through the ledger's control page, records edges
@@ -294,9 +299,9 @@ stderr and ignored. A type is named as the program spells it (`Conn`,
 components.
 
 A level, a scene or a match that *ends* is better described as an epoch than
-as an age: `epoch "level" { play(level); }` reports everything the level
-made and did not keep, the moment the level is unloaded (see the game engine
-walk-through).
+as an age: `heapwatch.epoch("level", () => play(level))` reports everything
+the level made and did not keep, the moment the level is unloaded (see the
+game engine walk-through).
 
 ---
 
@@ -329,6 +334,65 @@ counted is held only by other dead objects of the same epoch. That is a
 leaked cycle, with no false reports **provided the adoption list is
 complete**. Every corpus program must close clean, which is how a missing
 adoption rule gets caught.
+
+### As built
+
+- **Every task is an epoch**: green thread 0, which runs the program's
+  statements, as `"main"`, and each spawned thread under its function's name
+  (the emitted trampoline names it and calls `rt_hw_task_begin`). It closes
+  when the thread's function returns (runtime/scheduler.c,
+  `green_trampoline`). The books are per task, not per OS thread -- a
+  `HwTask` hung off the green thread and reached through a slot the carrier
+  sets around each dispatch -- because the move rule makes every counted
+  object one task's at a time.
+- **A block is `heapwatch.epoch(name, body)`**, or `heapwatch.epoch_of(name,
+  body)` for one that hands back a value, with `body` a callback (`() =>
+  handle(request)`; interfaces `heapwatch.Work` and `heapwatch.Make<T>`).
+  Open question 2, decided: **a library call, not a keyword.** `epoch` as a
+  keyword would break `date.epoch`, the standard library's own function, and
+  every program that names anything `epoch`; a contextual `epoch "name" {
+  .. }` statement needs the parser and a statement form in every pass that
+  walks statements. A callback also closes two adoption rules by
+  construction: it cannot assign the caller's locals (one capture mode, by
+  value -- reference §6.7), and `break`, `continue` and `?` cannot leave
+  it. A block form can come later as sugar for the same runtime pair.
+- **The EPOCH field** (see "What each object carries") is `62 - depth` for
+  an object counted against the open epoch at `depth` (0 is the task, so 61
+  levels can nest; deeper blocks are counted as the deepest), 63 for one
+  counted against none -- KEPT, and every immortal -- and 0 for one in
+  transit between tasks.
+- **The adoption list, as built:**
+
+| Way out | Where | What happens |
+|---|---|---|
+| store into a field | `rt_hw_store` before every reference field store | `h`'s field > `v`'s: `v` and everything younger it reaches move to `h`'s epoch (`hw_adopt`); 63: kept |
+| store into an element, a key or a value | `rt_hw_store_elem`; the runtime's push, insert, set and array-literal stores | the same |
+| the value a block hands back | `heapwatch.epoch_of` | stored into a List made before the block opens, which is the first rule |
+| assignment to an outer local | -- | cannot happen: the body is a callback |
+| send, spawn argument | `rt_hw_send` after `rt_check_unique` | the value and what it reaches leave the sender's books (field 0) |
+| a payload taken out of a `match` to be sent | `rt_hw_send` on the payload, after `EnumTake` | the payload leaves; the enum stays and is released here |
+| receive | `rt_hw_receive` after `recv`, and at a spawned thread's start for each reference argument | what is in transit joins the receiver's current epoch |
+| globals | -- | m31 has none |
+
+- **At close** a row that still counts anything goes to the suspect log
+  (`EPOCH "request" closed with leaks: 1 Node @ server.m31:13, ...`, sites in
+  file and line order), to the ledger's table of epochs by name (how many
+  times, when last, what), and -- for each leaked site trace is on for -- to
+  the trace file with the leaked objects' holders, which are then marked so
+  the next close does not report them again. Then the row is cleared.
+- **Test builds trap** (open question 5, decided): the corpus builds the
+  runtime with `-DRC_DEBUG`, and so does any test that wants its refcount
+  checks; there an epoch that closes with leaks traps, naming them. Any
+  build traps with `M31_HEAPWATCH_TRAP=1`, and `M31_HEAPWATCH_TRAP=0` turns
+  it off in a debug build. So **every corpus program closing clean** is a
+  gate: each of its threads -- `main` and every spawned one -- is an epoch,
+  and a missed adoption rule there is a trap and a failed test.
+- **Proved by:** `corpus/core/1401` (every way out of a block, two deep,
+  through captures, and a round trip through another thread), `1405`
+  (threads, channels, a payload taken out of a match, epochs inside spawned
+  threads), traps `1402` (a block), `1403` (a spawned thread) and `1404`
+  (`main`) leaking a cycle, and `runtime/tests/heapwatch_test.sh` for a
+  build that reports and carries on.
 
 ---
 
@@ -542,20 +606,24 @@ A game loop is the hard case for age: most of what matters lives a long
 time on purpose.
 
 ```c
-Texture t = heapwatch.forever(load_texture("grass.png"));   // assets: forever
+Texture grass = heapwatch.forever(load_texture("grass.png"));  // assets: forever
 
-while running {
-    epoch "level" {                      // everything a level made...
-        Level lv = load_level(n);
-        while !lv.done {
-            epoch "frame" {              // ...and everything a frame made
-                tick(lv, input());
-                draw(lv);
-            }
-        }
-    }                                    // ...is checked when it ends
+void play(int number) {
+    Level level = load_level(number);
+    while (!level.done) {
+        // ...and everything a frame made
+        heapwatch.epoch("frame", () => frame(level));
+    }
 }
+
+while (running) {
+    heapwatch.epoch("level", () => play(number));   // everything a level made...
+}                                                   // ...is checked when it ends
 ```
+
+(As built the block is a library call taking a callback; the proposal's
+`epoch "level" { .. }` statement is not in the grammar -- see "Epoch close",
+"As built".)
 
 - **Per-frame temporaries** that leak are reported at the end of the frame
   that leaked them. Sixty epoch closes a second cost a few microseconds in
@@ -701,12 +769,22 @@ rebuild.
 | `M31_HEAPWATCH_TRACE` | none | trace these types from the start: `Type`, `Type@file.m31:40`, comma-separated |
 | `M31_HEAPWATCH_DEPTH` | 3 | how many holders up a trace path follows (and turns trace on for) |
 | `M31_HEAPWATCH_EDGES` | 1048576 | the trace edge table's cap; edges past it are dropped and counted |
+| `M31_HEAPWATCH_TRAP` | on in a `-DRC_DEBUG` build, else off | `1`: an epoch that closes with leaks traps; `0`: it is only reported |
 
 ## Open questions
 
 Answered while building (each the simplest sound option; the owner may
 overrule any of them):
 
+2. **Spawned tasks, and blocks as a library call: `heapwatch.epoch(name,
+   () => body)`.** A keyword `epoch` would take the name from
+   `date.epoch`; a contextual statement needs the parser and every pass that
+   walks statements; a callback needs neither, and its rules (no assigning
+   the caller's locals, no `break` or `?` out of it) close two adoption
+   rules by construction. See "Epoch close", "As built".
+5. **Yes: a test build traps.** "Test build" is the runtime compiled with
+   `-DRC_DEBUG`, which is what the corpus and the runtime's own tests use;
+   `M31_HEAPWATCH_TRAP=1` asks for it in any build, `=0` turns it off.
 1. **On by default.** Every compiled program counts, release builds
    included, and `M31_HEAPWATCH=0` turns it off. The cost section has the
    measurement this rests on.
@@ -729,9 +807,16 @@ overrule any of them):
 
 Still open:
 
-2. Explicit `epoch` blocks: the keyword and its spelling, or only spawned
-   tasks at first?
-5. Test builds: should an epoch that closes with leaks **trap**, so CI fails
-   on any leaked cycle?
 6. Should a stdlib API expose the ledger, so a server can serve it as
-   metrics (such as `/debug/heap`)?
+   metrics (such as `/debug/heap`)? Not built: nothing asked for it yet, and
+   the tool already reads a live process's ledger.
+10. **Epoch accounting reads the task through a thread-local set by the
+    scheduler.** A program that calls the runtime from an OS thread that is
+    not a carrier (a hand-written C harness) gets no epochs -- its objects
+    are counted against none -- rather than a task of its own.
+11. **A false report marks objects.** After an epoch's leaked objects of a
+    traced site are reported, they are marked as counted against no epoch so
+    the next close does not report them again. If an adoption rule were
+    missing and such an object were in fact still reachable, stores into it
+    would from then on keep, not adopt -- fewer reports, never a false one.
+    The corpus gate is what keeps the list complete.

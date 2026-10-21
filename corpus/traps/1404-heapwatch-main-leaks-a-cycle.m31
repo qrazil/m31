@@ -1,0 +1,22 @@
+// The program itself is a thread, and an epoch: a cycle left behind when its
+// last statement has run is reported then, and in a test build traps -- the
+// leak reference counting has no other way to see (docs/heap-watch-design.md,
+// "Epoch close").
+type Node {
+    str name;
+    List<Node> links;
+}
+
+void link(int count) {
+    int index = 0;
+    while (index < count) {
+        Node left = Node("left", []);
+        Node right = Node("right", []);
+        left.links.push(right);
+        right.links.push(left);
+        index = index + 1;
+    }
+}
+
+link(3);
+print("done");

@@ -945,6 +945,39 @@ impl Lowerer {
             }
             return Ok(Val::void());
         }
+        // `__epoch_enter(name)` and `__epoch_leave()`: lib/heapwatch.m31's
+        // two halves of an epoch (rt_hw_epoch_enter, rt_hw_epoch_leave).
+        // Builtins rather than `prim`s because they never block: a `prim` is
+        // wrapped as a foreign call that might, and flagged in every spawned
+        // function that reaches it (src/back/emit_c/blocking.rs).
+        if name == "__epoch_enter" || name == "__epoch_leave" {
+            let want = usize::from(name == "__epoch_enter");
+            if args.pos.len() != want || !args.named.is_empty() {
+                return Err(Diag::new(
+                    span,
+                    format!("`{name}` takes {want} argument(s)"),
+                ));
+            }
+            let mut call_args = Vec::new();
+            if want == 1 {
+                let v = self.lower_expr(&args.pos[0])?;
+                if self.underlying(v.ty) != Ty::Str {
+                    return Err(Diag::new(args.pos[0].span(), self.mismatch(Ty::Str, v.ty)));
+                }
+                call_args.push(v.val());
+            }
+            self.push(Inst::Call {
+                dst: None,
+                func: if want == 1 {
+                    "rt_hw_epoch_enter"
+                } else {
+                    "rt_hw_epoch_leave"
+                }
+                .to_string(),
+                args: call_args,
+            });
+            return Ok(Val::void());
+        }
 
         // Channel builtins. They are here rather than in `sigs` because
         // their types depend on the channel's element type.

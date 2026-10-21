@@ -230,3 +230,37 @@ fn an_element_store_of_a_reference_tells_heap_watch_first() {
     let set = c.find("rt_index_set(").unwrap();
     assert!(hook < set, "{c}");
 }
+
+#[test]
+fn a_send_leaves_the_books_after_the_uniqueness_check() {
+    let out = ir(
+        "type B { int n; }\nChan<B> c = Chan<B>(1);\nsend(c, B(1));\nB b = recv(c);\nprint(b.n);",
+    );
+    let check = out.find("call rt_check_unique(").expect("the check");
+    let leave = out.find("call rt_hw_send(").expect("the send hook");
+    let send = out.find("call rt_chan_send(").expect("the send");
+    assert!(check < leave && leave < send, "{out}");
+    let recv = out.find("call rt_chan_recv(").expect("the recv");
+    let arrive = out.find("call rt_hw_receive(").expect("the receive hook");
+    assert!(recv < arrive, "{out}");
+}
+
+#[test]
+fn a_spawned_thread_is_an_epoch_that_takes_its_arguments() {
+    let c =
+        c_of("type B { int n; }\nvoid work(B b, int k) { print(b.n + k); }\nspawn work(B(1), 2);");
+    let tramp = c.find("static void trampoline_").expect("a trampoline");
+    let body = &c[tramp..];
+    let begin = body
+        .find("rt_hw_task_begin(\"work\");")
+        .expect("named after the function");
+    let take = body
+        .find("rt_hw_receive(a->a0);")
+        .expect("the reference argument");
+    let call = body.find("fn_work(a->a0, a->a1);").expect("the call");
+    assert!(begin < take && take < call, "{body}");
+    assert!(
+        !body[..call].contains("rt_hw_receive(a->a1)"),
+        "an int is no object: {body}"
+    );
+}

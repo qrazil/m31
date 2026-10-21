@@ -361,6 +361,10 @@ M31_AGE=Texture:forever           long-lived on purpose, by type or Type@file.m3
 heapwatch.forever(x)              ... or by object, in code
 m31c -heapwatch <pid> --trace Conn  who holds it, recorded from now on
 m31c -heapwatch <pid> --paths     ... and printed
+heapwatch.epoch("request", () => handle(r))
+                                  a unit of work: what it leaves behind is a leak, reported
+                                  at once (and a trap in a -DRC_DEBUG build); every
+                                  spawned thread is one already
 M31_HEAPWATCH=0                   off
 ```
 

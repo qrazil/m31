@@ -1,0 +1,20 @@
+// A request that leaves a cycle behind: two nodes holding each other, which
+// nothing outside the epoch reaches once it ends. Reference counting never
+// frees them; epoch close sees them the moment the request is done, and in a
+// test build traps (docs/heap-watch-design.md, "Epoch close").
+import heapwatch;
+
+type Node {
+    str name;
+    List<Node> links;
+}
+
+void handle(str path) {
+    Node left = Node(path, []);
+    Node right = Node(path, []);
+    left.links.push(right);
+    right.links.push(left);
+}
+
+heapwatch.epoch("request", () => handle("/index"));
+print("not reached");

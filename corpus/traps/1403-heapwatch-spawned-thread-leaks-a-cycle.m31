@@ -1,0 +1,21 @@
+// A spawned thread is an epoch of its own without being asked: what it made
+// and left behind when its function returns -- here a cycle, which reference
+// counting can never free -- is reported then, and in a test build traps
+// (docs/heap-watch-design.md, "Epoch close"). What it sent on is not
+// counted against it.
+type Node {
+    str name;
+    List<Node> links;
+}
+
+void worker(Chan<str> done) {
+    Node left = Node("left", []);
+    Node right = Node("right", []);
+    left.links.push(right);
+    right.links.push(left);
+    send(done, "sent " + left.name);
+}
+
+Chan<str> done = Chan<str>(1);
+spawn worker(done);
+print(recv(done));

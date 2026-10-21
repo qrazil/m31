@@ -1,0 +1,1 @@
+trap: epoch "worker" closed with leaks: 1 List @ 1403-heapwatch-spawned-thread-leaks-a-cycle.m31:12, 1 Node @ 1403-heapwatch-spawned-thread-leaks-a-cycle.m31:12, 1 List @ 1403-heapwatch-spawned-thread-leaks-a-cycle.m31:13, 1 Node @ 1403-heapwatch-spawned-thread-leaks-a-cycle.m31:13

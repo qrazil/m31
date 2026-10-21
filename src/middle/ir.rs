@@ -598,6 +598,10 @@ pub fn rt_call_allocates(func: &str) -> bool {
         "rt_f2i_checked",
         "rt_out_flush",
         "rt_hw_forever",
+        "rt_hw_send",
+        "rt_hw_receive",
+        "rt_hw_epoch_enter",
+        "rt_hw_epoch_leave",
     ];
     func.starts_with("rt_") && !NEVER.contains(&func)
 }

@@ -810,6 +810,10 @@ struct rt_green {
     rt_ctx_t  *carrier_ctx; /* this dispatch's switch-back target; reset on
                               * every dispatch, see carrier_dispatch below */
     bool       finished;
+    /* Heap watch's books for this task (runtime/heapwatch.c, HwTask): made
+     * on its first allocation, reached through rt_hw_task_slot while it
+     * runs, closed and freed by rt_hw_task_end when its entry returns. */
+    void      *hw;
 
     /* Phase 3 -- see scheduler.h's "park/unpark" section. */
     rt_scheduler_t *sched;      /* set once, at spawn; never changes */
@@ -953,6 +957,9 @@ static void update_max_draw_seen(rt_scheduler_t *s, uint32_t n) {
 static void green_trampoline(void *argp) {
     rt_green_t *g = (rt_green_t *)argp;
     g->entry(g->arg);
+    /* The task's epoch closes here (docs/heap-watch-design.md, "Epoch
+     * close"): everything it made and still counts is a leak. */
+    rt_hw_task_end();
     rt_gtstate_set(g->id, RT_GT_DEAD);
     g->finished = true;
 #if RT_TSAN_BUILD
@@ -1199,6 +1206,10 @@ static void carrier_dispatch(rt_carrier_t *c, rt_green_t *g) {
                         * test_round_trip uses for its own main_ctx. */
     g->carrier_ctx = &loop_ctx;
     tls_current_green = g;
+    /* Heap watch reaches the running task's books through this. A carrier
+     * sets it on its own thread, outside any green thread, so no cached
+     * thread-local address can go stale here (rt.h, rt_stack_limit). */
+    rt_hw_task_slot = &g->hw;
     rt_gtstate_set(g->id, RT_GT_RUNNING);
 
     /* RELEASE, not relaxed -- found by TSan on exactly this scheduler,
@@ -1251,6 +1262,7 @@ static void carrier_dispatch(rt_carrier_t *c, rt_green_t *g) {
     atomic_store_explicit(&g->claimed_by_carrier, false, memory_order_release);
 
     tls_current_green = NULL;
+    rt_hw_task_slot = NULL;
 
     if (g->finished) {
         /* Remove from the registry BEFORE freeing -- rt_sched_unpark looks
@@ -1598,6 +1610,7 @@ uint32_t rt_sched_spawn(rt_scheduler_t *s, void (*entry)(void *), void *arg) {
     g->entry = entry;
     g->arg = arg;
     g->finished = false;
+    g->hw = NULL;
     g->stack = rt_stack_alloc();
     rt_ctx_make(&g->ctx, g->stack.base, rt_stack_size(), green_trampoline, g);
 

@@ -46,6 +46,23 @@ change landed on master.
   own collection stores), which costs a compare and an untaken branch while
   nothing is traced.
 
+- **Heap watch, phase 3: epoch close.** Every task is now an epoch -- the
+  program's own statements as `"main"`, each spawned thread under its
+  function's name -- and `heapwatch.epoch(name, () => body)` /
+  `heapwatch.epoch_of(name, () => value)` open one inside a task. Whatever an
+  epoch made and still counts when it ends is held only by other objects
+  of the same epoch: a leaked cycle, reported at once to the suspect log,
+  the ledger's table of epochs and, for a traced type, the trace file with
+  who holds it. An object leaves its epoch legitimately by being stored
+  into an older object (it and everything younger it reaches are adopted),
+  sent to another thread (it leaves the sender's books after the
+  uniqueness check and joins the receiver's on arrival), or returned by
+  `epoch_of`. **In a test build -- the runtime compiled with `-DRC_DEBUG`,
+  as the corpus is -- an epoch that closes with leaks traps**, naming the
+  sites (`M31_HEAPWATCH_TRAP=1` or `0` overrides), so every corpus program
+  closing clean is now a gate (corpus `1401`, `1405`; traps `1402` to
+  `1404`).
+
 ### Changed
 
 - **The reference count is 33 bits** (8 589 934 591 references to one

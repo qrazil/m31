@@ -68,6 +68,20 @@ pub(super) fn emit_spawn_trampolines(o: &mut String, m: &Module) {
         // value for a pthread join to collect any more.
         writeln!(o, "static void trampoline_{cn}(void *p) {{").unwrap();
         writeln!(o, "    spawn_{cn} *a = (spawn_{cn} *)p;").unwrap();
+        // Heap watch: the task is an epoch, named after its function, and
+        // the arguments it was handed are counted against it from here
+        // (docs/heap-watch-design.md, "Epoch close").
+        writeln!(
+            o,
+            "    rt_hw_task_begin({});",
+            c_string_literal(crate::front::ast::bare(name).as_bytes())
+        )
+        .unwrap();
+        for (i, p) in target.params.iter().enumerate() {
+            if target.ty_of(*p) == IrTy::Ref {
+                writeln!(o, "    rt_hw_receive(a->a{i});").unwrap();
+            }
+        }
         let passed: Vec<String> = (0..target.params.len())
             .map(|i| format!("a->a{i}"))
             .collect();

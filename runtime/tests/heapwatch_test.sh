@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Heap watch (docs/heap-watch-design.md): the ledger and trace, read back by
-# the tool.
+# Heap watch (docs/heap-watch-design.md): the ledger, trace and epoch close,
+# read back by the tool.
 #
 #   - a site that leaks one object in four is a SUSPECT once its survivors
 #     outlive the site's own lifetime, with the minute clock shortened by
@@ -14,6 +14,9 @@
 #   - trace, from the start: a connection held by a session held by a cache's
 #     map, and a cycle of nodes, are printed as those paths; and turned on
 #     and off in a running process through its ledger's control page;
+#   - epoch close in a build that does not trap: each close that leaves a
+#     cycle is a line in the suspect log, a count in the ledger, and with
+#     trace on the cycle in the trace file; M31_HEAPWATCH_TRAP=1 traps;
 #   - the count word: a retain and a release touch only the count, and a
 #     retain past its 33 bits traps.
 #
@@ -172,6 +175,29 @@ kill -9 "$pid"
 wait "$pid" 2>/dev/null
 out=$("$LANGC" -heapwatch "$dir4/trace.$pid.ledger" --trace Node 2>&1)
 grep -q "is not running" <<<"$out" || bad "on the fly: --trace of a dead process: $out"
+
+# --- epoch close outside a test build -----------------------------------------
+build epoch runtime/tests/heapwatch/t_epoch.m31
+dir5="$WORK/epoch-ledgers"
+mkdir -p "$dir5"
+out=$(M31_HEAPWATCH_DIR="$dir5" M31_HEAPWATCH_DEPTH=8 M31_HEAPWATCH_TRACE=Node,List "$WORK/epoch" 2>&1)
+rc=$?
+[ $rc -eq 0 ] && [ "$out" = "done" ] || bad "epoch: exit $rc, printed $out"
+ledger=$(ls "$dir5"/epoch.*.ledger 2>/dev/null | head -1)
+leaks="1 List @ t_epoch.m31:14, 1 Node @ t_epoch.m31:14, 1 List @ t_epoch.m31:15, 1 Node @ t_epoch.m31:15"
+[ "$(grep -c "EPOCH \"request\" closed with leaks: $leaks$" "${ledger%.ledger}.suspects")" = 5 ] \
+    || bad "epoch: five leaking closes are not five lines in the log"
+out=$("$LANGC" -heapwatch "$ledger" 2>&1)
+grep -q '^epoch "request" closed with leaks 5 times; last at minute 0: 1 List @ t_epoch.m31:14' <<<"$out" \
+    || bad "epoch: the report: $out"
+grep -qE '^        held by  Node.links +t_epoch.m31:1[45]  <- cycle$' "${ledger%.ledger}.trace" \
+    || bad "epoch: the trace file has no cycle"
+[ "$(grep -c '(epoch "request" left them)' "${ledger%.ledger}.trace")" = 20 ] \
+    || bad "epoch: each leak should be traced once, by four sites, five times"
+out=$(M31_HEAPWATCH_DIR="$dir5" M31_HEAPWATCH_TRAP=1 "$WORK/epoch" 2>&1)
+rc=$?
+[ $rc -eq 134 ] && grep -q "^trap: epoch \"request\" closed with leaks: $leaks$" <<<"$out" \
+    || bad "epoch: M31_HEAPWATCH_TRAP=1 did not trap: exit $rc, $out"
 
 # --- the count word --------------------------------------------------------
 if cc -O2 -pthread -I runtime -o "$WORK/bits" runtime/tests/heapwatch/count_bits.c \

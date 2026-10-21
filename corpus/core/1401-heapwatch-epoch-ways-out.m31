@@ -1,0 +1,74 @@
+// Every legitimate way out of an epoch, each of which must close clean: in
+// the corpus's build an epoch that closes with anything still counted traps
+// (docs/heap-watch-design.md, "Epoch close"). The value an epoch hands back
+// (epoch_of), an object stored into one made before the epoch -- a field, a
+// List element, a Map key and value, through a lambda's capture, two epochs
+// deep -- a value sent to another thread and one received from it, and a
+// spawned thread, which is an epoch of its own.
+import heapwatch;
+
+type Node {
+    str name;
+    List<Node> links;
+}
+
+type Registry {
+    List<Node> kept;
+    Map<str, Node> by_name;
+    Node last;
+}
+
+Node graph(str name, int size) {
+    Node root = Node(name, []);
+    int index = 0;
+    while (index < size) {
+        Node child = Node(name + index.to_str(), []);
+        child.links.push(Node("leaf", []));
+        root.links.push(child);
+        index = index + 1;
+    }
+    return root;
+}
+
+void register(Registry registry, str name) {
+    Node made = graph(name, 2);
+    registry.kept.push(made);
+    registry.by_name.set(name + "!", Node(name, [made]));
+    registry.last = Node("last " + name, []);
+    // Made and dropped inside: nothing to report.
+    Node scratch = graph("scratch", 3);
+    print(scratch.links.size());
+}
+
+void nested(Registry registry) {
+    heapwatch.epoch("inner", () => register(registry, "deep"));
+    Node value = heapwatch.epoch_of("inner value", () => graph("value", 1));
+    registry.kept.push(value);
+}
+
+void echo(Chan<Node> requests, Chan<Node> replies) {
+    Node request = recv(requests);
+    Node reply = Node("re: " + request.name, [graph("reply", 1)]);
+    send(replies, reply);
+}
+
+void exchange(Chan<Node> requests, Chan<Node> replies, Registry registry) {
+    send(requests, graph("request", 2));
+    registry.kept.push(recv(replies));
+}
+
+Registry registry = Registry([], {}, Node("none", []));
+Node made = heapwatch.epoch_of("build", () => graph("built", 3));
+print(made.links.size());
+heapwatch.epoch("register", () => register(registry, "a"));
+heapwatch.epoch("outer", () => nested(registry));
+Chan<Node> requests = Chan<Node>(1);
+Chan<Node> replies = Chan<Node>(1);
+spawn echo(requests, replies);
+heapwatch.epoch("exchange", () => exchange(requests, replies, registry));
+print(registry.kept.size());
+print(registry.by_name.size());
+print(registry.last.name);
+for (Node node in registry.kept) {
+    print(node.name);
+}

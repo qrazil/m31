@@ -1,0 +1,67 @@
+// Threads, channels and epochs together, all closing clean: every spawned
+// thread is an epoch, a value sent on leaves the sender's books and joins the
+// receiver's, a payload taken out of a `match` to be sent goes without the
+// enum it came in, and a step's notes, stored into the job it was handed,
+// leave the step's epoch with the job (docs/heap-watch-design.md, "Epoch
+// close"). In the corpus's build any epoch left holding something traps.
+import heapwatch;
+
+type Job {
+    int number;
+    List<str> notes;
+}
+
+void note(Job job, str label) {
+    job.notes.push(label + " " + job.number.to_str());
+}
+
+void stage(Chan<Job> input, Chan<Job> output, str label) {
+    while (true) {
+        Job job = recv(input);
+        bool is_last = job.number < 0;
+        heapwatch.epoch("step", () => note(job, label));
+        send(output, job);
+        if (is_last) {
+            return;
+        }
+    }
+}
+
+Option<Job> spare() {
+    return Option<Job>.Some(Job(99, ["spare"]));
+}
+
+Chan<Job> first = Chan<Job>(2);
+Chan<Job> middle = Chan<Job>(2);
+Chan<Job> finished = Chan<Job>(2);
+spawn stage(first, middle, clone("one"));
+spawn stage(middle, finished, clone("two"));
+int number = 0;
+while (number < 4) {
+    send(first, Job(number, ["start"]));
+    number = number + 1;
+}
+send(first, Job(-1, []));
+List<Job> done = [];
+while (true) {
+    Job job = recv(finished);
+    if (job.number < 0) {
+        print(job.notes.size());
+        break;
+    }
+    done.push(job);
+}
+for (Job job in done) {
+    print(job.notes[0] + ", " + job.notes[1] + ", " + job.notes[2]);
+}
+Chan<Job> back = Chan<Job>(1);
+match (spare()) {
+    case Some(Job job): {
+        send(back, job);
+    }
+    case None: {
+        print("none");
+    }
+}
+Job got = recv(back);
+print(got.notes[0]);

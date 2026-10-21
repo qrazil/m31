@@ -59,6 +59,14 @@ impl Lowerer {
             func: "rt_check_unique".to_string(),
             args: vec![v.val()],
         });
+        // Heap watch: the value, and all it reaches, leaves this task's
+        // books here, and the receiver's take it on arrival
+        // (rt_hw_receive; docs/heap-watch-design.md, "Epoch close").
+        self.push(Inst::Call {
+            dst: None,
+            func: "rt_hw_send".to_string(),
+            args: vec![v.val()],
+        });
 
         if v.owned {
             self.stmt_temps.retain(|t| *t != v.val());
@@ -221,9 +229,15 @@ impl Lowerer {
             args: vec![obj],
         });
         self.push(Inst::EnumTake { obj, tid, tag, idx });
+        // Heap watch: the payload alone leaves this task's books -- the
+        // enum stays here and is released here.
+        self.push(Inst::Call {
+            dst: None,
+            func: "rt_hw_send".to_string(),
+            args: vec![v.val()],
+        });
         // The value read out of the slot is now owned by the receiver, and it
         // was never a statement temporary, so there is nothing to un-register.
-        let _ = v;
         self.moved.push(n.to_string());
         Ok(())
     }

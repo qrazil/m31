@@ -1,0 +1,1 @@
+trap: epoch "main" closed with leaks: 3 List @ 1404-heapwatch-main-leaks-a-cycle.m31:13, 3 Node @ 1404-heapwatch-main-leaks-a-cycle.m31:13, 3 List @ 1404-heapwatch-main-leaks-a-cycle.m31:14, 3 Node @ 1404-heapwatch-main-leaks-a-cycle.m31:14

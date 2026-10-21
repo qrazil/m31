@@ -200,6 +200,7 @@ static void hw_epoch_free(Obj *o);
 static void hw_epoch_store(Obj *h, Obj *v);
 static uint32_t hw_edges_max;
 static uint8_t *hw_edge_sites;
+static bool hw_trap_on_leak;
 static void hw_trace_free(Obj *o);
 
 static inline uint32_t hw_now(void) {
@@ -1145,6 +1146,16 @@ void rt_hw_program(const RtHwLoc *locs, uint32_t nlocs, const TypeInfo *const *s
     snprintf(h->program, sizeof h->program, "%s", name);
     hw_control_init();
 
+    /* A test build traps on an epoch that closes with leaks, so a test
+     * fails on any leaked cycle: the corpus's build, -DRC_DEBUG, unless
+     * M31_HEAPWATCH_TRAP=0; any build with M31_HEAPWATCH_TRAP=1. */
+    const char *trap = getenv("M31_HEAPWATCH_TRAP");
+#ifdef RC_DEBUG
+    hw_trap_on_leak = trap == NULL || strcmp(trap, "0") != 0;
+#else
+    hw_trap_on_leak = trap != NULL && strcmp(trap, "1") == 0;
+#endif
+
     hw_each_entry(getenv("M31_AGE"), hw_parse_rule);
     const char *conf = getenv("M31_HEAPWATCH_CONF");
     if (conf != NULL && *conf != 0) hw_read_conf(conf);
@@ -1805,18 +1816,423 @@ static void hw_control(void) {
     __atomic_store_n((uint32_t *)(void *)(hw_base + 20), seq, __ATOMIC_RELEASE);
 }
 
-/* ---- epochs: not yet -------------------------------------------------- */
+/* ---- epoch close (phase 3) ----------------------------------------------
+ *
+ * docs/heap-watch-design.md, "Epoch close". An EPOCH is a unit of work: a
+ * task (every green thread, `main` included) and, inside one, a block
+ * `heapwatch.epoch(name, body)` opens. Every object is counted against the
+ * innermost epoch open when it was made (the EPOCH field of its header,
+ * 62 - depth), in a row of per-site counts kept with the task. An object
+ * leaves its epoch's row only by a legitimate way out:
+ *
+ *   - stored into an object of an older epoch: ADOPTED into that epoch,
+ *     with every object it reaches that is younger still (the spreading
+ *     walk: it stops at anything as old as the target, so each object is
+ *     moved at most once per level it climbs);
+ *   - stored into an object counted against no epoch: KEPT, likewise;
+ *   - sent to another task, or passed to a spawned one: taken out of the
+ *     sender's books (TRANSIT) and adopted by the receiver on arrival;
+ *   - returned out of a block (heapwatch.epoch_of): which is a store into a
+ *     holder made outside it, so it is the first rule.
+ *
+ * So when an epoch closes, its locals are gone, and anything its row still
+ * counts is held only by other dead objects of the same epoch: a leaked
+ * cycle. It is reported then -- the suspect log, the ledger's epoch table,
+ * trace's paths for traced sites -- and in a test build it traps.
+ *
+ * The rows belong to the task, not the thread: a green thread keeps its
+ * own (HwTask, reached through the scheduler's per-green-thread slot), and
+ * every object is the task's that made or received it -- the move rule
+ * means no two tasks ever reach one object. The row of a depth is a small
+ * open-addressed table, site -> count. */
+
+typedef struct {
+    uint32_t site;   /* 0: empty */
+    int32_t  count;
+} HwCell;
+
+typedef struct {
+    HwCell  *cells;  /* open addressing, home cell `site & (cap - 1)` */
+    uint32_t cap;    /* a power of two, or 0 */
+    uint32_t used;
+    char     name[48];
+} HwRow;
+
+typedef struct {
+    uint32_t depth;     /* the innermost open epoch; 0 is the task itself */
+    uint32_t overflow;  /* blocks nested past the deepest depth counted */
+    uint32_t cap;
+    HwRow   *rows;
+} HwTask;
+
+#define HW_MAX_DEPTH 61
+
+/* The current green thread's slot for its HwTask (scheduler.c sets it
+ * around each dispatch); NULL on a thread that is not running a task. */
+_Thread_local void **rt_hw_task_slot;
+
+static bool hw_trap_on_leak;
+
+static HwTask *hw_task_new(void **slot);
+
+/* The running task's books, made on its first use; NULL outside a task. */
+static inline HwTask *hw_task(void) {
+    void **slot = rt_hw_task_slot;
+    if (slot == NULL) return NULL;
+    HwTask *t = *slot;
+    return t != NULL ? t : hw_task_new(slot);
+}
+
+static HwTask *hw_task_new(void **slot) {
+    HwTask *t = calloc(1, sizeof *t);
+    if (t == NULL) rt_trap("out of memory");
+    t->cap = 4;
+    t->rows = calloc(t->cap, sizeof *t->rows);
+    if (t->rows == NULL) rt_trap("out of memory");
+    snprintf(t->rows[0].name, sizeof t->rows[0].name, "task");
+    *slot = t;
+    return t;
+}
+
+static void hw_row_add_slow(HwRow *r, uint32_t site, int32_t d) {
+    if (r->cap == 0 || (r->used + 1) * 4 >= r->cap * 3) {
+        uint32_t cap = r->cap == 0 ? 16 : r->cap * 2;
+        HwCell *c = calloc(cap, sizeof *c);
+        if (c == NULL) rt_trap("out of memory");
+        for (uint32_t i = 0; i < r->cap; i++) {
+            if (r->cells[i].site == 0) continue;
+            uint32_t j = r->cells[i].site & (cap - 1);
+            while (c[j].site != 0) j = (j + 1) & (cap - 1);
+            c[j] = r->cells[i];
+        }
+        free(r->cells);
+        r->cells = c;
+        r->cap = cap;
+    }
+    uint32_t j = site & (r->cap - 1);
+    while (r->cells[j].site != 0 && r->cells[j].site != site) j = (j + 1) & (r->cap - 1);
+    if (r->cells[j].site == 0) {
+        r->cells[j].site = site;
+        r->used++;
+    }
+    r->cells[j].count += d;
+}
+
+/* Sites are small numbers handed out in order, so a site's home cell is
+ * nearly always its own: the common case is a load, a compare and an add. */
+static inline void hw_row_add(HwRow *r, uint32_t site, int32_t d) {
+    if (r->cap != 0) {
+        HwCell *c = &r->cells[site & (r->cap - 1)];
+        if (c->site == site) {
+            c->count += d;
+            return;
+        }
+    }
+    hw_row_add_slow(r, site, d);
+}
+
+/* The row an object with EPOCH field `e` is counted in, if it is one of
+ * this task's open epochs. */
+static HwRow *hw_row_of(HwTask *t, unsigned e) {
+    if (t == NULL || e == RC_EPOCH_TRANSIT || e == RC_EPOCH_NONE) return NULL;
+    unsigned depth = 62 - e;
+    return depth <= t->depth ? &t->rows[depth] : NULL;
+}
+
+static inline unsigned hw_epoch_bits(const Obj *o) {
+    return (unsigned)(((unsigned long)o->rc >> RC_EPOCH_SHIFT) & 63);
+}
+
+static inline void hw_set_epoch(Obj *o, unsigned e) {
+    o->rc = (o->rc & ~RC_EPOCH) | ((long)e << RC_EPOCH_SHIFT);
+}
 
 static long hw_epoch_of_new(const TypeInfo *ty) {
-    (void)ty;
-    return RC_EPOCH_NONE;
+    HwTask *t = hw_task();
+    if (t == NULL) return RC_EPOCH_NONE;
+    if (ty->site != 0) hw_row_add(&t->rows[t->depth], ty->site, 1);
+    return 62 - (long)t->depth;
 }
 
 static void hw_epoch_free(Obj *o) {
-    (void)o;
+    if (o->ty->site == 0) return;
+    void **slot = rt_hw_task_slot;
+    if (slot == NULL) return;
+    HwRow *r = hw_row_of(*slot, hw_epoch_bits(o));
+    if (r != NULL) hw_row_add(r, o->ty->site, -1);
 }
 
+/* Move `v`, and everything it reaches that is younger than `target`, to
+ * epoch field `target`: out of the row it was counted in and into
+ * `target`'s (none, for kept). The walk stops at anything already as old as
+ * the target, so it is bounded by the objects that move -- each at most once
+ * per epoch it climbs -- and never visits the rest of the heap. */
+typedef struct {
+    Obj    *small[32];
+    Obj   **todo;
+    size_t  len;
+    size_t  cap;
+    unsigned target;
+} HwSpread;
+
+static void hw_spread_push(HwSpread *w, Obj *o) {
+    if (w->len == w->cap) {
+        size_t cap = w->cap * 2;
+        Obj **bigger = w->todo == w->small ? malloc(cap * sizeof *bigger)
+                                           : realloc(w->todo, cap * sizeof *bigger);
+        if (bigger == NULL) rt_trap("out of memory");
+        if (w->todo == w->small) memcpy(bigger, w->small, sizeof w->small);
+        w->todo = bigger;
+        w->cap = cap;
+    }
+    w->todo[w->len++] = o;
+}
+
+static void hw_spread_visit(void *ctx, Obj *c) {
+    HwSpread *w = ctx;
+    if (c != NULL && c->rc != RC_IMMORTAL && hw_epoch_bits(c) < w->target) hw_spread_push(w, c);
+}
+
+static void hw_adopt(Obj *v, unsigned target) {
+    HwTask *t = hw_task();
+    HwSpread w;
+    w.todo = w.small;
+    w.len = 0;
+    w.cap = sizeof w.small / sizeof w.small[0];
+    w.target = target;
+    hw_spread_visit(&w, v);
+    while (w.len > 0) {
+        Obj *o = w.todo[--w.len];
+        unsigned e = hw_epoch_bits(o);
+        if (e >= target) continue; /* reached twice; moved the first time */
+        if (o->ty->site != 0) {
+            HwRow *from = hw_row_of(t, e);
+            if (from != NULL) hw_row_add(from, o->ty->site, -1);
+            HwRow *to = hw_row_of(t, target);
+            if (to != NULL) hw_row_add(to, o->ty->site, 1);
+        }
+        hw_set_epoch(o, target);
+        if (o->ty->walk != NULL) o->ty->walk(o, hw_spread_visit, &w);
+    }
+    if (w.todo != w.small) free(w.todo);
+}
+
+/* A store: `v` is now held by `h`. If `h` outlives more epochs than `v`
+ * (a larger EPOCH field), `v` and what it reaches are adopted into `h`'s. */
 static void hw_epoch_store(Obj *h, Obj *v) {
-    (void)h;
-    (void)v;
+    unsigned eh = hw_epoch_bits(h);
+    if (v->rc == RC_IMMORTAL || eh <= hw_epoch_bits(v)) return;
+    hw_adopt(v, eh);
+}
+
+/* `v` is crossing to another task: take it, and everything it reaches that
+ * is counted, out of this task's books. Its uniqueness was just checked, so
+ * nothing else here reaches any of it. */
+void rt_hw_send(Obj *v) {
+    if (!hw_on || v == NULL || v->rc == RC_IMMORTAL) return;
+    HwTask *t = hw_task();
+    HwSpread w;
+    w.todo = w.small;
+    w.len = 0;
+    w.cap = sizeof w.small / sizeof w.small[0];
+    w.target = RC_EPOCH_NONE; /* push everything not yet in transit or kept */
+    hw_spread_push(&w, v);
+    while (w.len > 0) {
+        Obj *o = w.todo[--w.len];
+        unsigned e = hw_epoch_bits(o);
+        if (e == RC_EPOCH_TRANSIT || e == RC_EPOCH_NONE) continue;
+        if (o->ty->site != 0) {
+            HwRow *from = hw_row_of(t, e);
+            if (from != NULL) hw_row_add(from, o->ty->site, -1);
+        }
+        hw_set_epoch(o, RC_EPOCH_TRANSIT);
+        if (o->ty->walk != NULL) o->ty->walk(o, hw_spread_visit, &w);
+    }
+    if (w.todo != w.small) free(w.todo);
+}
+
+/* `v` arrived in this task -- out of a channel, or as a spawned task's
+ * argument: what is in transit is counted here from now on, against the
+ * epoch the task is in. */
+void rt_hw_receive(Obj *v) {
+    if (!hw_on || v == NULL || v->rc == RC_IMMORTAL) return;
+    HwTask *t = hw_task();
+    if (t == NULL) return;
+    hw_adopt(v, 62 - t->depth);
+}
+
+/* ---- opening and closing --------------------------------------------- */
+
+static void hw_task_grow(HwTask *t, uint32_t depth) {
+    if (depth < t->cap) return;
+    uint32_t cap = t->cap * 2;
+    while (cap <= depth) cap *= 2;
+    HwRow *rows = realloc(t->rows, cap * sizeof *rows);
+    if (rows == NULL) rt_trap("out of memory");
+    memset(rows + t->cap, 0, (cap - t->cap) * sizeof *rows);
+    t->rows = rows;
+    t->cap = cap;
+}
+
+static void hw_name_row(HwRow *r, const char *name, size_t n) {
+    if (n >= sizeof r->name) n = sizeof r->name - 1;
+    memcpy(r->name, name, n);
+    r->name[n] = 0;
+}
+
+/* Which of two leaked sites a report names first: by file, line, then type,
+ * so the text is the same on every run whatever order the slots were made
+ * in. */
+static int hw_site_order(uint32_t a, uint32_t b) {
+    const HwSlot *x = &hw_slots[a], *y = &hw_slots[b];
+    int c = strcmp(hw_str(x->file_off), hw_str(y->file_off));
+    if (c != 0) return c;
+    if (x->line != y->line) return x->line < y->line ? -1 : 1;
+    return strcmp(hw_str(x->type_off), hw_str(y->type_off));
+}
+
+/* The leaks of a closing row, as "2 Node @ main.m31:12, 1 List @ ...". */
+static size_t hw_row_text(const HwRow *r, char *out, size_t cap) {
+    HwCell left[32];
+    uint32_t n = 0, more = 0;
+    for (uint32_t i = 0; i < r->cap; i++) {
+        const HwCell *c = &r->cells[i];
+        if (c->site == 0 || c->count == 0) continue;
+        if (n == 32) {
+            more++;
+            continue;
+        }
+        uint32_t j = n++;
+        while (j > 0 && hw_site_order(left[j - 1].site, c->site) > 0) {
+            left[j] = left[j - 1];
+            j--;
+        }
+        left[j] = *c;
+    }
+    size_t len = 0;
+    out[0] = 0;
+    for (uint32_t i = 0; i < n && len + 200 < cap; i++) {
+        const HwSlot *sl = &hw_slots[left[i].site];
+        len += (size_t)snprintf(out + len, cap - len, "%s%d %s @ %s:%u", i == 0 ? "" : ", ",
+                                left[i].count, hw_str(sl->type_off), hw_str(sl->file_off), sl->line);
+    }
+    if (more > 0 && len + 40 < cap) {
+        len += (size_t)snprintf(out + len, cap - len, ", and %u more sites", more);
+    }
+    return len;
+}
+
+typedef struct {
+    unsigned epoch;
+} HwOfEpoch;
+
+/* An object the closing epoch left behind. Once reported it is marked as
+ * counted against none, so the next close at the same depth does not
+ * report it again: nothing reaches it to change it, and if something did
+ * after all, a store into it only keeps what it is given. */
+static bool hw_pick_epoch(const Obj *v, const void *arg) {
+    if (hw_epoch_bits(v) != ((const HwOfEpoch *)arg)->epoch) return false;
+    hw_set_epoch((Obj *)v, RC_EPOCH_NONE);
+    return true;
+}
+
+/* Close the innermost open epoch of `t`. */
+static void hw_close(HwTask *t) {
+    HwRow *r = &t->rows[t->depth];
+    bool leaked = false;
+    for (uint32_t i = 0; i < r->cap; i++) leaked = leaked || (r->cells[i].site != 0 && r->cells[i].count != 0);
+    if (leaked) {
+        char text[440];
+        hw_row_text(r, text, sizeof text);
+        char line[600], when[32];
+        hw_stamp(when, sizeof when);
+        snprintf(line, sizeof line, "%s EPOCH \"%s\" closed with leaks: %s\n", when, r->name, text);
+        hw_log(line);
+        /* The ledger's table of epochs that leaked, by name. */
+        pthread_mutex_lock(&hw_lock);
+        HwEpochRow *row = NULL;
+        for (int i = 0; i < HW_EPOCH_ROWS && row == NULL; i++) {
+            if (hw_epochs[i].times == 0 || strcmp(hw_epochs[i].name, r->name) == 0) row = &hw_epochs[i];
+        }
+        if (row != NULL) {
+            if (row->times == 0) snprintf(row->name, sizeof row->name, "%s", r->name);
+            snprintf(row->last, sizeof row->last, "%.63s", text);
+            row->minute = hw_now();
+            __atomic_store_n(&row->times, row->times + 1, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&hw_lock);
+        /* Who holds what leaked, for the sites trace is on for. */
+        if (__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) {
+            HwOfEpoch of = { 62 - t->depth };
+            char header[100];
+            snprintf(header, sizeof header, "(epoch \"%s\" left them)", r->name);
+            for (uint32_t i = 0; i < r->cap; i++) {
+                const HwCell *c = &r->cells[i];
+                if (c->site == 0 || c->count <= 0) continue;
+                if (__atomic_load_n(&hw_traced[c->site], __ATOMIC_RELAXED) == 0) continue;
+                hw_trace_report(c->site, header, hw_pick_epoch, &of);
+            }
+        }
+        if (hw_trap_on_leak) {
+            char msg[600];
+            snprintf(msg, sizeof msg, "epoch \"%.47s\" closed with leaks: %.439s", r->name, text);
+            rt_trap(msg);
+        }
+    }
+    free(r->cells);
+    memset(r, 0, sizeof *r);
+}
+
+/* heapwatch.epoch(name, ..): open an epoch inside the current task. */
+void rt_hw_epoch_enter(Obj *name) {
+    if (!hw_on) return;
+    HwTask *t = hw_task();
+    if (t == NULL) return;
+    if (t->depth == HW_MAX_DEPTH) {
+        t->overflow++;
+        return;
+    }
+    hw_task_grow(t, t->depth + 1);
+    t->depth++;
+    const Str *s = (const Str *)name;
+    hw_name_row(&t->rows[t->depth], s->data, (size_t)s->len);
+}
+
+void rt_hw_epoch_leave(void) {
+    if (!hw_on) return;
+    HwTask *t = hw_task();
+    if (t == NULL) return;
+    if (t->overflow > 0) {
+        t->overflow--;
+        return;
+    }
+    if (t->depth == 0) return;
+    hw_close(t);
+    t->depth--;
+}
+
+/* A task starts: name its own epoch -- "main", or the spawned function. */
+void rt_hw_task_begin(const char *name) {
+    if (!hw_on) return;
+    HwTask *t = hw_task();
+    if (t != NULL) hw_name_row(&t->rows[0], name, strlen(name));
+}
+
+/* A task ended (scheduler.c, after its entry returned): close whatever it
+ * still has open, then the task's own epoch, and drop its books. */
+void rt_hw_task_end(void) {
+    void **slot = rt_hw_task_slot;
+    if (slot == NULL || *slot == NULL) return;
+    HwTask *t = *slot;
+    if (hw_on) {
+        while (t->depth > 0) {
+            hw_close(t);
+            t->depth--;
+        }
+        hw_close(t);
+    }
+    for (uint32_t i = 0; i < t->cap; i++) free(t->rows[i].cells);
+    free(t->rows);
+    free(t);
+    *slot = NULL;
 }

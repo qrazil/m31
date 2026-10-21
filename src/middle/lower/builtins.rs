@@ -1523,6 +1523,16 @@ impl Lowerer {
                 if owned {
                     self.stmt_temps.push(d);
                 }
+                // Heap watch: what arrived is this task's now, counted
+                // against the epoch it is in (docs/heap-watch-design.md,
+                // "Epoch close").
+                if self.irty(elem) == IrTy::Ref {
+                    self.push(Inst::Call {
+                        dst: None,
+                        func: "rt_hw_receive".to_string(),
+                        args: vec![d],
+                    });
+                }
                 Ok(Val::new(d, elem, owned))
             }
         }

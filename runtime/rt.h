@@ -1250,4 +1250,25 @@ void rt_hw_unstore(Obj *h, uint32_t where);
  * clone, a `const` snapshot's copy: trace records them. */
 void rt_hw_fresh(Obj *o);
 
+/* Epoch close (docs/heap-watch-design.md). Every task is an epoch, and
+ * heapwatch.epoch opens one inside a task; what an epoch made and still
+ * counts when it closes is a leaked cycle, reported -- and a trap in a
+ * test build (-DRC_DEBUG, or M31_HEAPWATCH_TRAP=1).
+ *
+ * rt_hw_send: `v` crosses to another task, after its uniqueness check; it
+ * and what it reaches leave this task's books. rt_hw_receive: `v` arrived
+ * (out of a channel, or as a spawned task's argument) and is counted here.
+ * The other four bracket a task and a block; the scheduler and the emitted
+ * trampolines call the task pair, lib/heapwatch.m31 the block pair. */
+void rt_hw_send(Obj *v);
+void rt_hw_receive(Obj *v);
+void rt_hw_task_begin(const char *name);
+void rt_hw_task_end(void);
+void rt_hw_epoch_enter(Obj *name);
+void rt_hw_epoch_leave(void);
+
+/* Where the running task keeps its books: set by the scheduler around each
+ * dispatch to the green thread's own slot, NULL on any other thread. */
+extern _Thread_local void **rt_hw_task_slot;
+
 #endif /* RT_H */

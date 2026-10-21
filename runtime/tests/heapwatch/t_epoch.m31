@@ -1,0 +1,27 @@
+// Epoch close outside a test build, for runtime/tests/heapwatch_test.sh:
+// twenty requests, one in four of which leaves a pair of nodes holding each
+// other. Each such close is reported to the suspect log and the ledger's
+// table of epochs, and with trace on for Node and List, who holds them --
+// the cycle -- goes to the trace file. The program carries on and exits.
+import heapwatch;
+
+type Node {
+    str name;
+    List<Node> links;
+}
+
+void handle(int round) {
+    Node left = Node("left", []);
+    Node right = Node("right", []);
+    if (round % 4 == 0) {
+        left.links.push(right);
+        right.links.push(left);
+    }
+}
+
+int round = 0;
+while (round < 20) {
+    heapwatch.epoch("request", () => handle(round));
+    round = round + 1;
+}
+print("done");

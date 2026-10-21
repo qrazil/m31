@@ -2447,6 +2447,7 @@ void rt_chan_drop(Chan *c) {
  * not a new kind of assumption for this runtime to make. */
 static void rt_main_trampoline(void *argp) {
     void (*entry)(void) = (void (*)(void))(uintptr_t)argp;
+    rt_hw_task_begin("main");
     entry();
 }
 
