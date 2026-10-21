@@ -27,13 +27,44 @@ static OPERANDS: [cli::Operand; 1] = [cli::Operand {
 pub static SPEC: cli::Spec = cli::Spec {
     prog: "m31c -heapwatch",
     summary: "report what a program's heap holds, by allocation site",
-    opts: &[cli::Opt {
-        long: "all",
-        short: None,
-        kind: cli::Kind::Flag,
-        placeholder: "",
-        help: "list every site with live objects, not only the ones worth a look",
-    }],
+    opts: &[
+        cli::Opt {
+            long: "all",
+            short: None,
+            kind: cli::Kind::Flag,
+            placeholder: "",
+            help: "list every site with live objects, not only the ones worth a look",
+        },
+        cli::Opt {
+            long: "trace",
+            short: None,
+            kind: cli::Kind::Values,
+            placeholder: "TYPE",
+            help:
+                "record who holds these types (Type or Type@file.m31:line) in the running process",
+        },
+        cli::Opt {
+            long: "untrace",
+            short: None,
+            kind: cli::Kind::Values,
+            placeholder: "TYPE",
+            help: "stop recording who holds these types",
+        },
+        cli::Opt {
+            long: "depth",
+            short: None,
+            kind: cli::Kind::Int,
+            placeholder: "N",
+            help: "follow holders this many levels up, tracing their sites as needed (default 3)",
+        },
+        cli::Opt {
+            long: "paths",
+            short: None,
+            kind: cli::Kind::Flag,
+            placeholder: "",
+            help: "print who holds the traced objects (asking a running process first)",
+        },
+    ],
     operands: &OPERANDS,
     commands: &[],
     version: None,
@@ -46,7 +77,13 @@ max(M31_HEAPWATCH_MIN minutes, M31_HEAPWATCH_FACTOR x the site's own p99
 lifetime) -- 10 and 10 by default -- or than the limit M31_AGE gives it.
 \"never freed\" is a site nothing of which has died yet: no baseline, so it is
 listed for a person to judge. \"forever\" is a site or object marked as living
-long on purpose (M31_AGE=Type:forever, heapwatch.forever(x)).";
+long on purpose (M31_AGE=Type:forever, heapwatch.forever(x)).
+
+--trace asks a running process, through its ledger's control page, to record
+who holds objects of a type from now on (M31_HEAPWATCH_TRACE=Type does the
+same at start). The holders are written to <program>.<pid>.trace when a traced
+site becomes a suspect or an epoch closes with its objects; --paths prints
+that file, asking a running process for the paths as they are now first.";
 
 const VERSION: u32 = 1;
 const PAGE: usize = 4096;
@@ -78,8 +115,136 @@ pub fn run(parsed: &cli::Parsed) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let mut requests: Vec<(u32, String)> = Vec::new();
+    for t in parsed.values("trace") {
+        requests.push((1, t.clone()));
+    }
+    for t in parsed.values("untrace") {
+        requests.push((2, t.clone()));
+    }
+    let depth = parsed.value("depth").and_then(|d| d.parse::<u32>().ok());
+    if parsed.flag("paths") && ledger.running && alive(ledger.pid) {
+        requests.push((3, String::new()));
+    }
+    if !requests.is_empty() || depth.is_some() {
+        if !ledger.running || !alive(ledger.pid) {
+            eprintln!(
+                "m31c -heapwatch: {} (pid {}) is not running; trace can only be changed in a running process",
+                ledger.program, ledger.pid
+            );
+            return ExitCode::FAILURE;
+        }
+        if let Err(e) = control(&path, &requests, depth.unwrap_or(0)) {
+            eprintln!("m31c -heapwatch: {e}");
+            return ExitCode::FAILURE;
+        }
+        for (op, spec) in &requests {
+            match op {
+                1 => println!("trace on for {spec} in pid {}", ledger.pid),
+                2 => println!("trace off for {spec} in pid {}", ledger.pid),
+                _ => {}
+            }
+        }
+    }
+    if parsed.flag("paths") {
+        let trace = path.with_extension("trace");
+        match std::fs::read_to_string(&trace) {
+            Ok(t) => print!("{t}"),
+            Err(_) => println!("no trace output yet: {}", trace.display()),
+        }
+        return ExitCode::SUCCESS;
+    }
+    if !requests.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    // Read again: a request just applied may have changed what is traced.
+    let bytes = std::fs::read(&path).unwrap_or(bytes);
+    let Ok(ledger) = Ledger::parse(&bytes) else {
+        return ExitCode::FAILURE;
+    };
     print!("{}", report(&ledger, &path, parsed.flag("all")));
     ExitCode::SUCCESS
+}
+
+/// Write requests into a running process's control page and wait for it to
+/// apply them (runtime/heapwatch.c, "the control page", has the layout).
+/// Plain file writes: the process reads the same page through its mapping.
+/// `<ledger>.lock`, made with create_new, keeps two tools from writing at
+/// once.
+fn control(path: &Path, requests: &[(u32, String)], depth: u32) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::FileExt;
+    const OPS: usize = 31;
+    if requests.len() > OPS {
+        return Err(format!("at most {OPS} trace changes at a time"));
+    }
+    let lock = path.with_extension("ledger.lock");
+    let mut tries = 0;
+    let mut lock_file = loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            Ok(f) => break f,
+            Err(_) if tries < 50 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "another m31c -heapwatch holds {} ({e}); remove it if none is running",
+                    lock.display()
+                ))
+            }
+        }
+    };
+    let _ = write!(lock_file, "{}", std::process::id());
+    let result = (|| -> Result<u32, String> {
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| format!("cannot open {} for writing: {e}", path.display()))?;
+        let mut page = vec![0u8; 64];
+        f.read_exact_at(&mut page, 0)
+            .map_err(|e| format!("cannot read the control page: {e}"))?;
+        if &page[0..8] != b"M31HWCTL" {
+            return Err("the ledger has no control page".into());
+        }
+        let seq = u32_at(&page, 16).wrapping_add(1);
+        let w = |at: u64, b: &[u8]| {
+            f.write_all_at(b, at)
+                .map_err(|e| format!("cannot write the control page: {e}"))
+        };
+        w(12, &std::process::id().to_le_bytes())?;
+        for (i, (op, spec)) in requests.iter().enumerate() {
+            let mut r = [0u8; 128];
+            r[0..4].copy_from_slice(&op.to_le_bytes());
+            let s = spec.as_bytes();
+            let n = s.len().min(123);
+            r[4..4 + n].copy_from_slice(&s[..n]);
+            w(64 + 128 * i as u64, &r)?;
+        }
+        w(24, &depth.to_le_bytes())?;
+        w(28, &(requests.len() as u32).to_le_bytes())?;
+        // Last: the process acts once `seq` moves.
+        w(16, &seq.to_le_bytes())?;
+        w(12, &0u32.to_le_bytes())?;
+        Ok(seq)
+    })();
+    let _ = std::fs::remove_file(&lock);
+    let seq = result?;
+    // The process looks at the page once a second.
+    let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    for _ in 0..200 {
+        let mut b = [0u8; 4];
+        if f.read_exact_at(&mut b, 20).is_ok() && u32::from_le_bytes(b) == seq {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Err("the process did not take the request within 10 s".into())
 }
 
 /// The ledger a command line names: a path (with or without `.ledger`), or a
@@ -211,6 +376,9 @@ pub(crate) struct Ledger<'a> {
     pub factor: u32,
     pub running: bool,
     pub lost_slots: u32,
+    off_traced: usize,
+    pub edges: u32,
+    pub edges_dropped: u32,
     pub program: String,
 }
 
@@ -245,12 +413,22 @@ impl<'a> Ledger<'a> {
             factor: u32_at(b, h + 124),
             running: u32_at(b, h + 128) != 0,
             lost_slots: u32_at(b, h + 132),
+            off_traced: u64_at(b, h + 72) as usize,
+            edges: u32_at(b, h + 140),
+            edges_dropped: u32_at(b, h + 144),
             program: cstr_at(b, h + 152, 128),
         };
         if l.count_size != 320 || l.off_shards + l.n_shards as usize * l.stride > b.len() {
             return Err("the ledger's layout does not match its size".into());
         }
         Ok(l)
+    }
+
+    /// Whether trace is on for slot `s`.
+    pub fn traced(&self, s: u32) -> bool {
+        self.b
+            .get(self.off_traced + s as usize)
+            .is_some_and(|&v| v != 0)
     }
 
     pub fn string(&self, off: u32) -> String {
@@ -525,6 +703,25 @@ fn report(l: &Ledger, path: &Path, all: bool) -> String {
         let s = if times == 1 { "" } else { "s" };
         o.push_str(&format!(
             "epoch \"{name}\" closed with leaks {times} time{s}; last at minute {minute}: {last}\n"
+        ));
+    }
+    let traced: Vec<String> = (1..l.n_slots)
+        .filter(|&s| l.traced(s))
+        .map(|s| {
+            let slot = l.slot(s);
+            format!("{} {}:{}", slot.type_name, slot.file, slot.line)
+        })
+        .collect();
+    if !traced.is_empty() {
+        o.push_str(&format!(
+            "trace on for {}; {} edges recorded{}\n",
+            traced.join(", "),
+            l.edges,
+            if l.edges_dropped > 0 {
+                format!(", {} dropped at the cap", l.edges_dropped)
+            } else {
+                String::new()
+            }
         ));
     }
     if l.lost_slots > 0 {

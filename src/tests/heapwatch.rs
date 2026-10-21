@@ -199,3 +199,34 @@ fn a_survivor_far_older_than_its_sites_lifetime_is_counted_as_such() {
     assert_eq!(sum.older_than, 2);
     assert_eq!(l.slot(1).type_name, "Conn");
 }
+
+// ---- the store hook, sends and receives (trace and epoch close) ---------
+
+#[test]
+fn a_reference_field_store_tells_heap_watch_first() {
+    let c = c_of("type S { str name; int n; }\nS s = S(\"a\", 1);\ns.name = \"b\";\ns.n = 2;");
+    let hook = c.find("rt_hw_store(").expect("a store hook");
+    let store = c[hook..].find("->f_name = ").expect("the store after it");
+    assert!(
+        c[hook..hook + store].contains("offsetof(T"),
+        "the hook names the field by its offset:\n{c}"
+    );
+    // An int field is not a reference: no hook.
+    assert!(
+        !c.contains("f_n));"),
+        "only reference fields are hooked:\n{c}"
+    );
+}
+
+#[test]
+fn an_element_store_of_a_reference_tells_heap_watch_first() {
+    let c = c_of("List<str> xs = [\"a\"];\nxs[0] = \"b\";\nList<int> ns = [1];\nns[0] = 2;");
+    assert_eq!(
+        c.matches("rt_hw_store_elem(").count(),
+        1,
+        "the str element store only:\n{c}"
+    );
+    let hook = c.find("rt_hw_store_elem(").unwrap();
+    let set = c.find("rt_index_set(").unwrap();
+    assert!(hook < set, "{c}");
+}

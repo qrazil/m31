@@ -359,6 +359,8 @@ allocation site in a ledger file, on by default:
 m31c -heapwatch <ledger|pid>      suspects, never-freed sites, what lives forever
 M31_AGE=Texture:forever           long-lived on purpose, by type or Type@file.m31:line
 heapwatch.forever(x)              ... or by object, in code
+m31c -heapwatch <pid> --trace Conn  who holds it, recorded from now on
+m31c -heapwatch <pid> --paths     ... and printed
 M31_HEAPWATCH=0                   off
 ```
 

@@ -19,7 +19,7 @@ change landed on master.
   becomes one and each time its survivors double in age again. Nothing is
   walked and nothing is freed: every answer comes from counters the
   allocator and `rc_dec` keep.
-- **`m31c -heapwatch <ledger|pid> [--all]`** reads a ledger, from a running
+- **`m31c -heapwatch <ledger|pid>`** reads a ledger, from a running
   process or a dead one, and lists suspects, sites that never freed
   anything, and what is marked as living long on purpose.
 - **Long-lived on purpose:** `M31_AGE=Type:forever`,
@@ -30,6 +30,21 @@ change landed on master.
   threshold. A clean exit with nothing to report removes the files
   (`M31_HEAPWATCH_KEEP=1` keeps them); a program removes the ledgers of
   dead processes of its own name beyond the newest 8.
+
+- **Heap watch, phase 2: trace -- who holds it.** For the types it is asked
+  to watch, the runtime records reference edges as stores make and break
+  them -- no heap walk -- and writes the paths that keep a suspect's old
+  objects alive to `<program>.<pid>.trace`: through holders that are traced
+  too, up to `--depth` levels (turning trace on for the next holder up as it
+  goes), to a cycle (`<- cycle`), or to an object only a local holds. On at
+  start with `M31_HEAPWATCH_TRACE=Conn,Session@app/session.m31:12`, or in a
+  running process with `m31c -heapwatch <pid> --trace Conn` (`--untrace`,
+  `--depth N`), which writes to the ledger's control page; the process
+  applies it within a second. `--paths` prints the trace file, asking a
+  running process for the paths as they are now. Every reference store now
+  passes a hook first (`rt_hw_store`, `rt_hw_store_elem`, and the runtime's
+  own collection stores), which costs a compare and an untaken branch while
+  nothing is traced.
 
 ### Changed
 

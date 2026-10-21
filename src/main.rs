@@ -7,7 +7,7 @@
 //!     m31c -fmt [--check] [--recursive] <file|dir>...
 //!     m31c -lint <file|dir>... [--allow NAME...] [--strict] [--summary]
 //!     m31c -init [--lib] [--name N] [--prefix P] [dir]
-//!     m31c -heapwatch <ledger|pid> [--all]
+//!     m31c -heapwatch <ledger|pid> [--all] [--trace T...] [--untrace T...] [--depth N] [--paths]
 //!
 //! Commands may share a line and run in the order typed. The pre-0.6 spellings
 //! (`--emit-c`, `fmt`, `-o`, `-r`, ...) still work for one release: each prints

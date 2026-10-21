@@ -196,6 +196,8 @@ pub(super) fn emit_type_support(o: &mut String, m: &Module, sites: &heapwatch::S
                 writeln!(o, "    n->f_{fname} = rt_copy_child(ctx, p->f_{fname});").unwrap();
             }
         }
+        // Heap watch: the copy holds references no store put there.
+        writeln!(o, "    rt_hw_fresh((Obj *)n);").unwrap();
         writeln!(o, "    return (Obj *)n;").unwrap();
         writeln!(o, "}}").unwrap();
     }

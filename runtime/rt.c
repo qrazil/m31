@@ -75,6 +75,36 @@
 static long hw_alloc(const TypeInfo **typ);
 static void hw_free(Obj *o);
 
+/* What a collection's store tells heap watch: `v` is now held by the
+ * collection `h` -- as an element, a key or a value -- or no longer is. The
+ * same test emitted code makes before a field store (rt.h, rt_hw_store):
+ * nothing to do unless trace is on or `v` must be adopted into an older
+ * epoch. Releasing a value is not "no longer held": its release takes it
+ * out of trace's table itself (hw_free). */
+#define HW_WHERE_ELEM  0xFFFFFFF1u
+#define HW_WHERE_KEY   0xFFFFFFF2u
+#define HW_WHERE_VALUE 0xFFFFFFF3u
+static void hw_trace_unstore(Obj *h, Obj *v, uint32_t where);
+static void hw_trace_drop_holder(Obj *h);
+static void hw_fresh_collection(Obj *o);
+
+static inline void hw_hold(Obj *h, int64_t slot, uint32_t where) {
+    Obj *v = (Obj *)(intptr_t)slot;
+    if (v != NULL && rt_hw_store_needs(h, v)) rt_hw_store_slow(h, v, where);
+}
+
+static inline void hw_let_go(Obj *h, int64_t slot, uint32_t where) {
+    if (slot != 0 && __atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) {
+        hw_trace_unstore(h, (Obj *)(intptr_t)slot, where);
+    }
+}
+
+static bool seq_holds_refs(const Obj *o);
+
+static inline bool hw_tracing(void) {
+    return __atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED) != 0;
+}
+
 __attribute__((cold, noinline)) static _Noreturn void rc_overflow_trap(void) {
     rt_trap("reference count overflow: more than 8589934591 references to one object");
 }
@@ -936,6 +966,7 @@ Obj *rt_array_new(int64_t len, int64_t fill, bool elems_are_refs) {
         a->data[i] = fill;
         if (elems_are_refs) rc_inc((Obj *)(intptr_t)fill);
     }
+    if (elems_are_refs && hw_tracing()) hw_fresh_collection((Obj *)a);
     return (Obj *)a;
 }
 
@@ -967,6 +998,7 @@ void rt_array_put(Obj *o, int64_t i, int64_t v) {
     Arr *a = (Arr *)o;
     if (i < 0 || i >= a->len) rt_trap("index out of range");
     a->data[i] = v;
+    if (seq_holds_refs(o)) hw_hold(o, v, HW_WHERE_ELEM);
 }
 
 Obj *rt_list_new(bool elems_are_refs) {
@@ -1014,6 +1046,7 @@ void rt_list_push(Obj *o, int64_t v) {
         l->cap = cap;
     }
     l->data[l->len++] = v;
+    if (seq_holds_refs(o)) hw_hold(o, v, HW_WHERE_ELEM);
 }
 
 /* A list of `n` copies of `fill`: the `[v; n]` literal in List position.
@@ -1034,6 +1067,7 @@ Obj *rt_list_repeat(int64_t n, int64_t fill, bool elems_are_refs) {
         l->data[i] = fill;
         if (elems_are_refs) rc_inc((Obj *)(intptr_t)fill);
     }
+    if (elems_are_refs && hw_tracing()) hw_fresh_collection((Obj *)l);
     return (Obj *)l;
 }
 
@@ -1061,6 +1095,7 @@ Obj *rt_seq_clone(Obj *o) {
         a->data[i] = src[i];
         if (refs) rc_inc((Obj *)(intptr_t)src[i]);
     }
+    if (refs && hw_tracing()) hw_fresh_collection((Obj *)a);
     return (Obj *)a;
 }
 
@@ -1094,6 +1129,7 @@ Obj *rt_seq_slice(Obj *o, int64_t from, int64_t to) {
         a->data[i] = src[from + i];
         if (refs) rc_inc((Obj *)(intptr_t)src[from + i]);
     }
+    if (refs && hw_tracing()) hw_fresh_collection((Obj *)a);
     return (Obj *)a;
 }
 
@@ -1101,7 +1137,9 @@ int64_t rt_list_pop(Obj *o) {
     rt_check_mutable(o);
     Lst *l = (Lst *)o;
     if (l->len == 0) rt_trap("pop from an empty list");
-    return l->data[--l->len];
+    int64_t v = l->data[--l->len];
+    if (seq_holds_refs(o)) hw_let_go(o, v, HW_WHERE_ELEM);
+    return v;
 }
 
 /* `insert` and `remove_at` transfer ownership the same way push and pop do:
@@ -1116,6 +1154,7 @@ void rt_list_insert(Obj *o, int64_t i, int64_t v) {
         l->data[j] = l->data[j - 1];
     }
     l->data[i] = v;
+    if (seq_holds_refs(o)) hw_hold(o, v, HW_WHERE_ELEM);
 }
 
 int64_t rt_list_remove_at(Obj *o, int64_t i) {
@@ -1127,6 +1166,7 @@ int64_t rt_list_remove_at(Obj *o, int64_t i) {
         l->data[j] = l->data[j + 1];
     }
     l->len--;
+    if (seq_holds_refs(o)) hw_let_go(o, gone, HW_WHERE_ELEM);
     return gone;
 }
 
@@ -1167,6 +1207,7 @@ void rt_list_clear(Obj *o, bool elems_are_refs) {
     l->data = NULL;
     l->len = 0;
     l->cap = 0;
+    if (hw_tracing()) hw_trace_drop_holder(o);
     for (int64_t i = 0; i < n; i++) {
         rc_dec((Obj *)(intptr_t)data[i]);
     }
@@ -1875,6 +1916,10 @@ void rt_map_set(Obj *o, int64_t k, int64_t v) {
         bool val_is_ref = m->val_is_ref;
         if (val_is_ref) rc_inc((Obj *)(intptr_t)v);
         m->slots[i].v = v;
+        if (val_is_ref) {
+            hw_let_go(o, (int64_t)(intptr_t)old, HW_WHERE_VALUE);
+            hw_hold(o, v, HW_WHERE_VALUE);
+        }
         rc_guard_drop(o, RC_PROBING, guard);
         /* The mark comes off before the release: the value being replaced
          * may be the last of its kind, and its destructor is program code
@@ -1892,6 +1937,8 @@ void rt_map_set(Obj *o, int64_t k, int64_t v) {
     m->len++;
     if (m->key_is_ref) rc_inc((Obj *)(intptr_t)k);
     if (m->val_is_ref) rc_inc((Obj *)(intptr_t)v);
+    if (m->key_is_ref) hw_hold(o, k, HW_WHERE_KEY);
+    if (m->val_is_ref) hw_hold(o, v, HW_WHERE_VALUE);
     rc_guard_drop(o, RC_PROBING, guard);
 }
 
@@ -1941,6 +1988,8 @@ void rt_map_remove(Obj *o, int64_t k) {
     bool val_is_ref = m->val_is_ref;
     m->slots[i].state = SLOT_DEAD;   /* not EMPTY: a probe must not stop here */
     m->len--;
+    if (key_is_ref) hw_let_go(o, (int64_t)(intptr_t)dk, HW_WHERE_KEY);
+    if (val_is_ref) hw_let_go(o, (int64_t)(intptr_t)dv, HW_WHERE_VALUE);
     /* The slot is gone from the table before either release runs: a
      * destructor is program code and may look at this map, which must
      * already read as one entry shorter, and may change it, which the mark
@@ -2003,6 +2052,7 @@ void rt_map_clear(Obj *o) {
     m->cap = 0;
     m->len = 0;
     m->used = 0;
+    if (hw_tracing()) hw_trace_drop_holder(o);
     for (int64_t i = 0; i < oldcap; i++) {
         if (old[i].state != SLOT_FULL) continue;
         if (key_is_ref) rc_dec((Obj *)(intptr_t)old[i].k);
@@ -2031,6 +2081,7 @@ Obj *rt_map_clone(Obj *o) {
         if (c->key_is_ref) rc_inc((Obj *)(intptr_t)c->slots[i].k);
         if (c->val_is_ref) rc_inc((Obj *)(intptr_t)c->slots[i].v);
     }
+    if (hw_tracing()) hw_fresh_collection((Obj *)c);
     return (Obj *)c;
 }
 
@@ -2738,6 +2789,7 @@ static Obj *copy_obj(CopyMap *m, Obj *o) {
         for (int64_t i = 0; i < a->len; i++) n->data[i] = 0;
         rt_copy_register(m, o, (Obj *)n);
         copy_slots(m, n->data, a->data, a->len, kind == &rt_arr_ref_type);
+        if (hw_tracing()) hw_fresh_collection((Obj *)n);
         return (Obj *)n;
     }
     if (kind == &rt_lst_val_type || kind == &rt_lst_ref_type) {
@@ -2751,6 +2803,7 @@ static Obj *copy_obj(CopyMap *m, Obj *o) {
         rt_copy_register(m, o, (Obj *)n);
         copy_slots(m, n->data, l->data, l->len, kind == &rt_lst_ref_type);
         n->len = l->len;
+        if (hw_tracing()) hw_fresh_collection((Obj *)n);
         return (Obj *)n;
     }
     if (kind == &rt_bytes_type) {
@@ -2784,6 +2837,7 @@ static Obj *copy_obj(CopyMap *m, Obj *o) {
             }
             n->len = src->len;
         }
+        if (hw_tracing()) hw_fresh_collection((Obj *)n);
         return (Obj *)n;
     }
     if (ty != NULL && ty->copy != NULL) return ty->copy(o, m);

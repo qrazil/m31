@@ -1,0 +1,41 @@
+// Who holds it, for runtime/tests/heapwatch_test.sh: a cache that never lets
+// go of one session in four, each session holding a connection; and pairs of
+// nodes that hold each other through their lists of links, one pair in four
+// never released. Everything else dies young, so both sites learn a short
+// lifetime and the leaked objects become suspects. Runs until it is killed.
+import timer;
+
+type Connection {
+    int number;
+}
+
+type Session {
+    Connection connection;
+    int number;
+}
+
+type Cache {
+    Map<int, Session> by_number;
+}
+
+type Node {
+    int number;
+    List<Node> links;
+}
+
+Cache cache = Cache({});
+int round = 0;
+while (true) {
+    Session session = Session(Connection(round), round);
+    if (round % 4 == 0) {
+        cache.by_number.set(round, session);
+    }
+    Node left = Node(round, []);
+    Node right = Node(round, []);
+    if (round % 4 == 0) {
+        left.links.push(right);
+        right.links.push(left);
+    }
+    timer.sleep_ms(2);
+    round = round + 1;
+}

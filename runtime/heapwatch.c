@@ -197,6 +197,10 @@ static void hw_control_init(void);
 static void hw_control(void);
 static long hw_epoch_of_new(const TypeInfo *ty);
 static void hw_epoch_free(Obj *o);
+static void hw_epoch_store(Obj *h, Obj *v);
+static uint32_t hw_edges_max;
+static uint8_t *hw_edge_sites;
+static void hw_trace_free(Obj *o);
 
 static inline uint32_t hw_now(void) {
     return __atomic_load_n(&hw_minute_now, __ATOMIC_RELAXED);
@@ -676,6 +680,7 @@ static void hw_free(Obj *o) {
     if (!hw_on) return;
     const TypeInfo *ty = o->ty;
     hw_epoch_free(o);
+    if (__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) hw_trace_free(o);
     if (ty->site == 0) return;
     uint32_t m = (uint32_t)((o->rc & RC_BIRTH) >> RC_BIRTH_SHIFT);
     uint32_t now = hw_now();
@@ -1134,7 +1139,9 @@ void rt_hw_program(const RtHwLoc *locs, uint32_t nlocs, const TypeInfo *const *s
     h->floor_min = hw_env_u32("M31_HEAPWATCH_MIN", 10, 1, 100000000);
     h->factor = hw_env_u32("M31_HEAPWATCH_FACTOR", 10, 1, 100000);
     h->running = 1;
-    h->trace_depth = hw_env_u32("M31_HEAPWATCH_DEPTH", 3, 0, 64);
+    h->trace_depth = hw_env_u32("M31_HEAPWATCH_DEPTH", 3, 1, 64);
+    hw_edges_max = hw_env_u32("M31_HEAPWATCH_EDGES", 1u << 20, 16, 1u << 28);
+    hw_edge_sites = calloc(max_slots, 1);
     snprintf(h->program, sizeof h->program, "%s", name);
     hw_control_init();
 
@@ -1174,23 +1181,631 @@ static void hw_exit(void) {
     unlink(p);
 }
 
-/* ---- trace and epochs: not yet ---------------------------------------- */
+/* ---- trace: who holds it (phase 2) --------------------------------------
+ *
+ * docs/heap-watch-design.md, "Trace: who holds it". For the slots trace is
+ * on for, every reference store records an EDGE -- value <- holder.slot --
+ * and every overwrite, removal and release takes it out again. Nothing is
+ * walked: the table only ever holds what stores told it, and a report reads
+ * the table.
+ *
+ * An edge is keyed by (holder, where, value) for a collection's element,
+ * key or value -- a List can hold the same object twice, so those count --
+ * and by (holder, where) alone for a field, which holds one value at a time:
+ * a store into a field replaces whatever edge the field had, so the old
+ * value's edge goes without anybody having to know what it was.
+ *
+ * Every operation here takes hw_trace_lock: the table is shared by every
+ * thread, and none of it runs unless trace is on for something. With trace
+ * off (rt_hw_tracing == 0) a store pays one load and an untaken branch. */
+
+/* HW_WHERE_ELEM, _KEY and _VALUE are defined at the top of rt.c, which
+ * stores through them before this file. */
+#define HW_IS_FIELD(w) ((w) < 0xFFFFFFF0u)
+
+typedef struct {
+    Obj     *h;          /* the holder */
+    Obj     *v;          /* the value it holds; NULL on a free entry */
+    uint32_t where;      /* a field's offset, or HW_WHERE_* */
+    uint32_t count;      /* a collection can hold one value many times */
+    int32_t  hnext, hprev, vnext, vprev; /* the holder's and the value's lists */
+} HwEdge;
+
+/* Open addressing, keyed by an object's address, linear probing with
+ * backward-shift deletion so there are no tombstones. Maps an object to
+ * the head of its list of edges (as a holder, and as a value), or an edge
+ * key to an edge. */
+typedef struct {
+    uintptr_t *keys;  /* 0 is empty */
+    uintptr_t *keys2; /* second key word, for the edge index */
+    int32_t   *vals;
+    uint32_t   cap;   /* a power of two, or 0 */
+    uint32_t   len;
+} HwMap;
+
+static pthread_mutex_t hw_trace_lock = PTHREAD_MUTEX_INITIALIZER;
+uint8_t                rt_hw_tracing;      /* read inline by emitted stores */
+static uint32_t        hw_traced_slots;    /* how many slots trace is on for */
+static HwEdge         *hw_edges;
+static uint32_t        hw_edges_cap, hw_edges_used, hw_edge_free = UINT32_MAX;
+static uint32_t        hw_edges_max = 1u << 20;
+static HwMap           hw_by_key, hw_by_holder, hw_by_value;
+static int             hw_trace_fd = -1;
+/* Per slot: whether an edge ever named an object of it, as holder or as
+ * value. Set under hw_trace_lock and never cleared; read without it, so a
+ * store or a release of an object no edge can name -- most of them, even
+ * with trace on -- does not take the lock at all. */
+static uint8_t        *hw_edge_sites;
+
+static inline bool hw_may_have_edges(const Obj *o) {
+    return hw_edge_sites != NULL && o->ty->site != 0 &&
+           __atomic_load_n(&hw_edge_sites[o->ty->site], __ATOMIC_RELAXED) != 0;
+}
+
+static uint64_t hw_mix(uintptr_t a, uintptr_t b) {
+    uint64_t x = (uint64_t)a * 0x9E3779B97F4A7C15ull ^ (uint64_t)b * 0xC2B2AE3D27D4EB4Full;
+    return x ^ (x >> 29);
+}
+
+static void hw_map_grow(HwMap *m) {
+    uint32_t cap = m->cap == 0 ? 256 : m->cap * 2;
+    uintptr_t *k = calloc(cap, sizeof *k), *k2 = calloc(cap, sizeof *k2);
+    int32_t *v = calloc(cap, sizeof *v);
+    if (k == NULL || k2 == NULL || v == NULL) rt_trap("out of memory");
+    for (uint32_t i = 0; i < m->cap; i++) {
+        if (m->keys[i] == 0) continue;
+        uint32_t j = (uint32_t)hw_mix(m->keys[i], m->keys2[i]) & (cap - 1);
+        while (k[j] != 0) j = (j + 1) & (cap - 1);
+        k[j] = m->keys[i];
+        k2[j] = m->keys2[i];
+        v[j] = m->vals[i];
+    }
+    free(m->keys);
+    free(m->keys2);
+    free(m->vals);
+    m->keys = k;
+    m->keys2 = k2;
+    m->vals = v;
+    m->cap = cap;
+}
+
+/* The slot of (a, b), or of the empty place it would go in. */
+static uint32_t hw_map_slot(const HwMap *m, uintptr_t a, uintptr_t b) {
+    uint32_t i = (uint32_t)hw_mix(a, b) & (m->cap - 1);
+    while (m->keys[i] != 0 && (m->keys[i] != a || m->keys2[i] != b)) i = (i + 1) & (m->cap - 1);
+    return i;
+}
+
+static int32_t hw_map_get(const HwMap *m, uintptr_t a, uintptr_t b) {
+    if (m->cap == 0) return -1;
+    uint32_t i = hw_map_slot(m, a, b);
+    return m->keys[i] == 0 ? -1 : m->vals[i];
+}
+
+static void hw_map_put(HwMap *m, uintptr_t a, uintptr_t b, int32_t v) {
+    if (m->cap == 0 || (m->len + 1) * 4 >= m->cap * 3) hw_map_grow(m);
+    uint32_t i = hw_map_slot(m, a, b);
+    if (m->keys[i] == 0) {
+        m->keys[i] = a;
+        m->keys2[i] = b;
+        m->len++;
+    }
+    m->vals[i] = v;
+}
+
+static void hw_map_del(HwMap *m, uintptr_t a, uintptr_t b) {
+    if (m->cap == 0) return;
+    uint32_t i = hw_map_slot(m, a, b);
+    if (m->keys[i] == 0) return;
+    m->len--;
+    /* Backward shift: pull later entries of the run into the hole. */
+    uint32_t j = i;
+    for (;;) {
+        m->keys[i] = 0;
+        for (;;) {
+            j = (j + 1) & (m->cap - 1);
+            if (m->keys[j] == 0) return;
+            uint32_t home = (uint32_t)hw_mix(m->keys[j], m->keys2[j]) & (m->cap - 1);
+            /* Stay if home lies cyclically in (i, j]. */
+            bool stays = i <= j ? (i < home && home <= j) : (i < home || home <= j);
+            if (!stays) break;
+        }
+        m->keys[i] = m->keys[j];
+        m->keys2[i] = m->keys2[j];
+        m->vals[i] = m->vals[j];
+        i = j;
+    }
+}
+
+static uintptr_t hw_key_value(Obj *v, uint32_t where) {
+    return HW_IS_FIELD(where) ? 0 : (uintptr_t)v;
+}
+
+/* The edge key's second word: where, and for a collection the value too. */
+static uintptr_t hw_key2(Obj *v, uint32_t where) {
+    return (uintptr_t)where ^ (hw_key_value(v, where) << 1);
+}
+
+static void hw_edge_unlink(int32_t e) {
+    HwEdge *x = &hw_edges[e];
+    if (x->hprev >= 0) {
+        hw_edges[x->hprev].hnext = x->hnext;
+    } else if (x->hnext >= 0) {
+        hw_map_put(&hw_by_holder, (uintptr_t)x->h, 0, x->hnext);
+    } else {
+        hw_map_del(&hw_by_holder, (uintptr_t)x->h, 0);
+    }
+    if (x->hnext >= 0) hw_edges[x->hnext].hprev = x->hprev;
+    if (x->vprev >= 0) {
+        hw_edges[x->vprev].vnext = x->vnext;
+    } else if (x->vnext >= 0) {
+        hw_map_put(&hw_by_value, (uintptr_t)x->v, 0, x->vnext);
+    } else {
+        hw_map_del(&hw_by_value, (uintptr_t)x->v, 0);
+    }
+    if (x->vnext >= 0) hw_edges[x->vnext].vprev = x->vprev;
+}
+
+static void hw_edge_remove(int32_t e) {
+    HwEdge *x = &hw_edges[e];
+    hw_map_del(&hw_by_key, (uintptr_t)x->h, hw_key2(x->v, x->where));
+    hw_edge_unlink(e);
+    x->v = NULL;
+    x->hnext = (int32_t)hw_edge_free;
+    hw_edge_free = (uint32_t)e;
+    hw_head->edges--;
+}
+
+static void hw_edge_add(Obj *h, Obj *v, uint32_t where) {
+    int32_t e = hw_map_get(&hw_by_key, (uintptr_t)h, hw_key2(v, where));
+    if (e >= 0) {
+        hw_edges[e].count++;
+        return;
+    }
+    if (hw_edge_free != UINT32_MAX) {
+        e = (int32_t)hw_edge_free;
+        hw_edge_free = (uint32_t)hw_edges[e].hnext;
+    } else {
+        if (hw_edges_used == hw_edges_cap) {
+            if (hw_edges_cap >= hw_edges_max) {
+                hw_head->edges_dropped++;
+                return;
+            }
+            uint32_t cap = hw_edges_cap == 0 ? 1024 : hw_edges_cap * 2;
+            if (cap > hw_edges_max) cap = hw_edges_max;
+            HwEdge *bigger = realloc(hw_edges, (size_t)cap * sizeof *bigger);
+            if (bigger == NULL) {
+                hw_head->edges_dropped++;
+                return;
+            }
+            hw_edges = bigger;
+            hw_edges_cap = cap;
+        }
+        e = (int32_t)hw_edges_used++;
+    }
+    HwEdge *x = &hw_edges[e];
+    x->h = h;
+    x->v = v;
+    x->where = where;
+    x->count = 1;
+    if (hw_edge_sites != NULL) {
+        __atomic_store_n(&hw_edge_sites[h->ty->site], 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&hw_edge_sites[v->ty->site], 1, __ATOMIC_RELAXED);
+    }
+    x->hprev = x->vprev = -1;
+    x->hnext = hw_map_get(&hw_by_holder, (uintptr_t)h, 0);
+    x->vnext = hw_map_get(&hw_by_value, (uintptr_t)v, 0);
+    if (x->hnext >= 0) hw_edges[x->hnext].hprev = e;
+    if (x->vnext >= 0) hw_edges[x->vnext].vprev = e;
+    hw_map_put(&hw_by_holder, (uintptr_t)h, 0, e);
+    hw_map_put(&hw_by_value, (uintptr_t)v, 0, e);
+    hw_map_put(&hw_by_key, (uintptr_t)h, hw_key2(v, where), e);
+    hw_head->edges++;
+}
+
+static bool hw_is_traced(const Obj *v) {
+    return v != NULL && v->rc != RC_IMMORTAL && v->ty->site != 0 &&
+           __atomic_load_n(&hw_traced[v->ty->site], __ATOMIC_RELAXED) != 0;
+}
+
+/* `v` is now held by `h` at `where`, replacing what a field held. */
+static void hw_trace_store(Obj *h, Obj *v, uint32_t where) {
+    /* Nothing to add, and no old edge this slot could have. */
+    if (!hw_is_traced(v) && !(HW_IS_FIELD(where) && hw_may_have_edges(h))) return;
+    pthread_mutex_lock(&hw_trace_lock);
+    if (HW_IS_FIELD(where)) {
+        int32_t old = hw_map_get(&hw_by_key, (uintptr_t)h, hw_key2(NULL, where));
+        if (old >= 0) hw_edge_remove(old);
+    }
+    if (hw_is_traced(v)) hw_edge_add(h, v, where);
+    pthread_mutex_unlock(&hw_trace_lock);
+}
+
+/* `h` no longer holds one `v` at `where` (a collection), or anything at
+ * field `where` (v is ignored). */
+static void hw_trace_unstore(Obj *h, Obj *v, uint32_t where) {
+    if (!hw_may_have_edges(h)) return;
+    pthread_mutex_lock(&hw_trace_lock);
+    int32_t e = hw_map_get(&hw_by_key, (uintptr_t)h, hw_key2(v, where));
+    if (e >= 0 && --hw_edges[e].count == 0) hw_edge_remove(e);
+    pthread_mutex_unlock(&hw_trace_lock);
+}
+
+/* `h` holds nothing any more, as a holder; or is being freed. */
+static void hw_trace_drop_holder(Obj *h) {
+    if (!hw_may_have_edges(h)) return;
+    pthread_mutex_lock(&hw_trace_lock);
+    int32_t e;
+    while ((e = hw_map_get(&hw_by_holder, (uintptr_t)h, 0)) >= 0) hw_edge_remove(e);
+    pthread_mutex_unlock(&hw_trace_lock);
+}
+
+/* An object is about to be freed: no edge may name it either way. */
+static void hw_trace_free(Obj *o) {
+    if (!hw_may_have_edges(o)) return;
+    pthread_mutex_lock(&hw_trace_lock);
+    int32_t e;
+    while ((e = hw_map_get(&hw_by_holder, (uintptr_t)o, 0)) >= 0) hw_edge_remove(e);
+    while ((e = hw_map_get(&hw_by_value, (uintptr_t)o, 0)) >= 0) hw_edge_remove(e);
+    pthread_mutex_unlock(&hw_trace_lock);
+}
 
 static void hw_trace_slot(uint32_t s, uint8_t on) {
-    __atomic_store_n(&hw_traced[s], on, __ATOMIC_RELAXED);
+    uint8_t was = __atomic_exchange_n(&hw_traced[s], on, __ATOMIC_RELAXED);
+    if ((was != 0) == (on != 0)) return;
+    uint32_t n = on ? __atomic_add_fetch(&hw_traced_slots, 1, __ATOMIC_RELAXED)
+                    : __atomic_sub_fetch(&hw_traced_slots, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&rt_hw_tracing, n != 0, __ATOMIC_RELAXED);
+    if (on) return;
+    /* Off: forget the edges to its objects, so the table only holds what a
+     * report could still print. */
+    pthread_mutex_lock(&hw_trace_lock);
+    for (uint32_t e = 0; e < hw_edges_used; e++) {
+        if (hw_edges[e].v != NULL && hw_edges[e].v->ty->site == s) hw_edge_remove((int32_t)e);
+    }
+    pthread_mutex_unlock(&hw_trace_lock);
 }
 
-static void hw_trace_suspect(uint32_t s, uint32_t now, uint32_t limit) {
-    (void)s;
-    (void)now;
-    (void)limit;
+/* Everything a store has to do beyond the store itself: the slow path of
+ * rt_hw_store (rt.h), which the fast path takes when trace is on for
+ * anything, or when the value must be adopted into an older epoch. */
+void rt_hw_store_slow(Obj *h, Obj *v, uint32_t where) {
+    if (!hw_on || v == NULL) return;
+    hw_epoch_store(h, v);
+    if (__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) hw_trace_store(h, v, where);
 }
+
+/* Element `i` of List or Array `o` is about to be `v`. */
+void rt_hw_store_elem_slow(Obj *o, int64_t i, Obj *v) {
+    if (!hw_on || v == NULL) return;
+    hw_epoch_store(o, v);
+    if (!__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) return;
+    int64_t n = rt_len_of(o);
+    if (i >= 0 && i < n) {
+        int64_t *d = rt_is_list(o) ? ((Lst *)o)->data : ((Arr *)o)->data;
+        Obj *old = (Obj *)(intptr_t)d[i];
+        if (old != NULL) hw_trace_unstore(o, old, HW_WHERE_ELEM);
+    }
+    hw_trace_store(o, v, HW_WHERE_ELEM);
+}
+
+/* Field `where` of `h` was cleared without a store (a payload taken out). */
+void rt_hw_unstore(Obj *h, uint32_t where) {
+    if (!hw_on || !__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) return;
+    hw_trace_unstore(h, NULL, where);
+}
+
+/* A new object `o` holds what it holds already -- a clone, a copy for a
+ * `const` -- with no store the hook saw. Its references, field by field. */
+void rt_hw_fresh(Obj *o) {
+    if (!hw_on || !__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) return;
+    const TypeInfo *ty = o->ty;
+    int64_t tag = ty->nfields > 0 && ty->fields[0].tag >= 0 ? *(int64_t *)(void *)(o + 1) : -1;
+    for (uint32_t i = 0; i < ty->nfields; i++) {
+        const RtField *f = &ty->fields[i];
+        if (f->tag >= 0 && f->tag != tag) continue;
+        Obj *v = *(Obj **)(void *)((char *)o + f->offset);
+        if (v != NULL) hw_trace_store(o, v, f->offset);
+    }
+}
+
+/* A collection made already full -- a clone, a slice, a `[v; n]`, a copy
+ * for a `const` -- holds its elements with no store the hook saw. */
+static void hw_fresh_collection(Obj *o) {
+    if (!hw_on) return;
+    const TypeInfo *c = o->ty->canon;
+    if (c == &rt_arr_ref_type || c == &rt_lst_ref_type) {
+        int64_t n = rt_len_of(o);
+        int64_t *d = rt_is_list(o) ? ((Lst *)o)->data : ((Arr *)o)->data;
+        for (int64_t i = 0; i < n; i++) {
+            Obj *v = (Obj *)(intptr_t)d[i];
+            if (v != NULL) hw_trace_store(o, v, HW_WHERE_ELEM);
+        }
+    } else if (c == &rt_map_type) {
+        Map *m = (Map *)o;
+        for (int64_t i = 0; i < m->cap; i++) {
+            if (m->slots[i].state != SLOT_FULL) continue;
+            if (m->key_is_ref) hw_trace_store(o, (Obj *)(intptr_t)m->slots[i].k, HW_WHERE_KEY);
+            if (m->val_is_ref) hw_trace_store(o, (Obj *)(intptr_t)m->slots[i].v, HW_WHERE_VALUE);
+        }
+    }
+}
+
+/* ---- trace's report --------------------------------------------------- */
+
+static void hw_trace_write(const char *text) {
+    if (hw_path[0] == 0) return;
+    if (hw_trace_fd < 0) {
+        char p[1200];
+        snprintf(p, sizeof p, "%.*s.trace", (int)hw_path_stem, hw_path);
+        hw_trace_fd = open(p, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        if (hw_trace_fd < 0) return;
+    }
+    write_all(hw_trace_fd, text, strlen(text));
+}
+
+/* "Session.conn", "List element", "Map value": the slot `where` of `h`. */
+static void hw_slot_name(char *buf, size_t cap, const Obj *h, uint32_t where) {
+    const TypeInfo *ty = h->ty;
+    const char *tn = ty->name != NULL ? ty->name : "?";
+    if (where == HW_WHERE_ELEM) {
+        snprintf(buf, cap, "%s element", tn);
+    } else if (where == HW_WHERE_KEY) {
+        snprintf(buf, cap, "%s key", tn);
+    } else if (where == HW_WHERE_VALUE) {
+        snprintf(buf, cap, "%s value", tn);
+    } else {
+        int64_t tag = ty->nfields > 0 && ty->fields[0].tag >= 0
+                          ? *(const int64_t *)(const void *)(h + 1) : -1;
+        for (uint32_t i = 0; i < ty->nfields; i++) {
+            const RtField *f = &ty->fields[i];
+            if (f->offset == where && (f->tag < 0 || f->tag == tag)) {
+                snprintf(buf, cap, "%s.%s", tn, f->name);
+                return;
+            }
+        }
+        snprintf(buf, cap, "%s+%u", tn, where);
+    }
+}
+
+static void hw_site_text(char *buf, size_t cap, const Obj *o) {
+    uint32_t s = o->ty->site;
+    if (s == 0) {
+        snprintf(buf, cap, "?");
+        return;
+    }
+    snprintf(buf, cap, "%s:%u", hw_str(hw_slots[s].file_off), hw_slots[s].line);
+}
+
+/* One value's holders, as lines, up to `depth` levels: a holder that is
+ * itself traced is followed to its own holders; a cycle ends the line with
+ * "<- cycle"; a holder trace is off for is turned on (it will show next
+ * time), "--depth" levels up from the object asked about. Called with
+ * hw_trace_lock held, so every object named is alive: its free removes its
+ * edges first, under the same lock. */
+#define HW_PATH_MAX 16
+static void hw_paths(char *out, size_t cap, size_t *len, Obj *v, Obj **path, int at, int depth) {
+    int32_t e = hw_map_get(&hw_by_value, (uintptr_t)v, 0);
+    if (e < 0) {
+        /* The end of the line: what holds this holds it from a local -- a
+         * root -- or stored it before trace began. */
+        *len += (size_t)snprintf(out + *len, cap - *len,
+                                 "  %*s(no recorded holder: a local, or stored before trace began)\n",
+                                 2 * at, "");
+        return;
+    }
+    for (; e >= 0 && *len + 300 < cap; e = hw_edges[e].vnext) {
+        HwEdge *x = &hw_edges[e];
+        char name[200], site[200];
+        hw_slot_name(name, sizeof name, x->h, x->where);
+        hw_site_text(site, sizeof site, x->h);
+        bool cycle = false;
+        for (int i = 0; i <= at; i++) cycle = cycle || path[i] == x->h;
+        *len += (size_t)snprintf(out + *len, cap - *len, "  %*sheld by  %-24s %s%s\n", 2 * at, "",
+                                 name, site, cycle ? "  <- cycle" : "");
+        if (cycle || at + 1 >= HW_PATH_MAX) continue;
+        if (!hw_is_traced(x->h)) {
+            if (at + 1 < depth && x->h->ty->site != 0) {
+                /* --depth: trace the holder's site from now on (turning a
+                 * slot on takes no lock), so its own holders show next. */
+                hw_trace_slot(x->h->ty->site, 1);
+                *len += (size_t)snprintf(out + *len, cap - *len,
+                                         "  %*s(untraced holder: trace is now on for %s %s)\n",
+                                         2 * at + 2, "", x->h->ty->name, site);
+            } else {
+                *len += (size_t)snprintf(out + *len, cap - *len,
+                                         "  %*s(untraced holder, past --depth)\n", 2 * at + 2, "");
+            }
+            continue;
+        }
+        if (at + 1 >= depth) continue;
+        path[at + 1] = x->h;
+        hw_paths(out, cap, len, x->h, path, at + 1, depth);
+    }
+}
+
+/* Which traced objects a report is about. */
+typedef bool (*HwPick)(const Obj *v, const void *arg);
+
+/* Write the holder paths of every traced object of slot `s` that `pick`
+ * picks, under a header line. Objects with the same paths are written once,
+ * with their number. Reads only the edge table: no heap walk. */
+#define HW_REPORT_DISTINCT 16
+static void hw_trace_report(uint32_t s, const char *header, HwPick pick, const void *arg) {
+    /* On the heap: this runs on a green thread's small stack at an epoch's
+     * close, and on the monitor thread for a suspect, at the same time. */
+    typedef char HwText[4096];
+    HwText *texts = malloc((HW_REPORT_DISTINCT + 1) * sizeof *texts);
+    if (texts == NULL) return;
+    uint32_t counts[HW_REPORT_DISTINCT];
+    uint32_t distinct = 0, objects = 0, other = 0;
+    uint32_t depth = hw_head->trace_depth == 0 ? 1 : hw_head->trace_depth;
+    pthread_mutex_lock(&hw_trace_lock);
+    for (uint32_t e = 0; e < hw_edges_used && objects < 100000; e++) {
+        Obj *v = hw_edges[e].v;
+        if (v == NULL || v->ty->site != s) continue;
+        /* Once per object: at the head of its list of holders. */
+        if (hw_edges[e].vprev >= 0) continue;
+        if (!pick(v, arg)) continue;
+        objects++;
+        char *text = texts[HW_REPORT_DISTINCT];
+        size_t len = 0;
+        Obj *path[HW_PATH_MAX];
+        path[0] = v;
+        text[0] = 0;
+        hw_paths(text, sizeof(HwText), &len, v, path, 0, (int)depth);
+        uint32_t i = 0;
+        while (i < distinct && strcmp(texts[i], text) != 0) i++;
+        if (i == distinct) {
+            if (distinct == HW_REPORT_DISTINCT) {
+                other++;
+                continue;
+            }
+            memcpy(texts[i], text, len + 1);
+            counts[i] = 0;
+            distinct++;
+        }
+        counts[i]++;
+    }
+    pthread_mutex_unlock(&hw_trace_lock);
+    char when[32], line[700];
+    hw_stamp(when, sizeof when);
+    snprintf(line, sizeof line, "%s %s  %s:%u  %s\n", when, hw_str(hw_slots[s].type_off),
+             hw_str(hw_slots[s].file_off), hw_slots[s].line, header);
+    hw_trace_write(line);
+    if (objects == 0) hw_trace_write("  no traced object of it has a recorded holder\n");
+    for (uint32_t i = 0; i < distinct; i++) {
+        if (distinct > 1 || counts[i] > 1) {
+            snprintf(line, sizeof line, "  %u object%s:\n", counts[i], counts[i] == 1 ? "" : "s");
+            hw_trace_write(line);
+        }
+        hw_trace_write(texts[i]);
+    }
+    if (other > 0) {
+        snprintf(line, sizeof line, "  ... and %u more objects with other paths\n", other);
+        hw_trace_write(line);
+    }
+    free(texts);
+    if (hw_head->edges_dropped > 0) {
+        snprintf(line, sizeof line, "  (%u edges dropped at the cap; M31_HEAPWATCH_EDGES)\n",
+                 hw_head->edges_dropped);
+        hw_trace_write(line);
+    }
+}
+
+typedef struct {
+    uint32_t born_by; /* the youngest birth minute picked */
+} HwOld;
+
+static bool hw_pick_old(const Obj *v, const void *arg) {
+    uint32_t m = (uint32_t)((v->rc & RC_BIRTH) >> RC_BIRTH_SHIFT);
+    return m != RC_BIRTH_FOREVER && m <= ((const HwOld *)arg)->born_by;
+}
+
+static bool hw_pick_all(const Obj *v, const void *arg) {
+    (void)v;
+    (void)arg;
+    return true;
+}
+
+/* A traced slot just became a suspect, or got a doubling older: who holds
+ * its old objects. */
+static void hw_trace_suspect(uint32_t s, uint32_t now, uint32_t limit) {
+    if (__atomic_load_n(&hw_traced[s], __ATOMIC_RELAXED) == 0) return;
+    HwOld old = { now > limit ? now - limit - 1 : 0 };
+    char header[96];
+    char age[16];
+    hw_age_text(age, sizeof age, limit);
+    snprintf(header, sizeof header, "(suspect: alive > %s)", age);
+    hw_trace_report(s, header, hw_pick_old, &old);
+}
+
+/* ---- the control page --------------------------------------------------
+ *
+ * The first page of the ledger is where `m31c -heapwatch --trace` asks a
+ * running process for something, with plain writes to the file (the tool
+ * has no mmap): requests, then `seq` one higher. The tick compares `seq`
+ * with `applied` once a second, applies what is there and sets `applied`.
+ * Two tools never write at once: the tool holds `<ledger>.lock`, made with
+ * O_EXCL, while it writes, and puts its pid in the lock word for anyone
+ * looking. Layout (src/tools/heapwatch.rs has the same):
+ *
+ *   0   "M31HWCTL"
+ *   8   u32 version
+ *   12  u32 lock: the writing tool's pid, 0 when none
+ *   16  u32 seq       written by the tool
+ *   20  u32 applied   written by the process
+ *   24  u32 depth     a new --depth, 0 for no change
+ *   28  u32 count     requests at 64, 128 bytes each:
+ *                     u32 op (1 trace, 2 untrace, 3 dump), char spec[124]
+ *
+ * Who may ask is whoever may write the file: the ledger is 0644 in a 0700
+ * directory, so its owner (open question 9). */
+#define HW_CTL_OPS 31
 
 static void hw_control_init(void) {
+    memcpy(hw_base + 8, &(uint32_t){HW_VERSION}, 4);
     memcpy(hw_base, "M31HWCTL", 8);
 }
 
-static void hw_control(void) {}
+/* Apply a trace spec to every slot it names, now and later. */
+static void hw_trace_apply(const char *text, bool on) {
+    HwSpec spec;
+    if (!hw_parse_spec(text, strlen(text), &spec)) return;
+    pthread_mutex_lock(&hw_lock);
+    if (on) {
+        if (hw_ntrace < HW_MAX_TRACE) hw_trace_specs[hw_ntrace++] = spec;
+    } else {
+        uint32_t k = 0;
+        for (uint32_t i = 0; i < hw_ntrace; i++) {
+            const HwSpec *t = &hw_trace_specs[i];
+            bool same = strcmp(t->type, spec.type) == 0 && strcmp(t->file, spec.file) == 0 &&
+                        t->line == spec.line;
+            if (!same) hw_trace_specs[k++] = *t;
+        }
+        hw_ntrace = k;
+    }
+    uint32_t n_slots = hw_head->n_slots;
+    for (uint32_t s = 1; s < n_slots; s++) {
+        const HwSlot *sl = &hw_slots[s];
+        if (hw_spec_matches(hw_str(sl->type_off), hw_str(sl->file_off), sl->line, spec.type,
+                            spec.file, spec.line)) {
+            hw_trace_slot(s, on ? 1 : 0);
+        }
+    }
+    pthread_mutex_unlock(&hw_lock);
+}
+
+static void hw_control(void) {
+    uint32_t seq = __atomic_load_n((uint32_t *)(void *)(hw_base + 16), __ATOMIC_ACQUIRE);
+    uint32_t applied = __atomic_load_n((uint32_t *)(void *)(hw_base + 20), __ATOMIC_RELAXED);
+    if (seq == applied) return;
+    uint32_t depth, count;
+    memcpy(&depth, hw_base + 24, 4);
+    memcpy(&count, hw_base + 28, 4);
+    if (depth > 0 && depth <= 64) hw_head->trace_depth = depth;
+    if (count > HW_CTL_OPS) count = HW_CTL_OPS;
+    for (uint32_t i = 0; i < count; i++) {
+        const unsigned char *r = hw_base + 64 + 128 * i;
+        uint32_t op;
+        memcpy(&op, r, 4);
+        char spec[125];
+        memcpy(spec, r + 4, 124);
+        spec[124] = 0;
+        if (op == 1 || op == 2) {
+            hw_trace_apply(spec, op == 1);
+        } else if (op == 3) {
+            uint32_t n_slots = hw_head->n_slots;
+            for (uint32_t s = 1; s < n_slots; s++) {
+                if (__atomic_load_n(&hw_traced[s], __ATOMIC_RELAXED) == 0) continue;
+                hw_trace_report(s, "(asked for)", hw_pick_all, NULL);
+            }
+        }
+    }
+    __atomic_store_n((uint32_t *)(void *)(hw_base + 20), seq, __ATOMIC_RELEASE);
+}
+
+/* ---- epochs: not yet -------------------------------------------------- */
 
 static long hw_epoch_of_new(const TypeInfo *ty) {
     (void)ty;
@@ -1199,4 +1814,9 @@ static long hw_epoch_of_new(const TypeInfo *ty) {
 
 static void hw_epoch_free(Obj *o) {
     (void)o;
+}
+
+static void hw_epoch_store(Obj *h, Obj *v) {
+    (void)h;
+    (void)v;
 }

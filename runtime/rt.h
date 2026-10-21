@@ -1213,4 +1213,41 @@ void rt_hw_forever(Obj *o);
  * the program's clock, the control page, the suspect scan. */
 void rt_hw_tick(void);
 
+/* Every reference store: `v` is about to be held by `h` -- a field of a user
+ * type (`where` is its offset), or a collection's element, key or value
+ * (the runtime's own stores call the same slow path). Heap watch has
+ * something to do only when trace is on for anything (rt_hw_tracing), or
+ * when `v` belongs to an epoch younger than `h`'s and has to be adopted
+ * into it (the EPOCH field, above: larger outlives more). Otherwise this
+ * is two loads, a compare and an untaken branch, beside the rc_inc that
+ * already touched `v`. Emitted before every store of a reference into a
+ * field (src/back/emit_c/inst.rs). */
+extern uint8_t rt_hw_tracing;
+void rt_hw_store_slow(Obj *h, Obj *v, uint32_t where);
+void rt_hw_store_elem_slow(Obj *o, int64_t i, Obj *v);
+
+static inline bool rt_hw_store_needs(const Obj *h, const Obj *v) {
+    unsigned long eh = ((unsigned long)h->rc >> RC_EPOCH_SHIFT) & 63;
+    unsigned long ev = ((unsigned long)v->rc >> RC_EPOCH_SHIFT) & 63;
+    return eh > ev || __atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED) != 0;
+}
+
+static inline void rt_hw_store(Obj *h, Obj *v, uint32_t where) {
+    if (__builtin_expect(rt_hw_store_needs(h, v), 0)) rt_hw_store_slow(h, v, where);
+}
+
+/* The same for `o[i] = v` on a List or an Array: the slow path also takes
+ * the element `v` replaces out of trace's table. */
+static inline void rt_hw_store_elem(Obj *o, int64_t i, Obj *v) {
+    if (__builtin_expect(rt_hw_store_needs(o, v), 0)) rt_hw_store_elem_slow(o, i, v);
+}
+
+/* Field `where` of `h` was cleared without a store (a payload taken out of
+ * an enum to cross a thread boundary). */
+void rt_hw_unstore(Obj *h, uint32_t where);
+
+/* A new object already holding references no store put there -- an enum's
+ * clone, a `const` snapshot's copy: trace records them. */
+void rt_hw_fresh(Obj *o);
+
 #endif /* RT_H */

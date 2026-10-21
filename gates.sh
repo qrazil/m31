@@ -313,12 +313,13 @@ run "formatter preserves meaning" bash -c '
             # this matches is this compiler'"'"'s own synthetic strN literal
             # variable, never a substring of some other identifier.
             # Heap watch numbers allocation sites by source line, and the
-            # formatter moves lines, so the site numbers and the line table
-            # (every line marked /*hwsite*/, every `_s<N>` record and every
-            # rt_hw_at) are blanked the same way; which line each site is
+            # formatter moves lines -- and can join two into one -- so the
+            # line table and the per-site records (every line marked
+            # /*hwsite*/) are left out, and the site numbers in `_s<N>`
+            # names and rt_hw_at calls blanked; which line each site is
             # counted against is heap watch'"'"'s own test.
-            norm() { sed -E -e "s/str[0-9]+/strN/g" -e "s/_s[0-9]+/_sN/g" \
-                -e "s/rt_hw_at\([0-9]+\)/rt_hw_at(N)/" -e "/hwsite/s/[0-9]+/N/g" "$1" | sort; }
+            norm() { sed -E -e "/hwsite/d" -e "s/str[0-9]+/strN/g" -e "s/_s[0-9]+/_sN/g" \
+                -e "s/rt_hw_at\([0-9]+\)/rt_hw_at(N)/" "$1" | sort; }
             if ! diff -q <(norm "$w/a.c") <(norm "$w/b.c") >/dev/null 2>&1; then
                 echo "formatting changed the emitted C: $f"
                 diff <(norm "$w/a.c") <(norm "$w/b.c") | head -6

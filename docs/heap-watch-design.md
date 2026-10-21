@@ -1,8 +1,14 @@
 # Heap watch: one ledger for every object
 
-Status: **approved; being built.** Revision 4, 2026-10-21. Phase 1, the
-ledger, is built and on by default ("As built" below says what differs from
-the proposal); trace and epoch close are next.
+Status: **approved; being built.** Revision 5, 2026-10-21. Phase 1, the
+ledger, and phase 2, trace, are built; the ledger is on by default and trace
+on request ("As built" under each part says what differs from the
+proposal). Epoch close is next.
+
+Revision 5: phase 2 built. Trace is turned on and off by
+`m31c -heapwatch --trace` through the ledger's control page, records edges
+on a store hook shared with epoch close, and prints paths to a root, a
+cycle or the depth limit.
 
 Revision 4: phase 1 built. The count word has a bit fewer than proposed
 (`RC_HELD` arrived with the deep freeze in 0.10.0), the per-minute table
@@ -57,7 +63,7 @@ They overlap only where it helps: a leaked cycle inside a request shows up
 at once in epoch close, and later in the age ledger as well. Neither of the
 first two can say who holds an object; trace cannot say what to look at
 without them. All three write to the same ledger and are read by the same
-tool, `m31 heapwatch`.
+tool, `m31c -heapwatch`.
 
 ### Rules the design keeps
 
@@ -365,7 +371,7 @@ types it is asked to watch, and nothing else.
 ### Turning it on
 
 - At start: `M31_HEAPWATCH_TRACE=Conn,Session@app/session.m31:12`.
-- On a running process: `m31 heapwatch trace <pid> Conn` (and `untrace`).
+- On a running process: `m31c -heapwatch <pid> --trace Conn` (and `--untrace`).
   The tool writes the request into a **control page** at the start of the
   process's ledger file. The scheduler tick reads that page once a second --
   one load -- and applies it. No signal, no restart, no rebuild.
@@ -424,7 +430,7 @@ when the type is already known.
 Appended to `<program>.<pid>.trace`, read by the same tool:
 
 ```
-$ m31 heapwatch trace server.81234
+$ m31c -heapwatch server.81234 --paths
 Conn  net/server.m31:40  (37 alive > 40m)
   held by  Session.conn      app/session.m31:12
   held by  Map value         app/cache.m31:5   SessionCache.by_id   (global)
@@ -434,16 +440,88 @@ Node  graph/build.m31:22  (epoch "request" left 2)
   held by  Node.prev  graph/build.m31:22  <- cycle
 ```
 
+### As built
+
+- **Turning it on.** `M31_HEAPWATCH_TRACE=Conn,Session@app/session.m31:12` at
+  start, or a `trace Conn` line in the `M31_HEAPWATCH_CONF` file; on a running
+  process, `m31c -heapwatch <pid|ledger> --trace Conn Session` and `--untrace`,
+  with `--depth N` (`M31_HEAPWATCH_DEPTH` at start, default 3). A type is
+  traced at every site it has and every site it gets later.
+- **The control page** is the ledger's first 4096 bytes: requests (trace,
+  untrace, dump), then a sequence number the tool moves last; the tick
+  compares it with the one it last applied, once a second, and the tool
+  waits until the process has. The tool writes with plain file writes, not a
+  mapping (the compiler has no `unsafe` and no dependencies), so two tools
+  are kept apart by a lock file made with `create_new` beside the ledger; the
+  page's lock word records which tool holds it. **Who may ask is whoever may
+  write the ledger**: it is 0644 in a 0700 directory, so its owner (open
+  question 9).
+- **The store hook.** The emitter puts `rt_hw_store(h, v, offset)` before
+  every store of a reference into a field -- construction included -- and
+  `rt_hw_store_elem(o, i, v)` before every `o[i] = v` of one; the runtime's
+  own stores (push, insert, a map's key and value, an array literal's
+  elements) call the same slow path, and a clone, a slice or a copy for a
+  `const` records what it holds when made. Its fast path is the test epoch
+  close needs anyway -- `h`'s epoch field greater than `v`'s, or trace on for
+  anything -- so with trace off a store costs two header loads (both
+  already in a register or the cache: the frozen check read `h`, `rc_inc`
+  wrote `v`), a load of a global and an untaken branch.
+- **The edge table** is kept in memory, under one lock, and only ever holds
+  what stores told it: a field's edge is keyed by (holder, offset) -- a
+  field holds one value, so a store replaces the old value's edge without
+  knowing it -- and a collection's by (holder, element) with a count, since a
+  List may hold one object twice. Each edge is on its holder's list and its
+  value's list, so the release of either removes it in time proportional to
+  its own edges. `pop`, `remove_at`, `remove`, `clear` and an overwritten
+  element or map value take theirs out. Past the cap (`M31_HEAPWATCH_EDGES`,
+  default 1 048 576) new edges are dropped and counted, and the report says
+  so (open question 8: the default depth 3 and cap 1 M are kept).
+- **Field names** come from the holder's site record: a struct's reference
+  fields by offset, an enum's payload slots by offset and variant tag; a
+  collection's are `List element`, `Map key`, `Map value`.
+- **Reports** go to `<program>.<pid>.trace`: when a traced site becomes a
+  suspect or doubles its age again (its objects older than the limit), when
+  an epoch closes leaving objects of a traced site (those objects), and when
+  the tool asks (`--paths` on a running process: every traced object).
+  Objects with the same path are printed once with their number. A path
+  follows holders that are traced themselves, up to `--depth` levels; a
+  holder that is not is traced from then on and named as such, and the next
+  report goes further. It ends in a cycle, `<- cycle`; in "no recorded
+  holder: a local, or stored before trace began"; or in an untraced holder
+  past the depth.
+- **There are no globals in m31** (docs/module-state-decision.md: no mutable
+  module state), so the doc's "global or module-level holder" is, in m31, an
+  object a local holds: the path ends there, at "no recorded holder".
+
+```
+$ m31c -heapwatch 81234 --trace Connection Session Map --depth 5
+trace on for Connection in pid 81234
+...
+$ m31c -heapwatch 81234 --paths
+2026-10-21T10:38:51Z Connection  t_trace.m31:29  (suspect: alive > 20m)
+  18 objects:
+  held by  Session.connection       t_trace.m31:29
+    held by  Map value                t_trace.m31:26
+      held by  Cache.by_number          t_trace.m31:26
+        (no recorded holder: a local, or stored before trace began)
+2026-10-21T10:38:51Z Node  t_trace.m31:33  (suspect: alive > 20m)
+  19 objects:
+  held by  List element             t_trace.m31:34
+    held by  Node.links               t_trace.m31:34
+      held by  List element             t_trace.m31:33
+        held by  Node.links               t_trace.m31:33  <- cycle
+```
+
 ---
 
 ## Fixing a leak
 
-1. **See it.** `m31 heapwatch <ledger>` on the live process, or on the dead
+1. **See it.** `m31c -heapwatch <ledger>` on the live process, or on the dead
    one's ledger after a crash or a redeploy: a suspect site, or an epoch
    that closed with leaks.
 2. **Judge it.** Long-lived on purpose? Mark it (`M31_AGE`,
    `heapwatch.forever`) and it stops being reported. Otherwise it is a bug.
-3. **Find the holder.** `m31 heapwatch trace <pid> <Type>` on the running
+3. **Find the holder.** `m31c -heapwatch <pid> --trace <Type>` on the running
    process, or `M31_HEAPWATCH_TRACE=<Type>` on the next start. Wait for the
    next occurrence; read the path.
 4. **Fix it**, by what the path ends in:
@@ -492,7 +570,7 @@ while running {
   cyclic on purpose and belongs in an `Arena<T>`; the arena is one object to
   the ledger, and its handles are integers that hold nothing.
 - **A leak found in play testing** gets `M31_HEAPWATCH_TRACE=Monster` on the
-  next run, or `m31 heapwatch trace <pid> Monster` while the game is open.
+  next run, or `m31c -heapwatch <pid> --trace Monster` while the game is open.
 
 ---
 
@@ -596,7 +674,7 @@ runtime for raw type checks and raw count reads.
 ## Phases
 
 1. **Ledger**: count split, per-site `TypeInfo`, `live`/`lifetime`, mmap
-   ledger, suspect log, `m31 heapwatch`, forever marks and `M31_AGE`. Useful
+   ledger, suspect log, `m31c -heapwatch`, forever marks and `M31_AGE`. Useful
    on its own.
 2. **Trace**: edge table, control page, `--depth`, `.trace` output. Needs
    the per-site ids from phase 1, not epochs.
@@ -620,6 +698,9 @@ rebuild.
 | `M31_AGE` | none | `Type:forever`, `Type:10m`, `Type@file.m31:40:forever`, comma-separated |
 | `M31_HEAPWATCH_CONF` | none | a file of `M31_AGE` entries, one per line, `#` comments |
 | `M31_HEAPWATCH_MINUTE_MS` | 60000 | how long a minute is -- for tests, so "10 minutes" passes in a second |
+| `M31_HEAPWATCH_TRACE` | none | trace these types from the start: `Type`, `Type@file.m31:40`, comma-separated |
+| `M31_HEAPWATCH_DEPTH` | 3 | how many holders up a trace path follows (and turns trace on for) |
+| `M31_HEAPWATCH_EDGES` | 1048576 | the trace edge table's cap; edges past it are dropped and counted |
 
 ## Open questions
 
@@ -640,6 +721,11 @@ overrule any of them):
 7. **`heapwatch.forever(x)`, a stdlib call**, generic, returning `x`. A
    keyword on the allocation would be grammar for something configuration
    already does by type and by site.
+8. **Trace `--depth` 3 and an edge cap of 1 M**, as proposed, both
+   configurable (`M31_HEAPWATCH_DEPTH`, `M31_HEAPWATCH_EDGES`, `--depth`).
+9. **Whoever can write the ledger can turn trace on.** The file is 0644 in a
+   0700 directory, so that is its owner; a separate check would be a second
+   permission system for the one file that already has one.
 
 Still open:
 
@@ -649,6 +735,3 @@ Still open:
    on any leaked cycle?
 6. Should a stdlib API expose the ledger, so a server can serve it as
    metrics (such as `/debug/heap`)?
-8. Trace `--depth` default (3) and edge cap (1 M).
-9. Who can turn trace on for a running process: anyone who can write the
-   ledger file (its permissions), or a separate check?

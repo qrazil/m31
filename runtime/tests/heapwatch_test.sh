@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Heap watch (docs/heap-watch-design.md): the ledger, read back by the tool.
+# Heap watch (docs/heap-watch-design.md): the ledger and trace, read back by
+# the tool.
 #
 #   - a site that leaks one object in four is a SUSPECT once its survivors
 #     outlive the site's own lifetime, with the minute clock shortened by
@@ -10,6 +11,9 @@
 #     dead process, finding it by path and, while it ran, by pid;
 #   - a clean exit with nothing to report leaves no files; M31_HEAPWATCH=0
 #     makes none at all;
+#   - trace, from the start: a connection held by a session held by a cache's
+#     map, and a cycle of nodes, are printed as those paths; and turned on
+#     and off in a running process through its ledger's control page;
 #   - the count word: a retain and a release touch only the count, and a
 #     retain past its 33 bits traps.
 #
@@ -114,6 +118,60 @@ grep -qE '^ok +List +t_clean.m31:3 +0 alive, 1 made' <<<"$out" || bad "--all: $o
 rm -f "$dir2"/*
 M31_HEAPWATCH_DIR="$dir2" M31_HEAPWATCH=0 M31_HEAPWATCH_KEEP=1 "$WORK/clean" >/dev/null
 [ -z "$(ls -A "$dir2")" ] || bad "M31_HEAPWATCH=0 made files: $(ls "$dir2")"
+
+# --- trace: who holds it, from the start ------------------------------------
+build trace runtime/tests/heapwatch/t_trace.m31
+dir3="$WORK/trace-ledgers"
+mkdir -p "$dir3"
+M31_HEAPWATCH_DIR="$dir3" M31_HEAPWATCH_MINUTE_MS=20 M31_HEAPWATCH_DEPTH=8 \
+    M31_HEAPWATCH_TRACE=Connection,Session,Map,Node,List "$WORK/trace" >/dev/null 2>&1 &
+pid=$!
+pids+=("$pid")
+tracefile="$dir3/trace.$pid.trace"
+if ! wait_for 60 grep -qs '<- cycle' "$tracefile"; then
+    bad "trace: no cycle in the trace file in 60 s"
+fi
+wait_for 20 grep -qs '^2.* Connection  t_trace.m31:29  (suspect' "$tracefile" \
+    || bad "trace: the leaking connections were never reported"
+kill -9 "$pid"
+wait "$pid" 2>/dev/null
+out=$("$LANGC" -heapwatch "$dir3/trace.$pid.ledger" --paths 2>&1)
+# A connection is held by its session, which the cache's map holds, which
+# the cache holds.
+grep -qE '^  held by  Session.connection +t_trace.m31:29$' <<<"$out" \
+    || bad "trace: no Session.connection holder: $(head -20 <<<"$out")"
+grep -qE '^    held by  Map value +t_trace.m31:26$' <<<"$out" || bad "trace: no Map value holder"
+grep -qE '^      held by  Cache.by_number +t_trace.m31:26$' <<<"$out" || bad "trace: no Cache.by_number"
+# A node is held by the other node's list of links, and that by the node,
+# and so on round to itself.
+grep -qE '^        held by  Node.links +t_trace.m31:3[34]  <- cycle$' <<<"$out" \
+    || bad "trace: the node cycle is not shown as one"
+
+# --- trace: turned on in a running process -----------------------------------
+dir4="$WORK/fly-ledgers"
+mkdir -p "$dir4"
+M31_HEAPWATCH_DIR="$dir4" "$WORK/trace" >/dev/null 2>&1 &
+pid=$!
+pids+=("$pid")
+wait_for 30 test -s "$dir4/trace.$pid.ledger" || bad "on the fly: no ledger"
+out=$(M31_HEAPWATCH_DIR="$dir4" "$LANGC" -heapwatch "$pid" --trace Connection Session 2>&1)
+grep -q "^trace on for Connection in pid $pid$" <<<"$out" || bad "on the fly: --trace said: $out"
+# New sessions are made every few milliseconds; ask until one is recorded.
+paths_ok() {
+    out=$(M31_HEAPWATCH_DIR="$dir4" "$LANGC" -heapwatch "$pid" --paths 2>&1)
+    grep -qE '^  held by  Session.connection +t_trace.m31:29$' <<<"$out"
+}
+wait_for 30 paths_ok || bad "on the fly: --paths never showed Session.connection: $(head -10 <<<"$out")"
+out=$(M31_HEAPWATCH_DIR="$dir4" "$LANGC" -heapwatch "$pid" 2>&1)
+# --depth's default (3) has turned trace on for the holders it met, too.
+grep -qE '^trace on for Connection t_trace.m31:29, Session t_trace.m31:29(, .*)?; [0-9]+ edges recorded$' <<<"$out" \
+    || bad "on the fly: the report does not say what is traced: $out"
+out=$(M31_HEAPWATCH_DIR="$dir4" "$LANGC" -heapwatch "$pid" --untrace Connection Session 2>&1)
+grep -q "^trace off for Session in pid $pid$" <<<"$out" || bad "on the fly: --untrace said: $out"
+kill -9 "$pid"
+wait "$pid" 2>/dev/null
+out=$("$LANGC" -heapwatch "$dir4/trace.$pid.ledger" --trace Node 2>&1)
+grep -q "is not running" <<<"$out" || bad "on the fly: --trace of a dead process: $out"
 
 # --- the count word --------------------------------------------------------
 if cc -O2 -pthread -I runtime -o "$WORK/bits" runtime/tests/heapwatch/count_bits.c \

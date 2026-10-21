@@ -106,6 +106,18 @@ pub(super) fn emit_inst(
             if crate::middle::ir::rt_call_allocates(func) {
                 writeln!(o, "    rt_hw_at({loc});").unwrap();
             }
+            // `o[i] = v` of a reference: heap watch's store hook first
+            // (rt.h, rt_hw_store_elem), which reads the element it replaces.
+            let stored = match func.as_str() {
+                "rt_index_set" => Some((args[0], args[1], args[2])),
+                "rt_index_set_at" => Some((args[0], args[3], args[4])),
+                _ => None,
+            };
+            if let Some((seq, index, val)) = stored {
+                if f.ty_of(val) == IrTy::Ref {
+                    writeln!(o, "    rt_hw_store_elem({seq}, {index}, {val});").unwrap();
+                }
+            }
             if is_ffi {
                 writeln!(o, "    rt_enter_blocking();").unwrap();
             }
@@ -248,6 +260,16 @@ pub(super) fn emit_inst(
             for (k, a) in args.iter().enumerate() {
                 writeln!(o, "    ((T{tid} *){dst})->u.v{tag}.p{k} = {a};").unwrap();
             }
+            // Heap watch: each reference the new enum holds.
+            for (k, a) in args.iter().enumerate() {
+                if f.ty_of(*a) == IrTy::Ref {
+                    writeln!(
+                        o,
+                        "    rt_hw_store({dst}, {a}, offsetof(T{tid}, u.v{tag}.p{k}));"
+                    )
+                    .unwrap();
+                }
+            }
         }
         Inst::ParseInto { ok, dst, func, src } => {
             writeln!(o, "    {ok} = {func}({src}, &{dst});").unwrap();
@@ -297,11 +319,18 @@ pub(super) fn emit_inst(
                 writeln!(o, "    ((T{tid} *){dst})->u = ((T{tid} *){src})->u;").unwrap();
             }
             emit_enum_slot_switch_on(o, t, dst, *tid, "rc_inc({p});");
+            // Heap watch: the clone holds what the original did.
+            writeln!(o, "    rt_hw_fresh({dst});").unwrap();
         }
         Inst::EnumTake { obj, tid, tag, idx } => {
             // The slot's +1 has gone to whoever read it; clearing it is what
             // stops the enum releasing the value a second time. The drop
             // function generated above skips a null slot.
+            writeln!(
+                o,
+                "    rt_hw_unstore({obj}, offsetof(T{tid}, u.v{tag}.p{idx}));"
+            )
+            .unwrap();
             writeln!(o, "    ((T{tid} *){obj})->u.v{tag}.p{idx} = NULL;").unwrap();
         }
         Inst::LoadField { dst, obj, tid, idx } => {
@@ -309,7 +338,17 @@ pub(super) fn emit_inst(
             writeln!(o, "    {dst} = ((T{tid} *){obj})->f_{name};").unwrap();
         }
         Inst::StoreField { obj, tid, idx, val } => {
-            let name = c_ident(&types[*tid as usize].fields[*idx as usize].0);
+            let (fname, fty) = &types[*tid as usize].fields[*idx as usize];
+            let name = c_ident(fname);
+            // Heap watch's store hook (rt.h, rt_hw_store): a reference
+            // field's holder, value and slot, for trace and epoch close.
+            if *fty == IrTy::Ref {
+                writeln!(
+                    o,
+                    "    rt_hw_store({obj}, {val}, offsetof(T{tid}, f_{name}));"
+                )
+                .unwrap();
+            }
             writeln!(o, "    ((T{tid} *){obj})->f_{name} = {val};").unwrap();
         }
         Inst::CallIface {
