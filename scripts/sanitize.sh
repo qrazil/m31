@@ -57,6 +57,19 @@ for d in corpus/modules/*/; do
     [ -e "$d/main.$LANG_EXT" ] && [ ! -e "$d/main.err" ] && programs+=("$d/main.$LANG_EXT")
 done
 
+# The runtime, once: it is the same for every program, and compiling it under
+# the sanitizers was most of what each program cost (scripts/run.sh does the
+# same, for the same reason).
+mkdir -p "$WORK/rt"
+n=0
+for rtsrc in runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM"; do
+    n=$((n + 1))
+    if ! clang -O1 -g $SAN -ffp-contract=off -I runtime -c "$rtsrc" -o "$WORK/rt/$n.o" 2>"$WORK/cc"; then
+        echo "the runtime does not build sanitized: $rtsrc: $(head -1 "$WORK/cc")"
+        exit 1
+    fi
+done
+
 for src in "${programs[@]}"; do
     stem=${src%.$LANG_EXT}
     # See runtime/arch.sh: a test of the assembly kernels needs them.
@@ -68,8 +81,7 @@ for src in "${programs[@]}"; do
         bad=1
         continue
     fi
-    if ! clang -O1 -g $SAN -ffp-contract=off -I runtime "$WORK/p.c" \
-            runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
+    if ! clang -O1 -g $SAN -ffp-contract=off -I runtime "$WORK/p.c" "$WORK"/rt/*.o \
             -lpthread -o "$WORK/p" 2>"$WORK/cc"; then
         echo "sanitized build failed: $src: $(head -1 "$WORK/cc")"
         bad=1
