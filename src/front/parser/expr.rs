@@ -237,9 +237,11 @@ impl Parser {
                 // `lib.Point p` -- another module's type. `is_ty_at` only
                 // knows the names this file declares, so the qualified form
                 // is recognised the way `decl_starts_here` recognises it.
-                let qualified = matches!(self.peek(), Tok::Ident(m) if self.imports.contains(m))
-                    && self.peek_at(1) == &Tok::Dot;
-                if !qualified && !self.is_ty_at(0) {
+                // `(const Point p) => ..`: the type starts past the word.
+                let at_ty = usize::from(self.peek() == &Tok::KwConst);
+                let qualified = matches!(self.peek_at(at_ty), Tok::Ident(m) if self.imports.contains(m))
+                    && self.peek_at(at_ty + 1) == &Tok::Dot;
+                if !qualified && !self.is_ty_at(at_ty) {
                     return Err(Diag::new(
                         at,
                         format!(

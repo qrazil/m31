@@ -135,6 +135,7 @@ impl Lowerer {
                 default: None,
                 embedded: false,
                 is_pub: false,
+                is_const: p.is_const,
                 span,
             })
             .collect();
@@ -293,22 +294,36 @@ impl Lowerer {
                 .params
                 .iter()
                 .zip(m.params.iter())
-                .all(|(a, b)| a.ty == b.ty);
+                .all(|(a, b)| self.same_param(a, b));
         if !same {
             let sh = |ps: &[Param], ret: Ty| {
                 format!(
                     "{} ({})",
                     self.tyname(ret),
                     ps.iter()
-                        .map(|p| self.tyname(p.ty))
+                        .map(|p| self.param_tyname(p))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
             };
+            // Name `const` only when it is what differs, so the usual
+            // mismatch reads as it always has.
+            let types_match = sig.ret == m.ret
+                && sig.params.len() == m.params.len()
+                && sig
+                    .params
+                    .iter()
+                    .zip(m.params.iter())
+                    .all(|(a, b)| a.ty == b.ty);
+            let what = if types_match {
+                "same parameter types and `const`, in order"
+            } else {
+                "same parameter types, in order"
+            };
             return Err(bad(format!(
                 "`{shown}` is `{}`, and `{}.{}` is `{}`; a function satisfies a \
-                 one-method interface only on an exact match -- same parameter types, \
-                 in order, and the same return type",
+                 one-method interface only on an exact match -- {what}, and the same \
+                 return type",
                 sh(&sig.params, sig.ret),
                 self.tyname(want),
                 m.name,
@@ -456,10 +471,14 @@ impl Lowerer {
                 ),
             ));
         }
-        if m.params.iter().zip(params).any(|(a, b)| a.ty != b.ty) {
+        if m.params
+            .iter()
+            .zip(params)
+            .any(|(a, b)| !self.same_param(a, b))
+        {
             let sh = |ps: &[Param]| {
                 ps.iter()
-                    .map(|p| self.tyname(p.ty))
+                    .map(|p| self.param_tyname(p))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
@@ -661,6 +680,7 @@ impl Lowerer {
                     default: None,
                     embedded: false,
                     is_pub: false,
+                    is_const: false,
                     span,
                 },
                 init,

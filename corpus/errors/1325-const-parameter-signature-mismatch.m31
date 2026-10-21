@@ -1,0 +1,13 @@
+// `const` is part of a parameter's type where a signature must match: a
+// function whose parameter is `const` does not satisfy an interface whose
+// parameter is not, since a call through the interface is not checked.
+interface Sum {
+    int of(List<int> xs);
+}
+
+int total(const List<int> xs) {
+    return xs.size();
+}
+
+Sum s = total;
+print(s.of([1]));

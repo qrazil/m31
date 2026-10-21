@@ -342,7 +342,7 @@ impl Lowerer {
                     .params
                     .iter()
                     .zip(m.params.iter())
-                    .all(|(a, b)| a.ty == b.ty);
+                    .all(|(a, b)| self.same_param(a, b));
             if !same {
                 return Some(needs(format!(
                     "{} {}(..) with a matching signature",
@@ -352,6 +352,26 @@ impl Lowerer {
             }
         }
         None
+    }
+
+    /// Whether two parameters match where a signature must match exactly
+    /// -- a method against an interface's, a function or a lambda against a
+    /// callback's: the same type, and `const` on both or on neither. A
+    /// `const` parameter is part of the contract in both directions: the
+    /// body trusts its argument frozen, so a caller through the interface
+    /// must be held to the check the body relies on, and a body that may
+    /// receive a mutable argument must not be trusting it.
+    pub(super) fn same_param(&self, a: &Param, b: &Param) -> bool {
+        a.ty == b.ty && a.is_const == b.is_const
+    }
+
+    /// A parameter's type as a signature shows it: `const T` or `T`.
+    pub(super) fn param_tyname(&self, p: &Param) -> String {
+        if p.is_const {
+            format!("const {}", self.tyname(p.ty))
+        } else {
+            self.tyname(p.ty)
+        }
     }
 
     /// The declaration a type names. `Ty::User` indexes the interning arena;

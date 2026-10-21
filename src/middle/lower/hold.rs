@@ -36,8 +36,8 @@
 //!     released anything (docs/const-decision.md): any chain of elements
 //!     read out of a module constant, whose whole graph is immortal; and any
 //!     chain of fields and List/Array elements out of a local or parameter
-//!     that an active `const` block names or that a `const` declaration
-//!     bound, since every freeze is deep. Anything read through `this` is
+//!     that an active `const` block names, that a `const` declaration
+//!     bound, or that is a `const` parameter, since every freeze is deep. Anything read through `this` is
 //!     still held: see `frozen_place`;
 //!   - a place read that nothing after it can disturb: `may_run_code` is false
 //!     for every later operand and the operation itself runs no user code.
@@ -120,7 +120,7 @@ impl Lowerer {
     /// static, immortal data (src/middle/lower/consts.rs), so every object
     /// reachable from it lives for the whole program and none of its slots
     /// can ever be written -- at any depth.
-    fn immortal_place(&self, e: &Expr) -> bool {
+    pub(super) fn immortal_place(&self, e: &Expr) -> bool {
         if self.is_module_const(e) {
             return true;
         }
@@ -140,7 +140,12 @@ impl Lowerer {
     ///     when it ends (`rt_freeze_leave` thaws only what its own
     ///     `rt_freeze_enter` froze);
     ///   - or bound by a `const` declaration (`snapshots`, with the binding
-    ///     still `const`): `rt_snapshot` returns an object frozen for good.
+    ///     still `const`): `rt_snapshot` returns an object frozen for good;
+    ///   - or a `const` parameter (`const_params`): every call site checked
+    ///     its argument frozen (`refuse_unfrozen_arg`), by something that
+    ///     lasts at least as long as the call -- a snapshot, a module
+    ///     constant, or a `const` block or `const` parameter of a caller,
+    ///     none of which can end while this frame runs.
     ///
     /// Every freeze is deep (docs/const-decision.md, "The third decision"):
     /// a block freezes everything the named object reaches, and a snapshot
@@ -162,7 +167,7 @@ impl Lowerer {
     /// knowledge, not this function's; and a step this function does not
     /// know the type of (`static_ty` gives up), since it cannot tell whether
     /// the step is a field of an object at all.
-    fn frozen_place(&self, e: &Expr) -> bool {
+    pub(super) fn frozen_place(&self, e: &Expr) -> bool {
         let (obj, field) = match e {
             Expr::Field(o, f, _) => (&**o, Some(f)),
             Expr::Index(o, _, _) => (&**o, None),
@@ -170,14 +175,9 @@ impl Lowerer {
         };
         let ty = match obj {
             Expr::Var(name, _) => {
-                let Some((ty, val, is_const)) = self.binding(name) else {
+                let Some(ty) = self.frozen_name(name) else {
                     return false;
                 };
-                let frozen = self.freezes.iter().any(|(v, _)| *v == val)
-                    || (is_const && self.snapshots.contains(&val));
-                if !frozen {
-                    return false;
-                }
                 ty
             }
             Expr::Field(..) | Expr::Index(..) => {
@@ -209,6 +209,17 @@ impl Lowerer {
             // nothing else can be indexed.
             None => self.seq_elem(ty).is_some(),
         }
+    }
+
+    /// The type of the local or parameter `name` when the object it holds
+    /// is frozen for at least as long as the current operation: named by an
+    /// active `const` block, bound by a `const` declaration, or a `const`
+    /// parameter. The roots `frozen_place` follows chains out of; see there.
+    pub(super) fn frozen_name(&self, name: &str) -> Option<Ty> {
+        let (ty, val, is_const) = self.binding(name)?;
+        let frozen = self.freezes.iter().any(|(v, _)| *v == val)
+            || (is_const && (self.snapshots.contains(&val) || self.const_params.contains(&val)));
+        frozen.then_some(ty)
     }
 
     /// Whether evaluating `e` might run user code: a function or method the

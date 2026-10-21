@@ -1,0 +1,95 @@
+// A `const` parameter takes only an argument that is already frozen
+// (reference §4.2, docs/const-decision.md "The third decision"): a `const`
+// local, a module constant, a name in an active `const` block, a `const`
+// parameter of the caller, or a field or element of any of them. Nothing
+// happens at run time; inside, every chain out of the parameter is trusted.
+type P {
+    int x;
+}
+
+int P.plus(const P o) {
+    return x + o.x;
+}
+
+type H {
+    P p;
+    List<P> ps;
+}
+
+interface Sum {
+    int of(const List<int> xs);
+}
+
+const List<int> TABLE = [1, 2, 3];
+
+int total(const List<int> xs) {
+    int t = 0;
+    for (int x in xs) {
+        t = t + x;
+    }
+    return t;
+}
+
+int inner(const P p) {
+    return p.x;
+}
+
+int sizes(const H h) {
+    return h.ps.size();
+}
+
+// A `const` parameter passes on as a `const` argument, and so does any
+// chain out of it.
+int deep(const H h) {
+    return h.p.x + h.ps[0].x + inner(h.p) + sizes(h);
+}
+
+int twice(const List<int> xs) {
+    return total(xs) * 2;
+}
+
+// A default is checked like an argument, where it is declared: a constant.
+int count(const List<int> xs = TABLE) {
+    return xs.size();
+}
+
+int through(Sum s, const List<int> xs) {
+    return s.of(xs);
+}
+
+int sum_of(const List<int> xs) {
+    return total(xs);
+}
+
+void go() {
+    List<int> buf = [4, 5];
+    const buf {
+        print(total(buf));
+    }
+    buf.push(6);
+    print(buf.size());
+    const List<int> c = [7, 8];
+    print(total(c));
+    print(total(TABLE));
+    print(twice(TABLE));
+    print(count());
+    print(count(xs: c));
+    H h = H(P(1), [P(2)]);
+    const h {
+        print(deep(h));
+        print(inner(h.ps[0]));
+    }
+    h.p.x = 10;
+    print(h.p.x);
+    const H k = H(P(3), [P(4)]);
+    print(deep(k));
+    P a = P(5);
+    const P b = P(6);
+    print(a.plus(b));
+    // `const` is part of the signature a function, a lambda or a method
+    // matches an interface by.
+    print(through(sum_of, TABLE));
+    print(through((const List<int> xs) => xs.size(), c));
+}
+
+go();

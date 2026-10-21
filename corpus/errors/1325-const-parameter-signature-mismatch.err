@@ -1,0 +1,4 @@
+corpus/errors/1325-const-parameter-signature-mismatch.m31:12:9: `total` is `int (const List<int>)`, and `Sum.of` is `int (List<int>)`; a function satisfies a one-method interface only on an exact match -- same parameter types and `const`, in order, and the same return type
+   |
+12 | Sum s = total;
+   |         ^

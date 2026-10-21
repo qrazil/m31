@@ -127,6 +127,7 @@ impl Mono {
                 },
                 embedded: f.embedded,
                 is_pub: f.is_pub,
+                is_const: f.is_const,
                 span: f.span,
             });
         }
@@ -226,6 +227,7 @@ impl Mono {
                         // A tuple is a builtin shape, not a module's type:
                         // its slots are as public as the tuple.
                         is_pub: true,
+                        is_const: false,
                         span,
                     })
                     .collect(),
@@ -261,6 +263,7 @@ impl Mono {
                     default: None,
                     embedded: false,
                     is_pub: false,
+                    is_const: p.is_const,
                     span: p.span,
                 });
             }
@@ -294,6 +297,7 @@ impl Mono {
                 },
                 embedded: f.embedded,
                 is_pub: f.is_pub,
+                is_const: f.is_const,
                 span: f.span,
             });
         }

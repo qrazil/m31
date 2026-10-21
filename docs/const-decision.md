@@ -450,8 +450,9 @@ shows it.
 # The third decision: the freeze is deep, and a parameter can be `const`
 
 Decided **2026-10-19** by the author. The deep freeze is implemented
-(2026-10-20; "The deep freeze, as implemented", below); `const` parameters,
-user-type module constants and `const` types are not yet.
+(2026-10-20; "The deep freeze, as implemented", below), and so are `const`
+parameters (2026-10-21; "`const` parameters, as implemented"); user-type
+module constants and `const` types are not yet.
 
 **The freeze is deep, everywhere.** `const` already means "the value never
 changes, deeply"; the runtime is brought into line with that. A `const`
@@ -574,13 +575,98 @@ above. `refuse_const_write` already refused a change through any chain
 starting at a frozen name, so the compile-time half needed no change: it
 had been deeper than the runtime all along.
 
+## `const` parameters, as implemented
+
+**Syntax.** `const` before a parameter's type: `int total(const List<int>
+xs)`, in a function, a method, a static method, an interface method's
+signature and a lambda. Not on a field, which is refused where it is
+written: a field is frozen with its object, never on its own.
+
+**The check** (`refuse_unfrozen_arg`, src/middle/lower/consts.rs) runs
+on every argument bound to a `const` parameter -- a direct call, a
+qualified one, a method, a static method, a dispatch through an interface
+and a default -- and is syntactic: the argument must be a name that is
+frozen for at least the call (`frozen_name`: a `const` declaration, an
+active `const` block, a `const` parameter of the caller), a module
+constant, or a chain of fields and List/Array elements out of one
+(`frozen_place`, `immortal_place`, the same functions that decide which
+reads are not held). Anything else is refused with the fix in the message:
+`const buf { .. }` around the call, or a `const` local. It is skipped for a
+type that is immutable or a copy already -- the scalars, `str`, a value
+enum -- where `const` only forbids assigning the name.
+
+**Why the caller's frozen names are enough.** Each lasts at least as long
+as the call: a snapshot is frozen for good, a module constant is immortal,
+a `const` block cannot end in the middle of a statement, and a caller's
+`const` parameter was itself checked against a value that lasts as long
+as the caller. So no run-time test is emitted and nothing is frozen: the
+parameter costs nothing, as the second decision promised.
+
+**Inside the callee** the parameter is bound `const` and recorded in
+`const_params`: assigning it and changing through it are refused by the
+existing `refuse_const_write`, and `frozen_place` takes it as a root, so
+no read out of it is held, at any depth.
+
+**Signatures.** `const` is part of a parameter where a signature must
+match exactly: a method against an interface's, a function's name or a
+lambda against a callback's (`same_param`, src/middle/lower/ty.rs). Both
+directions matter: a body that trusts its argument frozen must not be
+reachable through an interface whose callers are not checked, and a slot
+that promises a frozen argument must not be filled by a body that would
+accept a mutable one -- harmless, but a second meaning of one signature.
+The vtable slot is unchanged: a type can match only one of `m(T)` and
+`m(const T)`, so the two never compete for one.
+
+**`spawn`.** The new thread can outlive the statement, and with it the
+caller's `const` block, or the block a caller's `const` parameter came from.
+So a spawned function's `const` parameter takes only a value frozen for good
+-- a module constant, or a `const` local, which `spawn` moves as usual
+(`refuse_unfrozen_spawn_arg`).
+
+**Lambdas.** A lambda's captures are fields of its synthesised type, so a
+`const` parameter captured by a lambda is read through the lambda's `this`
+inside it, and is not a frozen root there: passing it on to another `const`
+parameter from inside the lambda is refused. That is conservative, not
+unsound; the value is still frozen while the call that created the lambda
+runs.
+
+**Resources.** A `const` parameter of a type that can hold one is refused
+where the function is declared (`refuse_const_resource`), by the rule
+below.
+
+**Not done: the required-`const` gate.** The second decision makes `const`
+mandatory on a parameter the program provably never changes. Nothing
+enforces it yet, for locals or parameters: the gate needs a whole-program
+mutation analysis that does not exist, and on parameters it would be a
+breaking change -- every read-only collection or user-type parameter in
+`lib/` and `apps/` would have to say `const`, and then every caller of it
+would have to pass a frozen value, which most of them do not have. That
+second half is the real question: under this decision a `const` parameter
+is not a promise the callee makes, it is a demand on the caller, so the
+gate as written would push `const` blocks into every call site of every
+read-only function. Left open (below).
+
+## Constants hold no I/O
+
+Decided **2026-10-21** by the author: **`const` values hold no I/O; a value
+that needs I/O is not `const`.** An object that owns a resource -- a file,
+a socket, anything whose type has a destructor -- is refused in every
+permanent form: a `const` local (already, above), a `const` parameter, a
+user-type module constant and a `const` type. A `const` block is the one
+place such an object is frozen at all, because the block freezes whatever
+its name reaches; using the resource inside it traps, as it did in 0.10.0,
+and that is intended, not a gap.
+
 ---
 
 ## What is open
 
   - The hoisting above, now with the `const`-block barrier it needs.
   - Whether the required-`const` gate is too noisy in practice on locals
-    that are provably unmutated but only incidentally so.
+    that are provably unmutated but only incidentally so -- and whether it
+    should reach parameters at all, now that a `const` parameter demands a
+    frozen argument of every caller rather than promising anything to it
+    ("`const` parameters, as implemented").
   - Whether `spawn f("literal")` should be accepted the way `spawn
     f(CONSTANT)` now is: a string literal is immortal for the same reason.
     Today it is refused as borrowed; unchanged here.

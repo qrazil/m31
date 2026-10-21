@@ -36,6 +36,7 @@ fn toks(src: &str) -> Vec<Tok> {
 mod arguments;
 mod collections;
 mod concurrency;
+mod const_forms;
 mod control_flow;
 mod deps;
 mod destructors;

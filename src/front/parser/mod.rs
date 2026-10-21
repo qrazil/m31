@@ -395,7 +395,10 @@ impl Parser {
         Ok(args)
     }
 
-    /// A parameter or field: `int x` is mandatory, `int x = 0` is optional.
+    /// A parameter or field: `int x` is mandatory, `int x = 0` is optional,
+    /// and `const T x` takes only a frozen argument (§4.2). Whether `const`
+    /// is allowed where it was written is the caller's to say: a field
+    /// refuses it.
     fn parse_param(&mut self) -> Result<Param, Diag> {
         let span = self.span();
         // Only a field has a visibility, and the type declaration eats its
@@ -407,6 +410,7 @@ impl Parser {
                 "`pub` exports a declaration or a field; a parameter has no visibility",
             ));
         }
+        let is_const = self.eat(&Tok::KwConst);
         let ty = self.expect_ty()?;
         if ty == Ty::Void {
             return Err(Diag::new(span, "`void` is not a value type"));
@@ -425,6 +429,7 @@ impl Parser {
                 default: None,
                 embedded: true,
                 is_pub: false,
+                is_const,
                 span,
             });
         }
@@ -443,6 +448,7 @@ impl Parser {
             default,
             embedded: false,
             is_pub: false,
+            is_const,
             span,
         })
     }

@@ -461,6 +461,19 @@ impl Parser {
                 return Err(Diag::new(self.span(), "`pub` is written once"));
             }
             let mut f = self.parse_param()?;
+            // A field changes with its object, or not at all: what is frozen
+            // is a value, never one slot of a type. `const` on a parameter
+            // is §4.2's; on a field it would be a second meaning.
+            if f.is_const {
+                return Err(Diag::new(
+                    fspan,
+                    format!(
+                        "a field cannot be `const`: a field is frozen when the object \
+                         holding it is, and not on its own -- drop the `const` on `{}`",
+                        f.name
+                    ),
+                ));
+            }
             f.is_pub = is_pub;
             f.span = fspan;
             fields.push(f);

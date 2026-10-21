@@ -144,6 +144,7 @@ impl Mono {
                 },
                 embedded: p.embedded,
                 is_pub: false,
+                is_const: p.is_const,
                 span: p.span,
             });
         }

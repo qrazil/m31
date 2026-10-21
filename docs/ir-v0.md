@@ -232,8 +232,9 @@ and a store into a frozen object traps before anything is released:
     `lib.T[i]`): a constant's whole graph is static and immortal;
   - any chain of fields and List or Array elements (`c.p`, `h.q.p`,
     `h.ps[i].x`, a promoted field) out of a local or parameter that is
-    named by a `const` block active at that point, or that was bound by a
-    `const` declaration.
+    named by a `const` block active at that point, that was bound by a
+    `const` declaration, or that is a `const` parameter (its argument was
+    checked frozen at the call site, reference §4.2).
 
 The whole chain for the second, because every freeze is deep: a `const`
 block freezes everything the named object reaches, and a snapshot shares

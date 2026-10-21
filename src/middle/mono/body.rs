@@ -102,6 +102,7 @@ impl Mono {
                                 default: None,
                                 embedded: false,
                                 is_pub: false,
+                                is_const: false,
                                 span: b.span,
                             }),
                             None => None,

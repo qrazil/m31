@@ -1,0 +1,29 @@
+// A `const` parameter forbids a change the compiler can see through its
+// name. One it cannot see -- the value handed on to a parameter that is not
+// `const` -- traps, because the argument was frozen at the call site: here
+// by the caller's `const` block, at a depth below the parameter.
+type P {
+    int x;
+}
+
+type H {
+    List<P> ps;
+}
+
+void bump(P p) {
+    p.x = p.x + 1;
+}
+
+void use(const H h) {
+    print(h.ps[0].x);
+    bump(h.ps[0]);
+}
+
+void go() {
+    H h = H([P(1)]);
+    const h {
+        use(h);
+    }
+}
+
+go();

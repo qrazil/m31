@@ -390,6 +390,7 @@ impl Lowerer {
             let slots = self.bind_args(&format!("{iname}.{m}"), &decl.params, args, span)?;
             let mut vals = vec![o.val()];
             for (a, p) in slots.iter().zip(decl.params.iter()) {
+                self.refuse_unfrozen_arg(a, p)?;
                 let v = self.lower_expr_as(a, p.ty)?;
                 if !self.assignable(v.ty, p.ty) {
                     return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
@@ -549,6 +550,7 @@ impl Lowerer {
     ) -> Result<Val, Diag> {
         let is_default = p.default.as_ref().is_some_and(|d| std::ptr::eq(d, a));
         if !is_default {
+            self.refuse_unfrozen_arg(a, p)?;
             return self.lower_expr_as(a, p.ty);
         }
         let module = if module.is_empty() {
@@ -559,13 +561,18 @@ impl Lowerer {
         let saved_module = std::mem::replace(&mut self.cur_module, module.clone());
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
         let saved_recv = self.recv.take();
-        let r = self.lower_expr_as(a, p.ty).and_then(|v| {
-            if self.assignable(v.ty, p.ty) {
-                Ok(v)
-            } else {
-                Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)))
-            }
-        });
+        // A `const` parameter's default is checked like an argument, in
+        // the declaring module with no locals: only a constant passes.
+        let r = self
+            .refuse_unfrozen_arg(a, p)
+            .and_then(|_| self.lower_expr_as(a, p.ty))
+            .and_then(|v| {
+                if self.assignable(v.ty, p.ty) {
+                    Ok(v)
+                } else {
+                    Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)))
+                }
+            });
         self.cur_module = saved_module;
         self.scopes = saved_scopes;
         self.recv = saved_recv;

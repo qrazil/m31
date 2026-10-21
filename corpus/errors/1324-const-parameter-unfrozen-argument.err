@@ -1,0 +1,4 @@
+corpus/errors/1324-const-parameter-unfrozen-argument.m31:13:13: `xs` is a `const` parameter, so its argument must already be frozen -- a `const` local, a module constant, a name in an active `const` block or a `const` parameter, or a field or element of one; `const` at the top level declares a module constant, so do this in a function, as `const buf { .. }` around the call
+   |
+13 | print(total(buf));
+   |             ^

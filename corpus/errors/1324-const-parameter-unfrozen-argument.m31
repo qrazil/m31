@@ -1,0 +1,13 @@
+// A `const` parameter takes only an argument that is already frozen. A
+// mutable local is not, and the diagnostic says how to freeze it for the
+// call.
+int total(const List<int> xs) {
+    int t = 0;
+    for (int x in xs) {
+        t = t + x;
+    }
+    return t;
+}
+
+List<int> buf = [1, 2];
+print(total(buf));

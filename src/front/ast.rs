@@ -404,6 +404,11 @@ pub struct Param {
     /// (docs/modules-decision.md §2). Always false for a parameter or a
     /// match binding, which have no visibility of their own.
     pub is_pub: bool,
+    /// A `const` parameter, `f(const T x)`: it accepts only an argument
+    /// that is already frozen, checked at every call site, and `x` is a
+    /// frozen root inside the body (docs/const-decision.md, "The third
+    /// decision"). Always false for a field or a match binding.
+    pub is_const: bool,
     pub span: Span,
 }
 

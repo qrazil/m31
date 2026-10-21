@@ -264,6 +264,112 @@ impl Lowerer {
         }
     }
 
+    /// Whether `e` is known, from what is written, to evaluate to an object
+    /// frozen for at least as long as the call it is an argument of: a
+    /// local or parameter that is `const` (`frozen_name`: a `const`
+    /// declaration, a `const` block that is active here, a `const`
+    /// parameter), a module constant, or a chain of fields and elements out
+    /// of any of them (`frozen_place`, `immortal_place`). What a `const`
+    /// parameter's argument must be (§4.2).
+    ///
+    /// Nothing else is: a call's result, a construction or a literal is
+    /// fresh and mutable, and a value read through `this` or out of a local
+    /// that is not `const` may be changed by anyone holding it. The check is
+    /// syntactic, so a value frozen at run time by other means -- an element
+    /// of a constant reached through a `for` loop's variable, say -- is
+    /// refused too, and the caller writes the frozen name instead.
+    pub(super) fn frozen_arg(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Var(name, _) => {
+                if self.binding(name).is_some() {
+                    return self.frozen_name(name).is_some();
+                }
+                self.is_module_const(e)
+            }
+            Expr::Field(..) | Expr::Index(..) => self.immortal_place(e) || self.frozen_place(e),
+            _ => false,
+        }
+    }
+
+    /// Refuse an argument to a `const` parameter that is not known to be
+    /// frozen (`frozen_arg`). The check is the whole of a `const`
+    /// parameter's cost: nothing is frozen, copied or tested at run time,
+    /// and the callee trusts every chain out of the parameter
+    /// (docs/const-decision.md, "The third decision"). A scalar, a `str` and
+    /// a value enum are copies or immutable already, so any argument does.
+    pub(super) fn refuse_unfrozen_arg(&self, a: &Expr, p: &Param) -> Result<(), Diag> {
+        if !p.is_const || !self.const_snapshots(p.ty) || self.frozen_arg(a) {
+            return Ok(());
+        }
+        // At the top level of the entry file `const` declares a module
+        // constant, so neither a block nor a `const` local can be opened
+        // there (§4.5).
+        let top = self.in_entry && self.scopes.len() == 1;
+        let fix = match Self::root_local(a) {
+            Some(n) if top && self.binding(n).is_some() => format!(
+                "`const` at the top level declares a module constant, so do this in a \
+                 function, as `const {n} {{ .. }}` around the call"
+            ),
+            Some(n) if self.binding(n).is_some() => {
+                format!("freeze it for the call: `const {n} {{ .. }}` around it")
+            }
+            _ => "bind it to a `const` local first, or name a local holding it in a \
+                  `const` block around the call"
+                .to_string(),
+        };
+        Err(Diag::new(
+            a.span(),
+            format!(
+                "`{}` is a `const` parameter, so its argument must already be frozen -- \
+                 a `const` local, a module constant, a name in an active `const` block \
+                 or a `const` parameter, or a field or element of one; {fix}",
+                p.name
+            ),
+        ))
+    }
+
+    /// `refuse_unfrozen_arg` for a function started by `spawn`, whose frame
+    /// outlives the statement: the argument must be frozen for good, so a
+    /// `const` block or a caller's `const` parameter -- frozen only until a
+    /// block ends, which the new thread may outlast -- will not do. A module
+    /// constant is immortal; a `const` local holds a snapshot, frozen for
+    /// good, and `spawn` moves it.
+    pub(super) fn refuse_unfrozen_spawn_arg(&self, a: &Expr, p: &Param) -> Result<(), Diag> {
+        // A default is checked where it is lowered, in the declaring module,
+        // and only a constant passes there (`lower_slot`).
+        let is_default = p.default.as_ref().is_some_and(|d| std::ptr::eq(d, a));
+        if !p.is_const || is_default || !self.const_snapshots(p.ty) || self.immortal_place(a) {
+            return Ok(());
+        }
+        if let Expr::Var(n, _) = a {
+            if let Some((_, val, true)) = self.binding(n) {
+                if self.snapshots.contains(&val) {
+                    return Ok(());
+                }
+            }
+        }
+        Err(Diag::new(
+            a.span(),
+            format!(
+                "`{}` is a `const` parameter of a spawned function, so its argument must \
+                 be frozen for good -- a module constant or a `const` local; a `const` \
+                 block, or a `const` parameter that may come from one, ends while the \
+                 new thread can still be running",
+                p.name
+            ),
+        ))
+    }
+
+    /// The local, parameter or constant a chain of fields and indexes
+    /// starts at, as written.
+    fn root_local(e: &Expr) -> Option<&str> {
+        match e {
+            Expr::Var(n, _) => Some(n),
+            Expr::Field(o, _, _) | Expr::Index(o, _, _) => Self::root_local(o),
+            _ => None,
+        }
+    }
+
     /// Whether method `m` changes a built-in collection of type `t` -- the
     /// calls `refuse_const_write` applies to. A user type's methods are not
     /// here: whether one changes its receiver is not written in its

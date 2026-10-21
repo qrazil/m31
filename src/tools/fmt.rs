@@ -692,7 +692,8 @@ impl Fmt {
                     Some(e) => format!(" = {}", self.expr(e)),
                     None => String::new(),
                 };
-                format!("{} {}{d}", self.ty(p.ty), p.name)
+                let c = if p.is_const { "const " } else { "" };
+                format!("{c}{} {}{d}", self.ty(p.ty), p.name)
             })
             .collect::<Vec<_>>()
             .join(", ")

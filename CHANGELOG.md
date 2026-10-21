@@ -3,6 +3,29 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased
+
+### Added
+
+- **`const` parameters.** `int total(const List<int> xs)` takes only an
+  argument that is already frozen: a `const` local, a module constant, a
+  name in an active `const` block, a `const` parameter of the caller, or a
+  field or element of any of them. Anything else is a compile error that
+  says how to freeze it for the call (`const buf { total(buf); }`). The
+  check is static, so the parameter costs nothing at run time; inside the
+  function the name is `const`, nothing can be changed through it, and no
+  read out of it is held at any depth. `const` is part of the signature a
+  method, function or lambda must match an interface by; a spawned
+  function's `const` parameter needs a value frozen for good (a module
+  constant or a `const` local); a `const` parameter of a type that can
+  hold a resource is refused, and so is `const` on a field (reference §4.2;
+  docs/const-decision.md, "`const` parameters, as implemented"; corpus
+  `1322-const-parameters`, trap `1323`, errors `1324` and `1325`).
+- **Recorded: a constant holds no I/O.** A value that owns a resource is
+  refused in every permanent form of `const`; inside a `const` block,
+  using one traps, as in 0.10.0, by design (docs/const-decision.md,
+  "Constants hold no I/O").
+
 ## 0.10.0 (2026-10-21)
 
 ### Changed

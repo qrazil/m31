@@ -408,6 +408,7 @@ impl Lowerer {
                 let slots = self.bind_args(name, &params, args, *span)?;
                 let mut vals = Vec::new();
                 for (a, p) in slots.iter().zip(params.iter()) {
+                    self.refuse_unfrozen_spawn_arg(a, p)?;
                     let v = self.lower_slot(a, p, &module)?;
                     if !self.assignable(v.ty, p.ty) {
                         return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));

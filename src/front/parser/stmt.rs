@@ -176,6 +176,7 @@ impl Parser {
                             default: None,
                             embedded: false,
                             is_pub: false,
+                            is_const: false,
                             span: bspan,
                         }));
                         if !self.eat(&Tok::Comma) {

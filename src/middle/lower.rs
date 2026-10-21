@@ -238,6 +238,13 @@ pub struct Lowerer {
     /// `is_const` bit -- a mutable local can be assigned the same value and
     /// outlive the freeze -- and cleared per function, like `freezes`.
     snapshots: Vec<Value>,
+    /// The `const` parameters of the function being lowered, by value. A
+    /// `const` parameter's argument was checked frozen at every call site
+    /// (`refuse_unfrozen_arg`), and a callee cannot outlive its caller's
+    /// `const` block, so the object stays frozen for the whole call. Like
+    /// `snapshots`, consulted with the binding's `is_const` bit, which a
+    /// `const` parameter never loses.
+    const_params: Vec<Value>,
     loops: Vec<LoopCtx>,
     /// The loop variables of the `for` loops currently being lowered,
     /// innermost last. They are bound `const`, like any other name that
@@ -840,6 +847,7 @@ impl Lowerer {
             stmt_temps: Vec::new(),
             freezes: Vec::new(),
             snapshots: Vec::new(),
+            const_params: Vec::new(),
             loops: Vec::new(),
             loop_vars: Vec::new(),
             synth: 0,
@@ -870,6 +878,7 @@ impl Lowerer {
                 default: None,
                 embedded: false,
                 is_pub: false,
+                is_const: false,
                 span: Span::new(0, 0),
             })
             .collect();

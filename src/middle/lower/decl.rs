@@ -497,6 +497,7 @@ impl Lowerer {
         self.stmt_temps.clear();
         self.freezes.clear();
         self.snapshots.clear();
+        self.const_params.clear();
         self.synth = 0;
         self.cur = 0;
         self.ret_ty = f.ret;
@@ -559,7 +560,21 @@ impl Lowerer {
             }
             let v = self.new_val(self.irty(p.ty));
             params.push(v);
-            if scope.insert(p.name.clone(), (p.ty, v, false)).is_some() {
+            // A `const` parameter is a `const` name: it cannot be assigned,
+            // nothing may be changed through it (`refuse_const_write`), and
+            // its argument is frozen (§4.2), so reads through it are not
+            // held (`frozen_place`).
+            // Nothing `const` holds a resource (docs/const-decision.md, "const
+            // values hold no I/O"): a `const` parameter of a type that can
+            // hold one could only ever be given an argument that traps on use.
+            if p.is_const {
+                self.refuse_const_resource(p.ty, p.span)?;
+                self.const_params.push(v);
+            }
+            if scope
+                .insert(p.name.clone(), (p.ty, v, p.is_const))
+                .is_some()
+            {
                 return Err(Diag::new(
                     p.span,
                     format!("duplicate parameter `{}`", p.name),

@@ -510,7 +510,8 @@ written. The type's own method may still have one, and a direct call on that
 type honours it.
 
 Satisfaction is **structural**: a type that has every listed method with a
-matching signature satisfies the interface, with no declaration saying so.
+matching signature -- the same types, and `const` (§4.2) on the same
+parameters -- satisfies the interface, with no declaration saying so.
 Assigning such a value to an interface-typed slot is allowed; assigning one
 that does not is a compile error naming the missing method.
 
@@ -1188,9 +1189,9 @@ as cycles are not collected (§7.1), it lives until the program ends.
     (`push`, `pop`, `insert`, `remove_at`, `clear`, `set`, `remove`,
     `reverse`, `sort`, `extend`), through any chain of fields and indexes
     starting at the name.
-  - **A change it cannot see traps**: the value passed to a parameter — there
-    is no read-only parameter type — or held by another name, or a method
-    that assigns a field of its frozen receiver. The trap is `cannot modify
+  - **A change it cannot see traps**: the value passed to a parameter that
+    is not `const` (§4.2), or held by another name, or a method that assigns
+    a field of its frozen receiver. The trap is `cannot modify
     a constant`.
   - **`clone(x)` is the copy that can be changed.** It is shallow, like
     every clone: a clone of a frozen `List<Point>` is a new list holding the
@@ -1217,6 +1218,12 @@ as cycles are not collected (§7.1), it lives until the program ends.
     value, so the binding **traps** instead, before anything is frozen or
     copied: `a const cannot hold a value of type `T``. Bind such a value
     without `const`.
+
+    The rule is general: **a constant holds no I/O.** A value that needs
+    I/O is not `const`, in any of the forms — a `const` local, a `const`
+    parameter (§4.2), a module constant (§4.5). A `const` block (§4.1a) is
+    the one place an object that owns a resource is frozen at all, and
+    using it there traps.
 
 **Shadowing is not allowed.** A declaration whose name is already in scope is
 an error telling you to rename one. A name means one thing for the whole
@@ -1338,6 +1345,54 @@ volume(5, depth: 3, h: 2);      // order among named arguments is free
 The reason for the rule is that a reader should never have to count commas to
 find which parameter a value lands in, and should never meet the same call
 spelled two ways.
+
+**A `const` parameter takes only a value that is already frozen.**
+
+```c
+int total(const List<int> xs) { .. }
+
+const List<int> c = [1, 2];
+total(c);                   // a `const` local
+total(TABLE);               // a module constant
+const buf { total(buf); }   // a name in an active `const` block
+total(buf);                 // error: `buf` is not frozen here
+```
+
+At every call the argument must be, as written, a `const` local, a module
+constant, a name inside an active `const` block (§4.1a), a `const`
+parameter of the calling function, or a field or List/Array element of
+any of them, at any depth (`h.ps[0]`, `lib.T[i]`). Anything else is
+refused at compile time, with the fix: freeze the value for the call,
+`const buf { total(buf); }`, or bind it to a `const` local. A literal, a
+construction and a call's result are fresh and mutable, so they are
+refused too; so is a value read through `this` or a bare field name, whose
+frozenness is the caller's knowledge. Nothing happens at run time: a
+`const` parameter costs nothing, and a callee cannot outlive its caller's
+block, so the value stays frozen for the whole call.
+
+Inside the function the parameter is a `const` name (§4.1): it cannot be
+assigned, a change through it that the compiler can see is an error, and
+one it cannot see traps. A function that must change its argument cannot
+take it `const`; it returns a new value instead.
+
+  - An `int`, `float`, `bool`, `str` or value enum is immutable or a copy
+    already, so `const` on one of those takes any argument and only forbids
+    assigning the name.
+  - A default must pass the same check where it is declared, so only a
+    module constant can be the default of a `const` parameter of a
+    collection or user type.
+  - `const` is part of a signature that must match exactly: a method
+    satisfies an interface method (§3.4), and a function or lambda a
+    callback (§6.7), only if each parameter is `const` on both or on
+    neither. A call through the interface is checked against the
+    interface's parameters.
+  - A function started by `spawn` (§5.9) may outlive the statement, so the
+    argument of its `const` parameter must be frozen for good: a module
+    constant or a `const` local, not a block's name or a caller's `const`
+    parameter.
+  - A `const` parameter cannot be of a type that can hold a resource
+    (§4.4): a constant holds no I/O (§4.1).
+  - A field cannot be `const` (§3.3): a field is frozen with its object.
 
 A function returning non-`void` must return on every path; falling off the
 end is a compile error. A `while (true)` with no `break` out of it is a path
@@ -1843,6 +1898,10 @@ Calls the named function on a new thread. `spawn` is a statement, not an
 expression: there is no handle and no join. The program waits for every
 spawned thread before exiting (§8.1).
 
+The argument of a `const` parameter (§4.2) must be frozen for good: a
+module constant, or a `const` local, which `spawn` moves like any other.
+A `const` block may end while the new thread still runs.
+
 ---
 
 ## 6. Expressions
@@ -2255,8 +2314,8 @@ never `order(a, b)`.
 every other binding in the language, and its body is one expression. It has
 no type of its own: the method name, the number of parameters, their types
 and the return type all come from the interface it is given to, and it is
-*checked* against that. Matching is exact — same types in order, same return
-type, no variance — and the receiver is not a parameter, so a function of
+*checked* against that. Matching is exact — same types in order, `const` on
+the same parameters (§4.2), same return type, no variance — and the receiver is not a parameter, so a function of
 *n* parameters matches a method of *n*.
 
 `?` may not appear in a lambda's body: it returns from the enclosing
@@ -2614,7 +2673,8 @@ variant     = IDENT [ "(" type { "," type } ")" ] ;
 distinct    = "distinct" type IDENT ";" ;
 field       = [ "pub" ] ( type IDENT [ "=" expr ] | type ) ;  (* bare type = embedded *)
 sig         = type IDENT "(" [ sigparams ] ")" ;    (* no defaults, §3.4 *)
-sigparams   = type IDENT { "," type IDENT } ;
+sigparams   = sigparam { "," sigparam } ;
+sigparam    = [ "const" ] type IDENT ;               (* const: §4.2 *)
 
 func        = [ "static" ] type [ IDENT [ tparams ] "." ] IDENT [ tparams ]
               "(" [ params ] ")" block ;              (* static needs a receiver;
@@ -2622,7 +2682,8 @@ func        = [ "static" ] type [ IDENT [ tparams ] "." ] IDENT [ tparams ]
 prim        = "prim" type IDENT "(" [ params ] ")" ";" ;  (* stdlib source only, §10.1 *)
 tparams     = "<" IDENT { "," IDENT } ">" ;
 params      = param { "," param } ;
-param       = type IDENT [ "=" expr ] ;
+param       = [ "const" ] type IDENT [ "=" expr ] ; (* const: a frozen
+                                                         argument, §4.2 *)
 
 type        = "int" | "float" | "bool" | "str" | "bytes" | "void"
             | [ IDENT "." ] IDENT [ "<" type { "," type } ">" ] ;
