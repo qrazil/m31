@@ -100,7 +100,7 @@ fn usage_errors_exit_2_on_stderr_with_the_usage_line() {
     assert_eq!(out(&o), "");
     assert_eq!(
         err(&o),
-        "m31c: m31c needs a command -- one of -emit-c, -emit-ir, -fmt, -lint, -init\n\
+        "m31c: m31c needs a command -- one of -emit-c, -emit-ir, -fmt, -lint, -init, -heapwatch\n\
          usage: m31c -<command> [...]\n\
          try 'm31c --help' for more information\n"
     );
@@ -327,7 +327,7 @@ fn completions_come_from_the_option_tables() {
     assert_eq!(code(&o), 0);
     let script = out(&o);
     assert!(script.contains("complete -o filenames -F _m31c_complete m31c"));
-    assert!(script.contains("-emit-c -emit-ir -fmt -lint -init --help --version"));
+    assert!(script.contains("-emit-c -emit-ir -fmt -lint -init -heapwatch --help --version"));
     assert!(script.contains("fmt) COMPREPLY=($(compgen -W \"--check --c --recursive --r --help"));
     assert_eq!(code(&m31c(&["--completions=fish"])), 0);
     let o = m31c(&["--completions", "zsh"]);

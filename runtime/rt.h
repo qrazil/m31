@@ -85,8 +85,42 @@
  * RC_IMMORTAL first. */
 #define RC_HELD (LONG_MAX / 16 + 1)
 
-/* Everything in the header word that is not the count. */
+/* The bits every mutation path tests: frozen, held by a `const` block, or
+ * being sorted or probed. rt_check_mutable traps on any of them. */
 #define RC_FLAGS (RC_FROZEN | RC_HELD | RC_BUSY)
+
+/* Heap watch (docs/heap-watch-design.md) keeps its per-object state in the
+ * count word too, so the header stays two words and an object costs it
+ * nothing. Below the flags:
+ *
+ *    63    62      61..60   59    58..53   52..33        32..0
+ *   [sign][FROZEN][BUSY x2][HELD][EPOCH 6][BIRTH 20 bits][COUNT 33 bits]
+ *
+ *   COUNT  the reference count: 8 589 934 591 references to one object. A
+ *          retain past that traps (rc_inc) instead of carrying into BIRTH.
+ *   BIRTH  the minute the object was made, counted from program start, so
+ *          its age is known when it dies; 20 bits is 728 days, and a
+ *          process that lives longer stamps the last minute it can count.
+ *          All ones (RC_BIRTH_FOREVER) marks an object that lives as long
+ *          as it likes on purpose (`heapwatch.forever`).
+ *   EPOCH  which unit of work the object is counted against (epoch close):
+ *          62 - depth for an object of an open epoch at `depth`, so an
+ *          object that outlives more epochs has a HIGHER value and a store
+ *          only has to compare two numbers (rt_hw_store below); 63 for an
+ *          object counted against none (made with heap watch off, or
+ *          outside any task -- and every immortal, which has every bit
+ *          set); 0 for one crossing between tasks.
+ *
+ * Every check that wants the count alone masks with RC_COUNT. */
+#define RC_COUNT ((1L << 33) - 1)
+#define RC_BIRTH_SHIFT 33
+#define RC_BIRTH_MAX ((1L << 20) - 1)
+#define RC_BIRTH (RC_BIRTH_MAX << RC_BIRTH_SHIFT)
+#define RC_BIRTH_FOREVER RC_BIRTH_MAX
+#define RC_EPOCH_SHIFT 53
+#define RC_EPOCH (63L << RC_EPOCH_SHIFT)
+#define RC_EPOCH_NONE 63
+#define RC_EPOCH_TRANSIT 0
 
 typedef struct Obj Obj;
 
@@ -145,6 +179,17 @@ typedef int64_t (*CmpFn)(Obj *a, Obj *b);  /* int  T.cmp(T other)  */
 typedef int64_t (*HashFn)(Obj *o);         /* int  T.hash()        */
 typedef bool (*EqFn)(Obj *a, Obj *b);      /* bool T.eq(T other)   */
 
+/* One reference field of a user type, for heap watch's trace: the name a
+ * report prints for the slot at `offset` in an object (`Session.conn`).
+ * An enum's payload slots of different variants share offsets, so each of
+ * its entries also names the variant's tag, which the reader compares with
+ * the object's own; -1 on a struct's field. */
+typedef struct {
+    const char *name;
+    uint32_t    offset;
+    int32_t     tag;
+} RtField;
+
 typedef struct TypeInfo {
     DropFn       drop;
     const AnyFn *vtable;
@@ -161,6 +206,26 @@ typedef struct TypeInfo {
     CmpFn        cmp;
     HashFn       hash;
     EqFn         eq;
+    /* Heap watch (docs/heap-watch-design.md, "The ledger"). Every
+     * allocation SITE has a TypeInfo of its own: a copy of the type's, with
+     * the same functions and vtable, plus where it was made. `canon` points
+     * at the type's own record, which is what an identity test compares --
+     * never `ty` itself, which differs per site (`o->ty->canon ==
+     * &rt_lst_ref_type`; a gate refuses comparing `ty` itself). A canonical
+     * record points at itself.
+     *
+     * `site` is the ledger slot this record's objects are counted in, 0 on
+     * a canonical record: rt_alloc swaps one of those for the record of the
+     * site the program is at (rt_hw_at), made the first time that site
+     * allocates that type. `loc` is the index of the source line in the
+     * program's table (rt_hw_program). `name` is the type as the program
+     * spells it, and `fields` its reference fields, for trace. */
+    const struct TypeInfo *canon;
+    uint32_t     site;
+    uint32_t     loc;
+    const char  *name;
+    const RtField *fields;
+    uint32_t     nfields;
 } TypeInfo;
 
 /* Every heap object starts with this. Two words: the count, and a pointer to
@@ -175,6 +240,17 @@ struct Obj {
     long            rc;
     const TypeInfo *ty;
 };
+
+/* A destructor body runs at a count of 1 and must leave it there; the
+ * emitted drop function sets and checks the count through these, so the
+ * birth minute and epoch beside it survive (src/back/emit_c/types.rs). */
+static inline void rt_rc_set_count(Obj *o, long n) {
+    o->rc = (o->rc & ~RC_COUNT) | n;
+}
+
+static inline long rt_rc_count(const Obj *o) {
+    return o->rc & RC_COUNT;
+}
 
 /* Strings carry no methods and need no drop. */
 extern const TypeInfo rt_str_type;
@@ -493,6 +569,13 @@ extern const TypeInfo rt_arr_ref_type;
 extern const TypeInfo rt_lst_val_type;
 extern const TypeInfo rt_lst_ref_type;
 
+/* A List rather than an Array: identity through `canon`, never `ty`, which
+ * is the allocation site's own record (TypeInfo above). */
+static inline bool rt_is_list(const Obj *o) {
+    const TypeInfo *c = o->ty->canon;
+    return c == &rt_lst_val_type || c == &rt_lst_ref_type;
+}
+
 /* `fill` is the initial value of every element. There is no null in the
  * language, so an array cannot start with empty slots: the caller must say
  * what an unset element is. For references the fill is retained once per
@@ -529,12 +612,12 @@ __attribute__((cold)) _Noreturn void rt_trap(const char *msg);
  * knows which it has, but the runtime does not need to -- it only needs to
  * find the elements. */
 static inline int64_t rt_len_of(Obj *o) {
-    bool is_list = o->ty == &rt_lst_val_type || o->ty == &rt_lst_ref_type;
+    bool is_list = rt_is_list(o);
     return is_list ? ((Lst *)o)->len : ((Arr *)o)->len;
 }
 
 static inline int64_t rt_index_get(Obj *o, int64_t i) {
-    bool is_list = o->ty == &rt_lst_val_type || o->ty == &rt_lst_ref_type;
+    bool is_list = rt_is_list(o);
     int64_t n = is_list ? ((Lst *)o)->len : ((Arr *)o)->len;
     if (i < 0 || i >= n) rt_trap("index out of range");
     /* `restrict`: an element is never stored anywhere the header's own
@@ -557,7 +640,7 @@ static inline int64_t rt_index_get(Obj *o, int64_t i) {
 
 static inline void rt_index_set(Obj *o, int64_t i, int64_t v) {
     rt_check_mutable(o);
-    bool is_list = o->ty == &rt_lst_val_type || o->ty == &rt_lst_ref_type;
+    bool is_list = rt_is_list(o);
     int64_t n = is_list ? ((Lst *)o)->len : ((Arr *)o)->len;
     if (i < 0 || i >= n) rt_trap("index out of range");
     int64_t *restrict data = is_list ? ((Lst *)o)->data : ((Arr *)o)->data;
@@ -577,7 +660,7 @@ static inline void rt_index_set(Obj *o, int64_t i, int64_t v) {
  * the loop, docs/const-decision.md's check-hoisting barrier), so it stays a
  * per-store check exactly as it is in rt_index_set. */
 static inline int64_t rt_seq_data_addr(Obj *o) {
-    bool is_list = o->ty == &rt_lst_val_type || o->ty == &rt_lst_ref_type;
+    bool is_list = rt_is_list(o);
     int64_t *data = is_list ? ((Lst *)o)->data : ((Arr *)o)->data;
     return (int64_t)(intptr_t)data;
 }
@@ -1093,5 +1176,41 @@ static inline int64_t rt_wrapping_sub(int64_t a, int64_t b) {
 static inline int64_t rt_wrapping_mul(int64_t a, int64_t b) {
     return rt_u2i((uint64_t)a * (uint64_t)b);
 }
+
+/* ---- heap watch ---------------------------------------------------------
+ *
+ * docs/heap-watch-design.md; runtime/heapwatch.c has the implementation.
+ * Every object is counted, by allocation site, in a ledger file the
+ * process maps; `m31c -heapwatch` reads it, from a live process or a dead
+ * one. What emitted code calls: */
+
+/* One source line of the program: a site's file and line. */
+typedef struct {
+    const char *file;
+    uint32_t    line;
+} RtHwLoc;
+
+/* Called once by the emitted main, before the program's first statement:
+ * the program's source lines, and its own site records (one per allocation
+ * site of a user type, numbered 1, 2, ... in this order). Starts heap
+ * watch unless M31_HEAPWATCH=0. */
+void rt_hw_program(const RtHwLoc *locs, uint32_t nlocs, const TypeInfo *const *slots,
+                   uint32_t nslots);
+
+/* The program is at source line `loc`: an object the runtime makes during
+ * the next call -- a str for `concat`, a List for a literal -- is counted
+ * against that line. Out of line on purpose, for the reason rt_stack_check
+ * is: it writes a thread-local, and a cached address of one is the bug
+ * described there. */
+void rt_hw_at(uint32_t loc);
+
+/* heapwatch.forever(x): `o` lives as long as it likes on purpose, so its
+ * age is not reported. It is still counted, still listed, and still
+ * checked by epoch close and trace. */
+void rt_hw_forever(Obj *o);
+
+/* The scheduler's monitor calls this on every poll (runtime/scheduler.c):
+ * the program's clock, the control page, the suspect scan. */
+void rt_hw_tick(void);
 
 #endif /* RT_H */

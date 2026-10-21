@@ -3,6 +3,45 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased
+
+### Added
+
+- **Heap watch, phase 1: a ledger of every object, by allocation site**
+  (docs/heap-watch-design.md). Every compiled program now counts what it
+  allocates and frees -- by site, a (type, source line) pair -- in a file it
+  maps, `<program>.<pid>.ledger` under `$M31_HEAPWATCH_DIR` (default
+  `${TMPDIR:-/tmp}/m31-heapwatch-<uid>`). A counter update is a plain store
+  into the mapping, so the ledger survives a crash or `kill -9` with no exit
+  hook. Each site learns how long its objects normally live; once a minute
+  a site whose oldest survivor is older than max(10 minutes, 10 x its own
+  p99 lifetime) is a SUSPECT, written to `<program>.<pid>.suspects` when it
+  becomes one and each time its survivors double in age again. Nothing is
+  walked and nothing is freed: every answer comes from counters the
+  allocator and `rc_dec` keep.
+- **`m31c -heapwatch <ledger|pid> [--all]`** reads a ledger, from a running
+  process or a dead one, and lists suspects, sites that never freed
+  anything, and what is marked as living long on purpose.
+- **Long-lived on purpose:** `M31_AGE=Type:forever`,
+  `M31_AGE=Type@file.m31:40:forever` (or a duration, `10m`), the same in a
+  file named by `M31_HEAPWATCH_CONF`, and `heapwatch.forever(x)` in code
+  (new module `lib/heapwatch.m31`), which returns `x`. `M31_HEAPWATCH=0`
+  turns it all off; `M31_HEAPWATCH_MIN`, `M31_HEAPWATCH_FACTOR` tune the
+  threshold. A clean exit with nothing to report removes the files
+  (`M31_HEAPWATCH_KEEP=1` keeps them); a program removes the ledgers of
+  dead processes of its own name beyond the newest 8.
+
+### Changed
+
+- **The reference count is 33 bits** (8 589 934 591 references to one
+  object), and a retain past that traps instead of wrapping. The count
+  word's other bits hold the object's birth minute and its epoch for heap
+  watch, so the header stays two words; nothing reads the count word raw
+  any more (`RC_COUNT`, `rt_rc_count`, `rt_rc_set_count`).
+- **Every allocation site has its own TypeInfo**, a copy of the type's with
+  a ledger slot, its source line and a table of its reference fields. A
+  type's identity is `o->ty->canon`; the 18 runtime checks that compared
+  `o->ty` itself were converted, and a gate refuses a new one.
 ## 0.12.0 (2026-10-22)
 
 ### Fixed before release

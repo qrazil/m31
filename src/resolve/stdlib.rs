@@ -44,6 +44,7 @@ const MODULES: &[(&str, &str)] = &[
     ("text", include_str!("../../lib/text.m31")),
     ("date", include_str!("../../lib/date.m31")),
     ("timer", include_str!("../../lib/timer.m31")),
+    ("heapwatch", include_str!("../../lib/heapwatch.m31")),
     ("random", include_str!("../../lib/random.m31")),
     ("text.regex", include_str!("../../lib/text/regex.m31")),
     ("args", include_str!("../../lib/args.m31")),

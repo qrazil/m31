@@ -43,6 +43,20 @@ impl Lowerer {
     }
 
     pub(super) fn lower_expr(&mut self, e: &Expr) -> Result<Val, Diag> {
+        // Heap watch counts an allocation against the line of the
+        // expression that makes it (`Lowerer::push`); a sub-expression on a
+        // line of its own does not move its parent's.
+        let saved = self.cur_line;
+        let line = e.span().line;
+        if line > 0 {
+            self.cur_line = line;
+        }
+        let r = self.lower_expr_here(e);
+        self.cur_line = saved;
+        r
+    }
+
+    fn lower_expr_here(&mut self, e: &Expr) -> Result<Val, Diag> {
         match e {
             Expr::Float(x, _) => {
                 let v = self.new_val(IrTy::F64);

@@ -925,6 +925,27 @@ impl Lowerer {
             return Ok(Val::new(d, v.ty, true));
         }
 
+        // `__forever(x)`: lib/heapwatch.m31's way to mark an object as
+        // living long on purpose (rt_hw_forever). A builtin rather than a
+        // `prim` because it takes any type -- a `prim` is one C symbol and
+        // cannot be generic (docs/stdlib-seam.md §2) -- and, like every
+        // `__` name, only the standard library can call it. A value that is
+        // not an object has nothing to mark.
+        if name == "__forever" {
+            if args.pos.len() != 1 || !args.named.is_empty() {
+                return Err(Diag::new(span, "`__forever` takes one argument"));
+            }
+            let v = self.lower_expr(&args.pos[0])?;
+            if v.v.is_some() && self.irty(v.ty) == IrTy::Ref {
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_hw_forever".to_string(),
+                    args: vec![v.val()],
+                });
+            }
+            return Ok(Val::void());
+        }
+
         // Channel builtins. They are here rather than in `sigs` because
         // their types depend on the channel's element type.
         if matches!(name, "send" | "recv" | "close") {

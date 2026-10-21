@@ -89,7 +89,7 @@ pub(super) fn emit_spawn_trampolines(o: &mut String, m: &Module) {
     }
 }
 
-pub(super) fn emit_functions(o: &mut String, m: &Module) {
+pub(super) fn emit_functions(o: &mut String, m: &Module, sites: &heapwatch::Sites) {
     for f in &m.funcs {
         emit_func(
             o,
@@ -99,12 +99,19 @@ pub(super) fn emit_functions(o: &mut String, m: &Module) {
                 prim_targets: &m.prim_targets,
                 natives: &m.natives,
             },
+            sites,
         );
         o.push('\n');
     }
 }
 
-pub(super) fn emit_func(o: &mut String, f: &crate::middle::ir::Func, types: &[TypeDef], ffi: &Ffi) {
+pub(super) fn emit_func(
+    o: &mut String,
+    f: &crate::middle::ir::Func,
+    types: &[TypeDef],
+    ffi: &Ffi,
+    sites: &heapwatch::Sites,
+) {
     // Blocks are emitted in order and control falls into the first one, so
     // the entry block must be first or the function starts in the wrong place.
     assert_eq!(
@@ -201,7 +208,8 @@ pub(super) fn emit_func(o: &mut String, f: &crate::middle::ir::Func, types: &[Ty
                 | Inst::BConst { .. }
                 | Inst::SConst { .. }
                 | Inst::KConst { .. }
-                | Inst::Alloc { .. } => {}
+                | Inst::Alloc { .. }
+                | Inst::Site { .. } => {}
             }
         }
         match &b.term {
@@ -281,8 +289,15 @@ pub(super) fn emit_func(o: &mut String, f: &crate::middle::ir::Func, types: &[Ty
         } else if b.id != f.entry {
             writeln!(o, "    /* {} (unreachable) */", b.id).unwrap();
         }
+        // Heap watch: the line the allocations below are made at, from the
+        // `Inst::Site` the lowering put in front of them in this block.
+        let mut loc = 0;
         for i in &b.insts {
-            emit_inst(o, f, types, i, ffi);
+            if let Inst::Site { loc: l } = i {
+                loc = *l;
+                continue;
+            }
+            emit_inst(o, f, types, i, ffi, sites, loc);
         }
         emit_term(o, f, &b.term);
     }

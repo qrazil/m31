@@ -35,7 +35,7 @@ it cannot rot.
 - 130 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
-Beyond the core language: a standard library (`lib/`, 71 modules in folders) covering
+Beyond the core language: a standard library (`lib/`, 72 modules in folders) covering
 collections, JSON, CSV, HTML, a full HTTP/1.1 client and server
 (`lib/net/http.m31`), filesystem and OS access, and a constant-time crypto stack
 (X25519, Ed25519, SHA-256/512, ChaCha20-Poly1305). On top of that, an `ssh`
@@ -348,6 +348,20 @@ writes the standard layout (`deps`, an entry point, `core/`, `tests/test.sh`,
 refuses to overwrite anything. The layout and its rules are in
 `docs/project-layout.md`.
 
+## Finding leaks
+
+A cycle leaks: there is no collector (`docs/closures-decision.md`). Heap
+watch shows where, while the program runs and after it has crashed
+(`docs/heap-watch-design.md`). Every compiled program counts its objects by
+allocation site in a ledger file, on by default:
+
+```
+m31c -heapwatch <ledger|pid>      suspects, never-freed sites, what lives forever
+M31_AGE=Texture:forever           long-lived on purpose, by type or Type@file.m31:line
+heapwatch.forever(x)              ... or by object, in code
+M31_HEAPWATCH=0                   off
+```
+
 ## Decisions made
 
 | Decision | Choice | Note |
@@ -440,7 +454,7 @@ runtime/
   ctx_switch_x86_64.S  the x86-64 context switch itself
   scheduler.h/.c       the M:N scheduler — not yet wired to spawn/Chan
   reactor.h/.c         epoll reactor, park/unpark, blocking-FFI handoff
-lib/                   the standard library, written in the language itself (71 modules)
+lib/                   the standard library, written in the language itself (72 modules)
   os.m31 fs.m31 io.m31 net.m31 term.m31 ...       the everyday modules, at the top
   crypto/                                         sha256 sha512 x25519 ed25519 aes ... (17)
   encoding/                                       base64 csv der hexcodec html json

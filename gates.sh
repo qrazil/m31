@@ -15,6 +15,13 @@ export RT_KERNELS
 quick=0
 [ "${1:-}" = "--quick" ] && quick=1
 
+# Every compiled program keeps a heap watch ledger (docs/heap-watch-design.md)
+# and leaves it behind when it traps or is killed -- which the trap corpus and
+# the runtime tests do on purpose, thousands of times. Here, not in /tmp.
+HEAPWATCH_DIR=$(mktemp -d)
+export M31_HEAPWATCH_DIR=$HEAPWATCH_DIR
+trap 'rm -rf "$HEAPWATCH_DIR"' EXIT
+
 fail=0
 run() {
     local name=$1
@@ -80,6 +87,20 @@ run "runtime stays separate TU" bash -c '
     fi
     if grep -qE "^static inline (void )?rc_(inc|dec)" runtime/rt.h; then
         echo "rc_inc/rc_dec must stay out-of-line in rt.c, not inline in rt.h"
+        exit 1
+    fi'
+
+# Heap watch gives every allocation site a TypeInfo of its own, so `o->ty`
+# is the site's record and a type's identity is `o->ty->canon`
+# (docs/heap-watch-design.md, "The ledger"). A comparison of `ty` itself
+# with a type's address would be false for every object made at a site, so
+# none may exist in the runtime, outside comments.
+run "no raw type identity checks" bash -c '
+    hits=$(grep -nE "(->ty|[^a-z_.]ty) *[!=]= *&" runtime/*.c runtime/*.h \
+        | grep -vE "^[^:]*:[0-9]+: *(/\*|\*)" || true)
+    if [ -n "$hits" ]; then
+        echo "compare o->ty->canon, not o->ty, with a type:"
+        echo "$hits"
         exit 1
     fi'
 
@@ -176,6 +197,10 @@ run "terminal reads park only the green thread" bash runtime/tests/term_wait_tes
 # term.Reader.read_keys: the escape wait is separate from the timeout, over a
 # pipe with delayed writes (lower bounds strict, upper bounds loose).
 run "term read_keys escape wait" bash runtime/tests/term_keys_wait_test.sh
+# Heap watch's ledger, read back by `m31c -heapwatch`: suspects on a short
+# minute clock, forever marks by type, site and object, the ledger after
+# `kill -9`, a clean exit leaving nothing, and the count word's split.
+run "heap watch" bash runtime/tests/heapwatch_test.sh
 
 # Child processes (docs/proc-decision.md): lib/proc.m31 over the sys layer's
 # pipes and the reactor, against Python's subprocess module and coreutils,
@@ -287,7 +312,13 @@ run "formatter preserves meaning" bash -c '
             # them to. str[0-9]+ alone is precise enough here: every name
             # this matches is this compiler'"'"'s own synthetic strN literal
             # variable, never a substring of some other identifier.
-            norm() { sed -E "s/str[0-9]+/strN/g" "$1" | sort; }
+            # Heap watch numbers allocation sites by source line, and the
+            # formatter moves lines, so the site numbers and the line table
+            # (every line marked /*hwsite*/, every `_s<N>` record and every
+            # rt_hw_at) are blanked the same way; which line each site is
+            # counted against is heap watch'"'"'s own test.
+            norm() { sed -E -e "s/str[0-9]+/strN/g" -e "s/_s[0-9]+/_sN/g" \
+                -e "s/rt_hw_at\([0-9]+\)/rt_hw_at(N)/" -e "/hwsite/s/[0-9]+/N/g" "$1" | sort; }
             if ! diff -q <(norm "$w/a.c") <(norm "$w/b.c") >/dev/null 2>&1; then
                 echo "formatting changed the emitted C: $f"
                 diff <(norm "$w/a.c") <(norm "$w/b.c") | head -6

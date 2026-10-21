@@ -171,6 +171,8 @@ impl Lowerer {
             cmp: None,
             hash: None,
             eq: None,
+            // Filled in with every other type's, in `lower_program`.
+            display: String::new(),
         });
         self.field_surface.push(Vec::new());
         self.field_params.push(Vec::new());
@@ -752,6 +754,8 @@ impl Lowerer {
             cmp: None,
             hash: None,
             eq: None,
+            // Filled in with every other type's, in `lower_program`.
+            display: String::new(),
         });
         self.field_surface
             .push(caps.iter().map(|(p, _)| p.ty).collect());

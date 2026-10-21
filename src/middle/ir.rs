@@ -222,6 +222,10 @@ pub struct TypeDef {
     /// resource -- which only happens through an interface, where the
     /// compiler could not see the type (docs/destructors-decision.md).
     pub resource: Option<String>,
+    /// The type's name as the program spells it, for every type with an
+    /// object: what heap watch's ledger and reports call it (`Conn`,
+    /// `net.Conn`, `Box<int>`).
+    pub display: String,
 }
 
 impl TypeDef {
@@ -509,6 +513,93 @@ pub enum Inst {
     RcInc { val: Value },
     /// `rc_dec v`
     RcDec { val: Value },
+    /// `site <loc>` -- the source line the allocations after it in the same
+    /// block are made at, for heap watch (docs/heap-watch-design.md, "The
+    /// ledger"). `loc` indexes `Module::locs`. It emits no instruction of
+    /// its own: the emitter gives each user-type allocation a TypeInfo of
+    /// its site, and tells the runtime the line before a runtime call that
+    /// may allocate. The lowering puts one before every allocating
+    /// instruction whose line differs from the last one in its block, so
+    /// every allocation has one in front of it in the same block.
+    Site { loc: u32 },
+}
+
+/// Whether a call to runtime function `func` may make an object -- a `str`
+/// from `concat`, a `List` from a literal, `bytes` pushed by a primitive --
+/// so that heap watch needs to know the source line it is made at
+/// (`Inst::Site`). Every `rt_` function may, except the ones listed here,
+/// which only read, move what they were given, or grow a buffer that is not
+/// an object of its own. A function wrongly left off the list costs one
+/// call to `rt_hw_at`; one wrongly on it has its objects counted against an
+/// older line.
+pub fn rt_call_allocates(func: &str) -> bool {
+    const NEVER: &[&str] = &[
+        "rt_print",
+        "rt_print_bool",
+        "rt_print_str",
+        "rt_index_get",
+        "rt_index_set",
+        "rt_index_get_at",
+        "rt_index_set_at",
+        "rt_seq_data_addr",
+        "rt_len",
+        "rt_len_of",
+        "rt_bytes_len",
+        "rt_bytes_get",
+        "rt_bytes_set",
+        "rt_bytes_get_at",
+        "rt_bytes_set_at",
+        "rt_bytes_data_addr",
+        "rt_bytes_push",
+        "rt_bytes_pop",
+        "rt_bytes_clear",
+        "rt_bytes_truncate",
+        "rt_bytes_drop_front",
+        "rt_bytes_extend",
+        "rt_bytes_eq",
+        "rt_bytes_find",
+        "rt_bytes_starts_with",
+        "rt_bytes_ends_with",
+        "rt_str_eq",
+        "rt_str_byte_at",
+        "rt_str_find",
+        "rt_str_starts_with",
+        "rt_str_ends_with",
+        "rt_str_parse_int",
+        "rt_list_push",
+        "rt_list_pop",
+        "rt_list_insert",
+        "rt_list_remove_at",
+        "rt_list_clear",
+        "rt_array_put",
+        "rt_map_get",
+        "rt_map_has",
+        "rt_map_set",
+        "rt_map_remove",
+        "rt_map_len",
+        "rt_map_clear",
+        "rt_seq_reverse",
+        "rt_seq_contains",
+        "rt_seq_index_of",
+        "rt_sort_int",
+        "rt_sort_str",
+        "rt_sort_float",
+        "rt_sort_obj",
+        "rt_chan_new",
+        "rt_chan_send",
+        "rt_chan_recv",
+        "rt_chan_close",
+        "rt_check_unique",
+        "rt_freeze_enter",
+        "rt_freeze_leave",
+        "rt_panic",
+        "rt_exit",
+        "rt_i2f_val",
+        "rt_f2i_checked",
+        "rt_out_flush",
+        "rt_hw_forever",
+    ];
+    func.starts_with("rt_") && !NEVER.contains(&func)
 }
 
 /// One machine-word slot of a static collection, as the compiler computed
@@ -646,6 +737,12 @@ pub struct Module {
     /// (docs/ffi-decision.md). A `BTreeMap` because the emitter walks it to
     /// declare the callees, and emission order must be deterministic.
     pub natives: std::collections::BTreeMap<String, NativeSig>,
+    /// Every source line an allocation is made at, as (file, line); `Site`
+    /// indexes this. Entry 0 is "unknown", for an allocation with no line.
+    /// The lowering records the MODULE; `name_site_files` turns it into the
+    /// file a report names, which is never a path on the machine that
+    /// compiled it, so the emitted C is the same everywhere.
+    pub locs: Vec<(String, u32)>,
 }
 
 /// One `prim "c"`, as the emitter needs it.
@@ -687,6 +784,21 @@ pub enum NativeExpr {
 }
 
 impl Module {
+    /// Name each line's file: from `files` (module -> file, from the
+    /// loader), else after the module itself, `net.http` as `net/http.m31`.
+    pub fn name_site_files(&mut self, files: &std::collections::HashMap<String, String>) {
+        for (i, (module, _)) in self.locs.iter_mut().enumerate() {
+            if i == 0 {
+                continue; // "?": no line at all
+            }
+            *module = match files.get(module.as_str()) {
+                Some(f) => f.clone(),
+                None if module.is_empty() => "main.m31".to_string(),
+                None => format!("{}.m31", module.replace('.', "/")),
+            };
+        }
+    }
+
     /// Check that no `IrTy::Val` has reached a position that needs an object.
     ///
     /// A value enum is the one shape in the IR that is neither a machine word
@@ -949,6 +1061,7 @@ fn show_inst(i: &Inst) -> String {
         Inst::Spawn { func, args: a } => format!("spawn {func}({})", args(a)),
         Inst::RcInc { val } => format!("rc_inc {val}"),
         Inst::RcDec { val } => format!("rc_dec {val}"),
+        Inst::Site { loc } => format!("site {loc}"),
     }
 }
 

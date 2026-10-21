@@ -7,6 +7,7 @@
 //!     m31c -fmt [--check] [--recursive] <file|dir>...
 //!     m31c -lint <file|dir>... [--allow NAME...] [--strict] [--summary]
 //!     m31c -init [--lib] [--name N] [--prefix P] [dir]
+//!     m31c -heapwatch <ledger|pid> [--all]
 //!
 //! Commands may share a line and run in the order typed. The pre-0.6 spellings
 //! (`--emit-c`, `fmt`, `-o`, `-r`, ...) still work for one release: each prints
@@ -26,7 +27,7 @@ use front::{ast, diag, lexer, parser};
 use middle::{lower, mono};
 use resolve::{modules, stdlib};
 use tools::cli::{Command, Kind, Need, Operand, Opt, Spec};
-use tools::{cli, fmt, init, lint};
+use tools::{cli, fmt, heapwatch, init, lint};
 
 #[cfg(test)]
 mod tests;
@@ -140,6 +141,11 @@ static ROOT: Spec = Spec {
             short: None,
             spec: &init::SPEC,
         },
+        Command {
+            word: "heapwatch",
+            short: None,
+            spec: &heapwatch::SPEC,
+        },
     ],
     version: Some(env!("CARGO_PKG_VERSION")),
     completions: true,
@@ -181,6 +187,7 @@ fn main() -> ExitCode {
                     "emit-ir" => emit_main("ir", &parsed.operands[0], parsed.value("out")),
                     "fmt" => fmt_main(parsed),
                     "lint" => lint::run(parsed),
+                    "heapwatch" => heapwatch::run(parsed),
                     _ => init::run(parsed),
                 };
                 if !failed && code != ExitCode::SUCCESS {
@@ -343,7 +350,8 @@ fn compile(entry: &str, mode: &str) -> Result<String, modules::Located> {
     // refused here -- see docs/modules-decision.md.
     let loaded = modules::load(entry)?;
     let paths = loaded.paths;
-    finish(loaded.program, mode).map_err(|d| {
+    let files = site_files(entry, &paths);
+    finish_in(loaded.program, mode, &files).map_err(|d| {
         // A diagnostic raised after the merge knows which MODULE it is in,
         // not which file -- so resolve it here. Without this every type,
         // name and privacy error was blamed on the entry file, quoting an
@@ -358,16 +366,57 @@ fn compile(entry: &str, mode: &str) -> Result<String, modules::Located> {
     })
 }
 
+/// The file each module's allocation sites are reported in, by heap watch
+/// (docs/heap-watch-design.md): the entry file by its own name, a module of
+/// the program by its path from the entry file's directory, and a module of
+/// the standard library as `net/http.m31`. Never a path on this machine, so
+/// the emitted C is the same wherever it is compiled.
+fn site_files(
+    entry: &str,
+    paths: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    let dir = Path::new(entry).parent().unwrap_or(Path::new(""));
+    paths
+        .iter()
+        .map(|(module, path)| {
+            let shown = if path.starts_with('<') {
+                format!("{}.m31", module.replace('.', "/"))
+            } else {
+                let p = Path::new(path);
+                p.strip_prefix(dir)
+                    .ok()
+                    .filter(|r| !r.as_os_str().is_empty())
+                    .or_else(|| p.file_name().map(Path::new))
+                    .map(|r| r.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone())
+            };
+            (module.clone(), shown)
+        })
+        .collect()
+}
+
 /// Everything after the source has been assembled into one program. Split out
 /// so the unit tests can drive it from a string without touching the
 /// filesystem -- they test the compiler, not the loader.
+#[cfg(test)]
 fn finish(prog: ast::Program, mode: &str) -> Result<String, diag::Diag> {
+    finish_in(prog, mode, &std::collections::HashMap::new())
+}
+
+/// `finish`, with the file each module's allocation sites are reported in
+/// (`site_files`); a module missing from it is named after itself.
+fn finish_in(
+    prog: ast::Program,
+    mode: &str,
+    files: &std::collections::HashMap<String, String>,
+) -> Result<String, diag::Diag> {
     // Generics are erased before lowering, which is why the IR has never
     // needed to know about them. See src/middle/mono/.
     lower::check_destructor_decls(&prog)?;
     lower::check_reserved_decls(&prog)?;
     let prog = mono::Mono::run(prog)?;
-    let module = lower::lower_program(&prog)?;
+    let mut module = lower::lower_program(&prog)?;
+    module.name_site_files(files);
     Ok(match mode {
         "ir" => module.to_string(),
         _ => emit_c::emit(&module),

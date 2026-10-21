@@ -1,6 +1,13 @@
 # Heap watch: one ledger for every object
 
-Status: **proposal, not decided.** Revision 3, 2026-10-20. Nothing is built.
+Status: **approved; being built.** Revision 4, 2026-10-21. Phase 1, the
+ledger, is built and on by default ("As built" below says what differs from
+the proposal); trace and epoch close are next.
+
+Revision 4: phase 1 built. The count word has a bit fewer than proposed
+(`RC_HELD` arrived with the deep freeze in 0.10.0), the per-minute table
+became a timing wheel, the tool is `m31c -heapwatch` in the CLI grammar, and
+the open questions it had to answer are answered at the end.
 
 Revision 3: the owner confirmed all three parts are wanted -- the age
 ledger, epoch close and trace mode -- and asked for a way to mark objects
@@ -71,22 +78,32 @@ them. The counters alone answer every question.
 
 ### What each object carries: nothing new
 
-The header stays two words (`runtime/rt.h`). The count word has 60 bits below
-its flags, and no program needs anywhere near that many. Heap watch splits
-them up:
+The header stays two words (`runtime/rt.h`). Since 0.10.0's deep freeze added
+`RC_HELD`, the count word has 59 bits below its flags, and no program needs
+anywhere near that many. Heap watch splits them up:
 
 ```
- 63    62      61..60   59     58..53   52..33         32..0
-[sign][FROZEN][BUSY x2][KEPT][DEPTH 6][BIRTH 20 bits][COUNT 33 bits]
+ 63    62      61..60   59    58..53    52..33         32..0
+[sign][FROZEN][BUSY x2][HELD][EPOCH 6][BIRTH 20 bits][COUNT 33 bits]
 ```
 
-- **COUNT**, 33 bits, allows 8.6 billion references to one object. An
-  overflow traps instead of wrapping.
+- **COUNT**, 33 bits, allows 8 589 934 591 references to one object. A
+  retain past that traps ("reference count overflow") instead of carrying
+  into BIRTH; `rc_inc` tests for it with one compare.
 - **BIRTH** is the minute the object was made, counted from program start.
-  20 bits is about 2 years. Nothing wraps for any process that lives less
-  than 2 years; one that lives longer folds old minutes into one "ancient"
-  bucket.
-- **DEPTH** and **KEPT** are for epoch close (below).
+  20 bits is 728 days. A process that lives longer stamps every later object
+  with the last minute it can count, which reads as old -- the right side to
+  err on for a leak report. All ones marks an object `heapwatch.forever`.
+- **EPOCH** is for epoch close (below). The proposal had a 6-bit DEPTH and a
+  KEPT bit; as built they are one 6-bit field, `62 - depth`, with 63 for an
+  object counted against no epoch and 0 for one crossing between tasks.
+  "Outlives more epochs" is then simply "larger", so a store compares two
+  numbers, and the bit saved is what keeps COUNT at 33 bits beside `HELD`.
+
+`rc_dec`, the uniqueness check, the snapshot and the emitted destructor
+read the count through a mask, `RC_COUNT`; nothing reads or writes the count
+word raw (`rt_rc_count`, `rt_rc_set_count`), and a runtime test checks that
+a retain and a release leave every bit above the count alone.
 
 The allocation site, meaning the file and line of the constructor or the
 collection literal, comes from the type pointer. **Each allocation site gets
@@ -95,6 +112,30 @@ walk and method table, plus a site id and a `canon` pointer to the real type.
 That costs static data only, about 100 B per site and nothing per object.
 Type identity checks in the runtime (`o->ty == &rt_lst_ref_type`, and a few
 others) switch to `o->ty->canon`.
+
+As built:
+
+- A site is a **(type, source line)** pair: the line of the expression that
+  makes the object (the statement's, unless the expression has a line of
+  its own). The lowering puts an `Inst::Site` before each allocation in a
+  block whose line differs from the last one; the emitter turns each user
+  type's (type, line) pair into a static `ti_T<n>_s<slot>` and numbers the
+  slots 1, 2, ... in emission order, so the C is the same on every run.
+- The runtime's own objects -- a `str` from `concat`, a `List` from a
+  literal, the `bytes` a primitive pushes -- are made inside the runtime,
+  from a canonical record. Emitted code calls `rt_hw_at(line)` before each
+  runtime call that may allocate (`ir::rt_call_allocates` lists the ones
+  that cannot), and `rt_alloc` swaps the canonical record for the line's own,
+  made the first time that line allocates that type and published once. A
+  thread caches its last one, so a loop pays a compare.
+- The file of a site is the entry file by its own name, a module of the
+  program by its path from the entry file's directory (`ui/panel.m31`), and
+  a module of the standard library as `net/http.m31` -- never a path on the
+  compiling machine, so the emitted C is the same everywhere.
+- TypeInfo grew `canon`, `site`, `loc`, `name` and a table of reference
+  fields (name, offset, variant tag) for trace. The 18 identity checks in
+  `runtime/` were converted; a gate (`no raw type identity checks`) refuses
+  a comparison of `ty` itself with a type's address.
 
 **Per-object memory cost: 0 bytes.**
 
@@ -110,6 +151,31 @@ For every allocation site `s`:
 
 The current minute is a global that the scheduler tick updates. Reading the
 clock costs one load, never a system call.
+
+As built (`runtime/heapwatch.c`):
+
+- **`live` is a timing wheel, not a sparse table.** Per site, 7 levels of 8
+  cells: level 0 holds the last 8 minutes one by one, level L cells of 8^L
+  minutes, and level 6 reaches past the 20-bit birth field. When a shard's
+  clock moves on, a cell about to be reused hands its count up a level --
+  O(sites) once a minute, never O(objects). It answers "how old are the
+  survivors" to within a factor of 8 for old objects and exactly for recent
+  ones, in 224 bytes per site and shard, with nothing to grow or reclaim.
+- **`lifetime`** is 16 buckets of an object's age at death in minutes: 0 for
+  under a minute, then `floor(log2 age) + 1`. A site's p99 is the upper
+  bound of the bucket where 99 % of its deaths are reached.
+- **Shards** are per OS thread (a carrier runs many green threads), each
+  written only by its owner with plain loads and stores (relaxed atomics,
+  which compile to exactly that). An object freed on another shard is
+  subtracted there at whatever level that shard holds its birth minute; the
+  reader merges each cell into the coarser block of any shard that contains
+  it, so the +1 and the -1 always meet (`hw_sum_slot`, and the same in
+  `src/tools/heapwatch.rs`). Shards are carriers + 8; a thread past the last
+  shares it under a lock.
+- **The tick** is the scheduler's monitor thread, which every compiled
+  program already runs and which wakes every 5 ms: it advances the minute,
+  stamps the ledger's wall clock once a second, and scans for suspects once a
+  minute. `M31_HEAPWATCH_MINUTE_MS` shortens the minute for tests.
 
 ### Suspects, with no configuration
 
@@ -147,15 +213,45 @@ site's normal lifetime and flags the objects that fall far outside it.
 - A tool reads both files from a dead or a live process:
 
   ```
-  $ m31 heapwatch server.81234.ledger
-  SUSPECT  Conn     net/server.m31:40    37 alive > 40m   (p99 lifetime 31s)
-  SUSPECT  Session  app/session.m31:12    5 alive > 2h    (p99 lifetime 4m)
-  forever  Config   app/config.m31:8      1 alive, never freed
-  epoch "request" closed with leaks 112 times; last: 2 Conn @ net/server.m31:40
+  $ m31c -heapwatch server.81234.ledger
+  server (pid 81234), not running -- it crashed or was killed; last seen 3m ago; up 2h
+  SUSPECT  Conn     net/server.m31:40    37 alive > 40m (limit 10m, p99 lifetime <1m)
+  SUSPECT  Session  app/session.m31:12    5 alive > 2h (limit 40m, p99 lifetime 4m)
+  never    Cache    app/cache.m31:5      12 alive, never freed, oldest > 2h
+  forever  Config   app/config.m31:8      1 alive
+  epoch "request" closed with leaks 112 times; last at minute 118: 2 Conn @ net/server.m31:40
   ```
 
 So after a redeploy, the old process's ledger is still on disk, and so is its
 answer.
+
+As built:
+
+- The tool is a command of the compiler, `m31c -heapwatch <ledger|pid>
+  [--all]`, in the CLI grammar every m31 program shares
+  (docs/cli-conventions.md: `-word` is a command, so `m31 heapwatch` became
+  `m31c -heapwatch`). Given a pid it looks in `$M31_HEAPWATCH_DIR` and in
+  every `m31-heapwatch-*` under the temporary directory. It says whether
+  the process is running, exited cleanly, or died (`kill -0`), and `--all`
+  lists every site with objects, not only the ones worth a look. Its
+  arithmetic is runtime/heapwatch.c's, on plain file reads.
+- The directory is `$M31_HEAPWATCH_DIR`, else `${TMPDIR:-/tmp}/m31-heapwatch-
+  <uid>` (mode 0700). A directory the program cannot write means a ledger
+  in anonymous memory: everything is still counted, there is just nothing
+  to read later.
+- The file is laid out as a control page, a header, a slot table, the
+  trace flags, a string area, an epoch table and the shards; the header
+  ends with a magic number written last, and carries a version the tool
+  checks. Its size is mostly sparse: ~20 MB apparent for a program with a
+  few hundred sites on 12 cores, ~20-100 KB actually written.
+- **A clean exit with nothing reported removes the files** (an atexit
+  handler, which a trap, a signal or `kill -9` never reach -- exactly when
+  they must stay). `M31_HEAPWATCH_KEEP=1` keeps them anyway. At start, a
+  program removes the ledgers of dead processes of the same name beyond the
+  newest 8 (open question 4).
+- Everything above is mapped `MAP_SHARED` and written with plain stores; no
+  exit hook is needed for the counts to be there after `kill -9`, which
+  `runtime/tests/heapwatch_test.sh` checks.
 
 ### Long-lived on purpose
 
@@ -177,6 +273,19 @@ needs no new bit. It is still counted, still listed (`forever  Texture
 assets.m31:40  812 alive`), and still checked by epoch close and trace --
 being marked long-lived exempts it from age and nothing else. A forever
 object that is freed is simply uncounted; that is not an error.
+
+As built: `lib/heapwatch.m31` declares `pub T forever<T>(T value)`, which
+calls a builtin only the standard library can name, `__forever` -- a `prim`
+cannot be generic (docs/stdlib-seam.md §2) -- and returns its argument; a
+value that is not an object (an int, a value enum) passes through untouched.
+`M31_AGE` entries are separated by commas; the file named by
+`M31_HEAPWATCH_CONF` holds one per line, with `#` comments. A duration is a
+number and `s`, `m`, `h` or `d`, rounded up to the minute; the most specific
+entry wins (a site's over its type's). A malformed entry is reported once on
+stderr and ignored. A type is named as the program spells it (`Conn`,
+`net.Conn`), and an imported type by its bare name too; a site as
+`Type@file.m31:line`, the file matching the ledger's or its last path
+components.
 
 A level, a scene or a match that *ends* is better described as an epoch than
 as an age: `epoch "level" { play(level); }` reports everything the level
@@ -496,20 +605,50 @@ runtime for raw type checks and raw count reads.
 
 Each phase is measured in qrazil/benchmark before the next starts.
 
+## Configuration
+
+Everything is read once, at start, from the environment; nothing needs a
+rebuild.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `M31_HEAPWATCH` | on | `0` turns heap watch off: nothing counted, no file |
+| `M31_HEAPWATCH_DIR` | `${TMPDIR:-/tmp}/m31-heapwatch-<uid>` | where the ledger, `.suspects` and `.trace` go |
+| `M31_HEAPWATCH_KEEP` | off | keep the files after a clean exit with nothing to report |
+| `M31_HEAPWATCH_MIN` | 10 | the suspect floor, in minutes |
+| `M31_HEAPWATCH_FACTOR` | 10 | a suspect is older than FACTOR x the site's p99 lifetime |
+| `M31_AGE` | none | `Type:forever`, `Type:10m`, `Type@file.m31:40:forever`, comma-separated |
+| `M31_HEAPWATCH_CONF` | none | a file of `M31_AGE` entries, one per line, `#` comments |
+| `M31_HEAPWATCH_MINUTE_MS` | 60000 | how long a minute is -- for tests, so "10 minutes" passes in a second |
+
 ## Open questions
 
-1. On by default in release builds, or behind `M31_HEAPWATCH=1`? The
-   requirement argues for default on.
+Answered while building (each the simplest sound option; the owner may
+overrule any of them):
+
+1. **On by default.** Every compiled program counts, release builds
+   included, and `M31_HEAPWATCH=0` turns it off. The cost section has the
+   measurement this rests on.
+3. **`F = 10` and a 10-minute floor**, both configurable
+   (`M31_HEAPWATCH_FACTOR`, `M31_HEAPWATCH_MIN`). A site with no deaths has no
+   baseline and is "never freed", not a suspect, unless `M31_AGE` gives it a
+   limit.
+4. **Retention: a clean exit with nothing reported leaves nothing**, and at
+   start a program removes ledgers of dead processes of its own name beyond
+   the newest 8. Days were rejected: a crash loop makes many ledgers in
+   minutes, and a count bounds the disk where an age does not.
+7. **`heapwatch.forever(x)`, a stdlib call**, generic, returning `x`. A
+   keyword on the allocation would be grammar for something configuration
+   already does by type and by site.
+
+Still open:
+
 2. Explicit `epoch` blocks: the keyword and its spelling, or only spawned
    tasks at first?
-3. Suspect thresholds: is `F = 10` × p99 with a 10-minute floor right?
-4. Retention for ledgers of dead pids: keep the last N, or N days?
 5. Test builds: should an epoch that closes with leaks **trap**, so CI fails
    on any leaked cycle?
 6. Should a stdlib API expose the ledger, so a server can serve it as
    metrics (such as `/debug/heap`)?
-7. The `heapwatch.forever` spelling: a stdlib call, or a keyword on the
-   allocation?
 8. Trace `--depth` default (3) and edge cap (1 M).
 9. Who can turn trace on for a running process: anyone who can write the
    ledger file (its permissions), or a separate check?

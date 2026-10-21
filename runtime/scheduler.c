@@ -1782,6 +1782,13 @@ static void *monitor_main(void *argp) {
             try_handoff(s, c, since);
         }
 
+        /* Heap watch's tick (runtime/heapwatch.c): the program's minute
+         * clock, the control page, the suspect scan. This thread is the one
+         * every compiled program already runs that wakes on a timer, so it
+         * costs no thread of its own; a call that finds nothing to do is a
+         * clock read and a compare. */
+        rt_hw_tick();
+
         struct timespec ts;
         ts.tv_sec = (time_t)(s->monitor_poll_ns / 1000000000ull);
         ts.tv_nsec = (long)(s->monitor_poll_ns % 1000000000ull);

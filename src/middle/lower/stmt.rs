@@ -21,6 +21,12 @@ impl Lowerer {
     }
 
     fn lower_stmt(&mut self, s: &Stmt) -> Result<(), Diag> {
+        // The line an allocation in this statement is counted against, by
+        // heap watch, unless an expression in it is on a line of its own.
+        let line = super::stmt_span(s).line;
+        if line > 0 {
+            self.cur_line = line;
+        }
         match s {
             Stmt::Decl {
                 ty,

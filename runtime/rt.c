@@ -69,8 +69,21 @@
 #include "scheduler.h"
 #include "reactor.h"
 
+/* Heap watch's two hooks into the object lifecycle (runtime/heapwatch.c,
+ * #included at the end of this file): the header bits a new object starts
+ * with, and the accounting for one about to be freed. */
+static long hw_alloc(const TypeInfo **typ);
+static void hw_free(Obj *o);
+
+__attribute__((cold, noinline)) static _Noreturn void rc_overflow_trap(void) {
+    rt_trap("reference count overflow: more than 8589934591 references to one object");
+}
+
 void rc_inc(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
+    /* The count is 33 bits (rt.h); past them a retain would carry into the
+     * birth minute, so it traps instead -- never wraps. */
+    if (__builtin_expect((o->rc & RC_COUNT) == RC_COUNT, 0)) rc_overflow_trap();
     o->rc++;
 }
 
@@ -145,6 +158,7 @@ static void rc_release(Obj *o) {
     if (o->ty != NULL && o->ty->drop != NULL) {
         o->ty->drop(o);
     }
+    hw_free(o);
     RC_TRACK_FREE();
     free(o);
 }
@@ -209,11 +223,11 @@ __attribute__((cold)) static _Noreturn void rt_busy_gone_trap(long rc) {
 
 void rc_dec(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
-    RC_ASSERT((o->rc & ~RC_FLAGS) > 0, "decrement below zero");
-    /* The flags sit above the count (rt.h), so the count is what is below
-     * them: a frozen object is freed like any other when its last reference
-     * goes. */
-    if ((--o->rc & ~RC_FLAGS) != 0) return;
+    RC_ASSERT((o->rc & RC_COUNT) > 0, "decrement below zero");
+    /* The flags and heap watch's fields sit above the count (rt.h), so the
+     * count is the low bits alone: a frozen object is freed like any other
+     * when its last reference goes. */
+    if ((--o->rc & RC_COUNT) != 0) return;
     /* Letting go of the last reference to a collection the runtime is in the
      * middle of sorting or probing would free the buffer under it. The
      * callback that did it -- dropping the field the receiver was read from,
@@ -333,7 +347,7 @@ typedef struct {
 
 static void held_visit(void *ctx, Obj *c) {
     Held **hp = (Held **)ctx;
-    if (c == NULL || (c->rc & RC_FROZEN) != 0 || c->ty == &rt_str_type) return;
+    if (c == NULL || (c->rc & RC_FROZEN) != 0 || c->ty->canon == &rt_str_type) return;
     Held *h = *hp;
     if (h->len == h->cap) {
         int64_t cap = h->cap * 2;
@@ -348,7 +362,7 @@ static void held_visit(void *ctx, Obj *c) {
 
 int64_t rt_freeze_enter(Obj *o) {
     /* RC_IMMORTAL has every bit set, so an immortal object is frozen here. */
-    if ((o->rc & RC_FROZEN) != 0 || o->ty == &rt_str_type) return 0;
+    if ((o->rc & RC_FROZEN) != 0 || o->ty->canon == &rt_str_type) return 0;
     o->rc |= RC_HELD_BITS;
     if (o->ty == NULL || o->ty->walk == NULL) return 1;
     Held *h = malloc(sizeof(Held) + 16 * sizeof(Obj *));
@@ -378,7 +392,8 @@ void rt_freeze_leave(Obj *o, int64_t took) {
     free(h);
 }
 
-const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                                &rt_str_type, 0, 0, "str", NULL, 0 };
 
 Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty) {
     Obj *o = malloc(size);
@@ -391,7 +406,9 @@ Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty) {
 Obj *rt_alloc(size_t size, const TypeInfo *ty) {
     Obj *o = malloc(size);
     if (o == NULL) rt_trap("out of memory");
-    o->rc = 1;
+    /* A count of 1, plus heap watch's birth minute and epoch; `ty` becomes
+     * the record of the site the program is at, if it was a type's own. */
+    o->rc = hw_alloc(&ty);
     o->ty = ty;
     RC_TRACK_ALLOC();
     return o;
@@ -879,13 +896,17 @@ static void lst_walk_refs(Obj *o, VisitFn visit, void *ctx) {
     }
 }
 
-const TypeInfo rt_arr_val_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+const TypeInfo rt_arr_val_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                                   &rt_arr_val_type, 0, 0, "Array", NULL, 0 };
 const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL, arr_walk_refs, NULL, NULL,
-                                   NULL, NULL, NULL };
+                                   NULL, NULL, NULL,
+                                   &rt_arr_ref_type, 0, 0, "Array", NULL, 0 };
 const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL, NULL, NULL, NULL,
-                                   NULL, NULL, NULL };
+                                   NULL, NULL, NULL,
+                                   &rt_lst_val_type, 0, 0, "List", NULL, 0 };
 const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL, lst_walk_refs, NULL, NULL,
-                                   NULL, NULL, NULL };
+                                   NULL, NULL, NULL,
+                                   &rt_lst_ref_type, 0, 0, "List", NULL, 0 };
 
 
 /* Bytes for `n` slots plus a `head` header, trapping rather than wrapping.
@@ -961,11 +982,17 @@ Obj *rt_list_new(bool elems_are_refs) {
  * serves both. The compiler knows which it has; the runtime does not need
  * to, except to find the elements. */
 static bool is_list(const Obj *o) {
-    return o->ty == &rt_lst_val_type || o->ty == &rt_lst_ref_type;
+    return rt_is_list(o);
 }
 
 static int64_t *slots(Obj *o) {
     return is_list(o) ? ((Lst *)o)->data : ((Arr *)o)->data;
+}
+
+/* Whether a List's or an Array's elements are references. */
+static bool seq_holds_refs(const Obj *o) {
+    const TypeInfo *c = o->ty->canon;
+    return c == &rt_arr_ref_type || c == &rt_lst_ref_type;
 }
 
 /* rt_len_of, rt_index_get and rt_index_set moved to rt.h as `static inline`
@@ -1015,7 +1042,7 @@ Obj *rt_list_repeat(int64_t n, int64_t fill, bool elems_are_refs) {
  * which is a question only the program can answer. */
 Obj *rt_seq_clone(Obj *o) {
     int64_t n = rt_len_of(o);
-    bool refs = o->ty == &rt_arr_ref_type || o->ty == &rt_lst_ref_type;
+    bool refs = seq_holds_refs(o);
     int64_t *src = slots(o);
 
     if (is_list(o)) {
@@ -1047,7 +1074,7 @@ Obj *rt_seq_clone(Obj *o) {
 Obj *rt_seq_slice(Obj *o, int64_t from, int64_t to) {
     int64_t n = rt_len_of(o);
     if (from < 0 || to < from || to > n) rt_trap("slice range out of bounds");
-    bool refs = o->ty == &rt_arr_ref_type || o->ty == &rt_lst_ref_type;
+    bool refs = seq_holds_refs(o);
     int64_t *src = slots(o);
     int64_t m = to - from;
 
@@ -1344,7 +1371,8 @@ static void bytes_drop(Obj *o) {
 
 /* No walk: a byte is not a reference, so a bytes is a leaf at a thread
  * boundary and rt_check_unique answers it from the count alone. */
-const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                                  &rt_bytes_type, 0, 0, "bytes", NULL, 0 };
 
 /* A value going INTO a bytes. Truncating 256 to 0 would be a silent wrong
  * answer in exactly the code -- codecs, checksums -- least able to notice. */
@@ -1702,7 +1730,8 @@ static void map_walk(Obj *o, VisitFn visit, void *ctx) {
     }
 }
 
-const TypeInfo rt_map_type = { map_drop, NULL, map_walk, NULL, NULL, NULL, NULL, NULL };
+const TypeInfo rt_map_type = { map_drop, NULL, map_walk, NULL, NULL, NULL, NULL, NULL,
+                                &rt_map_type, 0, 0, "Map", NULL, 0 };
 
 static uint64_t hash_int(int64_t x) {
     /* splitmix64's finaliser: cheap and mixes the low bits, which matters
@@ -2234,7 +2263,8 @@ static void chan_drop(Obj *o) {
 }
 
 static const TypeInfo rt_chan_type = { chan_drop, NULL, NULL, NULL, NULL,
-                                       NULL, NULL, NULL };
+                                       NULL, NULL, NULL,
+                                       &rt_chan_type, 0, 0, "Chan", NULL, 0 };
 
 Chan *rt_chan_new(int64_t capacity) {
     if (capacity < 1) rt_trap("channel capacity must be at least 1");
@@ -2521,7 +2551,7 @@ static void reach_grow(Reach *r) {
 /* Record one reference into `o`, and queue it for walking the first time. */
 static void reach_add(Reach *r, Obj *o) {
     if (o == NULL || o->rc == RC_IMMORTAL) return;
-    if (r->freezing && (rc_permanent(o) || o->ty == &rt_str_type)) return;
+    if (r->freezing && (rc_permanent(o) || o->ty->canon == &rt_str_type)) return;
     if (r->cap == 0 || (r->len + 1) * 10 >= r->cap * 7) reach_grow(r);
 
     int64_t mask = r->cap - 1;
@@ -2566,7 +2596,7 @@ static bool reach_private(Reach *r, Obj *o) {
     }
     for (int64_t i = 0; i < r->cap; i++) {
         if (r->keys[i] == NULL) continue;
-        if ((r->keys[i]->rc & ~RC_FLAGS) != r->cnt[i]) return false;
+        if ((r->keys[i]->rc & RC_COUNT) != r->cnt[i]) return false;
     }
     return true;
 }
@@ -2585,7 +2615,7 @@ void rt_check_unique(Obj *o) {
      * (rt.h): a frozen value crosses under the same rule as any other,
      * because its count is still not atomic. */
     if (o->ty == NULL || o->ty->walk == NULL) {
-        if ((o->rc & ~RC_FLAGS) != 1) {
+        if ((o->rc & RC_COUNT) != 1) {
             rt_trap("value crossing a thread boundary is still referenced "
                     "elsewhere; clone() it, or drop the other reference first");
         }
@@ -2675,7 +2705,7 @@ static Obj *copy_obj(CopyMap *m, Obj *o);
 Obj *rt_copy_child(void *ctx, Obj *c) {
     CopyMap *m = (CopyMap *)ctx;
     if (c == NULL) return NULL;
-    if (rc_permanent(c) || c->ty == &rt_str_type) {
+    if (rc_permanent(c) || c->ty->canon == &rt_str_type) {
         rc_inc(c);
         return c;
     }
@@ -2700,34 +2730,35 @@ static void copy_slots(CopyMap *m, int64_t *dst, const int64_t *src, int64_t n, 
  * Recursive, so a very deep chain of objects is bounded by the C stack. */
 static Obj *copy_obj(CopyMap *m, Obj *o) {
     const TypeInfo *ty = o->ty;
-    if (ty == &rt_arr_val_type || ty == &rt_arr_ref_type) {
+    const TypeInfo *kind = ty->canon;
+    if (kind == &rt_arr_val_type || kind == &rt_arr_ref_type) {
         const Arr *a = (const Arr *)o;
         Arr *n = (Arr *)rt_alloc(slot_bytes(sizeof(Arr), a->len), ty);
         n->len = a->len;
         for (int64_t i = 0; i < a->len; i++) n->data[i] = 0;
         rt_copy_register(m, o, (Obj *)n);
-        copy_slots(m, n->data, a->data, a->len, ty == &rt_arr_ref_type);
+        copy_slots(m, n->data, a->data, a->len, kind == &rt_arr_ref_type);
         return (Obj *)n;
     }
-    if (ty == &rt_lst_val_type || ty == &rt_lst_ref_type) {
+    if (kind == &rt_lst_val_type || kind == &rt_lst_ref_type) {
         const Lst *l = (const Lst *)o;
-        Lst *n = (Lst *)rt_list_new(ty == &rt_lst_ref_type);
+        Lst *n = (Lst *)rt_list_new(kind == &rt_lst_ref_type);
         if (l->len > 0) {
             n->data = calloc((size_t)l->len, sizeof(int64_t));
             if (n->data == NULL) rt_trap("out of memory");
             n->cap = l->len;
         }
         rt_copy_register(m, o, (Obj *)n);
-        copy_slots(m, n->data, l->data, l->len, ty == &rt_lst_ref_type);
+        copy_slots(m, n->data, l->data, l->len, kind == &rt_lst_ref_type);
         n->len = l->len;
         return (Obj *)n;
     }
-    if (ty == &rt_bytes_type) {
+    if (kind == &rt_bytes_type) {
         Obj *n = rt_bytes_clone(o);
         rt_copy_register(m, o, n);
         return n;
     }
-    if (ty == &rt_map_type) {
+    if (kind == &rt_map_type) {
         const Map *src = (const Map *)o;
         Map *n = (Map *)rt_map_new(src->key, src->key_is_ref, src->val_is_ref);
         rt_copy_register(m, o, (Obj *)n);
@@ -2789,12 +2820,13 @@ static void refuse_resource(const Obj *o) {
 }
 
 Obj *rt_snapshot(Obj *o) {
-    if (rc_permanent(o) || o->ty == &rt_str_type) return o;
+    if (rc_permanent(o) || o->ty->canon == &rt_str_type) return o;
     if (o->ty == NULL || o->ty->walk == NULL) {
         refuse_resource(o);
         /* A leaf a block froze reads as more than 1 here, its flags being
-         * above the count, so it takes the copy below. */
-        if (o->rc == 1) {
+         * above the count, so it takes the copy below. Heap watch's fields
+         * are not flags and do not count. */
+        if ((o->rc & (RC_COUNT | RC_FLAGS)) == 1) {
             o->rc |= RC_FROZEN;
             return o;
         }
@@ -4008,3 +4040,7 @@ void rt_term_restore(void) {
     if (fd >= 0) sys_tcset(fd, &t);
 }
 /* ---- end terminal primitives ------------------------------------------- */
+
+/* Heap watch (docs/heap-watch-design.md). Last, because it reads the
+ * runtime's own types and helpers defined above. */
+#include "heapwatch.c"

@@ -48,7 +48,7 @@ pub(super) fn emit_type_structs(o: &mut String, m: &Module) {
     }
 }
 
-pub(super) fn emit_type_support(o: &mut String, m: &Module) {
+pub(super) fn emit_type_support(o: &mut String, m: &Module, sites: &heapwatch::Sites) {
     // Function prototypes before the drop functions, which call a type's
     // destructor, and before the TypeInfos, whose vtables name methods.
     if !m.types.is_empty() {
@@ -82,8 +82,10 @@ pub(super) fn emit_type_support(o: &mut String, m: &Module) {
             // under whoever holds it. That is a bug with no safe
             // continuation, so it traps (docs/destructors-decision.md).
             //
-            // The plain store would also clear the frozen bit, but it never
-            // has one to clear: a value that owns a resource can never be
+            // Only the count is set (rt_rc_set_count): heap watch's birth
+            // minute and epoch beside it must survive, because the release
+            // that follows reads them. The frozen bit is never set here
+            // anyway: a value that owns a resource can never be
             // frozen for good -- the compiler refuses the `const` and
             // rt_snapshot traps on what it cannot see -- and a `const` block
             // that froze one keeps it reachable until it thaws it, so no
@@ -97,17 +99,17 @@ pub(super) fn emit_type_support(o: &mut String, m: &Module) {
             // this object. See runtime/rt.c, "a destructor's body is
             // top-level code", and docs/destructors-decision.md.
             writeln!(o, "    RcDrain rcd;").unwrap();
-            writeln!(o, "    o->rc = 1;").unwrap();
+            writeln!(o, "    rt_rc_set_count(o, 1);").unwrap();
             writeln!(o, "    rt_drop_enter(&rcd);").unwrap();
             writeln!(o, "    {}(o);", c_name(d)).unwrap();
             writeln!(o, "    rt_drop_leave(&rcd);").unwrap();
             writeln!(
                 o,
-                "    if (o->rc != 1) rt_trap(\"object resurrected in its destructor: \
+                "    if (rt_rc_count(o) != 1) rt_trap(\"object resurrected in its destructor: \
                  `drop` stored `this` somewhere that outlives it\");"
             )
             .unwrap();
-            writeln!(o, "    o->rc = 0;").unwrap();
+            writeln!(o, "    rt_rc_set_count(o, 0);").unwrap();
         }
         if !t.needs_drop() {
             writeln!(o, "}}").unwrap();
@@ -231,11 +233,26 @@ pub(super) fn emit_type_support(o: &mut String, m: &Module) {
             None => "NULL".to_string(),
         };
         let reserved = format!("{}, {}, {}", named(&t.cmp), named(&t.hash), named(&t.eq));
+        // Heap watch's part (rt.h, TypeInfo): the record itself as `canon`,
+        // no slot, the name, and the reference fields trace names slots by.
+        let nfields = heapwatch::emit_field_table(o, i, t);
+        let fields = if nfields == 0 {
+            "NULL".to_string()
+        } else {
+            format!("hwf_T{i}")
+        };
+        let tail = format!("{}, {fields}, {nfields}", heapwatch::name_literal(t));
+        let vtable = if m.iface_slots.is_empty() {
+            "NULL".to_string()
+        } else {
+            format!("vt_T{i}")
+        };
+        let body = format!("{drop}, {vtable}, {walk}, copy_T{i}, {resource}, {reserved}");
         if m.iface_slots.is_empty() {
             writeln!(
                 o,
                 "static const TypeInfo ti_T{i} __attribute__((unused)) = \
-                 {{ {drop}, NULL, {walk}, copy_T{i}, {resource}, {reserved} }};"
+                 {{ {body}, &ti_T{i}, 0, 0, {tail} }};"
             )
             .unwrap();
         } else {
@@ -256,10 +273,11 @@ pub(super) fn emit_type_support(o: &mut String, m: &Module) {
             writeln!(
                 o,
                 "static const TypeInfo ti_T{i} __attribute__((unused)) = \
-                 {{ {drop}, vt_T{i}, {walk}, copy_T{i}, {resource}, {reserved} }};"
+                 {{ {body}, &ti_T{i}, 0, 0, {tail} }};"
             )
             .unwrap();
         }
+        heapwatch::emit_site_infos(o, sites, i, &tail, &body);
     }
     if !m.types.iter().all(TypeDef::has_no_object) {
         o.push('\n');

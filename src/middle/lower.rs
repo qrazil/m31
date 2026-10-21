@@ -115,6 +115,9 @@ struct BlockBuf {
     params: Vec<Value>,
     insts: Vec<Inst>,
     term: Option<Term>,
+    /// The `Inst::Site` last pushed into this block, so the next allocation
+    /// at the same line needs none.
+    last_loc: Option<u32>,
 }
 
 /// One `case V(T x):` binding of a match arm that is still being lowered.
@@ -320,6 +323,12 @@ pub struct Lowerer {
     entry_module: String,
     /// Set while the entry body is the function being lowered.
     in_entry: bool,
+    /// Heap watch: the source line being lowered, and every (file, line)
+    /// an allocation was made at so far, numbered for `Inst::Site`
+    /// (`ir::Module::locs`). Entry 0 is "unknown".
+    cur_line: u32,
+    locs: Vec<(String, u32)>,
+    loc_ids: HashMap<(String, u32), u32>,
 }
 
 /// Every builtin function, whether it lives in `sigs` (`concat`) or is
@@ -874,6 +883,9 @@ impl Lowerer {
             entry_locals: std::collections::HashSet::new(),
             entry_module: String::new(),
             in_entry: false,
+            cur_line: 0,
+            locs: vec![("?".to_string(), 0)],
+            loc_ids: HashMap::new(),
         }
     }
 
@@ -998,6 +1010,8 @@ impl Lowerer {
                 hash: None,
                 eq: None,
                 resource: None,
+                // Filled in once every type is known, like the vtable.
+                display: String::new(),
             });
             self.distinct_base.push(t.distinct_base);
             self.iface_methods.push(t.methods.clone());
@@ -1322,6 +1336,22 @@ impl Lowerer {
             }
         }
 
+        // What heap watch calls each type: the entry file's spelling, as
+        // for `resource` above. A synthesised type has no name a reader
+        // wrote, so it is called by what it is.
+        let saved = std::mem::replace(&mut self.cur_module, p.module.clone());
+        for i in 0..self.typedefs.len() {
+            let name = self.typedefs[i].name.clone();
+            self.typedefs[i].display = if name.starts_with("__lam$") {
+                "lambda".to_string()
+            } else if name.starts_with("__ref$") {
+                "function".to_string()
+            } else {
+                self.show_name(&name)
+            };
+        }
+        self.cur_module = saved;
+
         // Every `prim`'s runtime symbol, by the same name-transform rule
         // `lower_call` applies at its own call sites (docs/stdlib-seam.md
         // §2) -- computed once, here, rather than re-derived ad hoc wherever
@@ -1358,6 +1388,7 @@ impl Lowerer {
             iface_slots: self.iface_slots,
             prim_targets,
             natives,
+            locs: self.locs,
         })
     }
 
@@ -1374,6 +1405,7 @@ impl Lowerer {
             params: Vec::new(),
             insts: Vec::new(),
             term: None,
+            last_loc: None,
         });
         id
     }
@@ -1391,7 +1423,35 @@ impl Lowerer {
             self.blocks[self.cur].term.is_none(),
             "instruction after terminator"
         );
+        // Heap watch: every allocation is preceded, in its own block, by
+        // the line it is made at (`Inst::Site`).
+        let allocates = match &i {
+            Inst::Alloc { .. } | Inst::EnumClone { .. } => true,
+            Inst::EnumPack { tid, .. } => !self.typedefs[*tid as usize].is_value,
+            Inst::Call { func, .. } => ir::rt_call_allocates(func),
+            _ => false,
+        };
+        if allocates {
+            let loc = self.loc_here();
+            if self.blocks[self.cur].last_loc != Some(loc) {
+                self.blocks[self.cur].last_loc = Some(loc);
+                self.blocks[self.cur].insts.push(Inst::Site { loc });
+            }
+        }
         self.blocks[self.cur].insts.push(i);
+    }
+
+    /// The number of the line being lowered, in the module being lowered
+    /// (`ir::Module::locs`, which names the module's file later).
+    fn loc_here(&mut self) -> u32 {
+        let key = (self.cur_module.clone(), self.cur_line);
+        if let Some(&id) = self.loc_ids.get(&key) {
+            return id;
+        }
+        let id = self.locs.len() as u32;
+        self.locs.push(key.clone());
+        self.loc_ids.insert(key, id);
+        id
     }
 
     fn terminate(&mut self, t: Term) {

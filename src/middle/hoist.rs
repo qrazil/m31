@@ -204,7 +204,12 @@ fn inst_dsts(i: &Inst) -> Vec<Value> {
         | LoadField { dst, .. } => vec![*dst],
         Call { dst, .. } | CallIface { dst, .. } => dst.iter().copied().collect(),
         ParseInto { ok, dst, .. } => vec![*ok, *dst],
-        EnumTake { .. } | StoreField { .. } | Spawn { .. } | RcInc { .. } | RcDec { .. } => {
+        EnumTake { .. }
+        | StoreField { .. }
+        | Spawn { .. }
+        | RcInc { .. }
+        | RcDec { .. }
+        | Site { .. } => {
             vec![]
         }
     }

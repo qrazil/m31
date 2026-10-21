@@ -9,6 +9,8 @@ pub(super) fn emit_inst(
     types: &[TypeDef],
     i: &Inst,
     ffi: &Ffi,
+    sites: &super::heapwatch::Sites,
+    loc: u32,
 ) {
     match i {
         Inst::FConst { dst, val } => {
@@ -98,6 +100,11 @@ pub(super) fn emit_inst(
                 // by being part of the same text; see native.rs.
                 native::emit_native_call(o, n, func, dst.as_ref(), args, is_ffi);
                 return;
+            }
+            // Heap watch: an object the runtime makes during this call is
+            // counted against this line (rt.h, rt_hw_at).
+            if crate::middle::ir::rt_call_allocates(func) {
+                writeln!(o, "    rt_hw_at({loc});").unwrap();
             }
             if is_ffi {
                 writeln!(o, "    rt_enter_blocking();").unwrap();
@@ -192,7 +199,8 @@ pub(super) fn emit_inst(
             if types[*tid as usize].is_immortal_singleton() {
                 writeln!(o, "    {dst} = &imm_T{tid}.hdr;").unwrap();
             } else {
-                writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &ti_T{tid});").unwrap();
+                let ti = sites.ti(*tid, loc);
+                writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &{ti});").unwrap();
             }
         }
         Inst::EnumPack {
@@ -234,7 +242,8 @@ pub(super) fn emit_inst(
                 writeln!(o, "    {dst} = &imm_T{tid}_v{tag}.hdr;").unwrap();
                 return;
             }
-            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &ti_T{tid});").unwrap();
+            let ti = sites.ti(*tid, loc);
+            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &{ti});").unwrap();
             writeln!(o, "    ((T{tid} *){dst})->tag = {tag};").unwrap();
             for (k, a) in args.iter().enumerate() {
                 writeln!(o, "    ((T{tid} *){dst})->u.v{tag}.p{k} = {a};").unwrap();
@@ -279,7 +288,8 @@ pub(super) fn emit_inst(
         // it, the same way the drop and walk functions do.
         Inst::EnumClone { dst, src, tid } => {
             let t = &types[*tid as usize];
-            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &ti_T{tid});").unwrap();
+            let ti = sites.ti(*tid, loc);
+            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &{ti});").unwrap();
             writeln!(o, "    ((T{tid} *){dst})->tag = ((T{tid} *){src})->tag;").unwrap();
             if t.variants.iter().any(|v| !v.payload.is_empty()) {
                 // One assignment: the union is whatever the tag says it is,
@@ -344,6 +354,8 @@ pub(super) fn emit_inst(
         }
         Inst::RcInc { val } => writeln!(o, "    rc_inc({val});").unwrap(),
         Inst::RcDec { val } => writeln!(o, "    rc_dec({val});").unwrap(),
+        // Read by emit_func, which passes the line on as `loc`.
+        Inst::Site { .. } => {}
     }
     let _ = f;
 }

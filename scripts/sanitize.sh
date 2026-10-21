@@ -28,6 +28,9 @@ export M31C_FFITEST=1
 LANGC=${LANGC:-./target/debug/$LANG_BIN}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+# A program that traps leaves its heap watch ledger behind on purpose
+# (docs/heap-watch-design.md); the corpus's go with the scratch directory.
+export M31_HEAPWATCH_DIR="$WORK/heapwatch"
 
 SAN="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
 printf 'leak:rt_alloc_immortal\nleak:rt_chan_new\n' >"$WORK/lsan.supp"

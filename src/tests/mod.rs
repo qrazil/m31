@@ -42,6 +42,7 @@ mod deps;
 mod destructors;
 mod diagnostics;
 mod generics;
+mod heapwatch;
 mod init;
 mod interfaces;
 mod lambdas;

@@ -1,0 +1,40 @@
+// heapwatch.forever(x) returns x, marked as living long on purpose. The mark
+// changes only what the ledger reports: the object is freed when its last
+// reference goes, its destructor runs then, and a value that is not an object
+// passes through untouched (docs/heap-watch-design.md, "Long-lived on
+// purpose").
+import heapwatch;
+
+type Texture {
+    str name;
+}
+
+void Texture.drop() {
+    print("drop " + name);
+}
+
+enum Shade {
+    Light;
+    Dark(int);
+}
+
+Texture grass = heapwatch.forever(Texture("grass"));
+print(grass.name);
+List<Texture> all = heapwatch.forever([Texture("sand"), Texture("rock")]);
+print(all.size());
+print(heapwatch.forever(41) + 1);
+print(heapwatch.forever("text"));
+Shade shade = heapwatch.forever(Shade.Dark(3));
+match (shade) {
+    case Light: {
+        print("light");
+    }
+    case Dark(int level): {
+        print(level);
+    }
+}
+// Marking twice is marking once.
+Texture again = heapwatch.forever(heapwatch.forever(Texture("dirt")));
+print(again.name);
+all.clear();
+print("cleared");

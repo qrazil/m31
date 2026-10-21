@@ -25,14 +25,16 @@ fn a_destructor_alone_earns_a_drop_function_but_no_walk() {
         .unwrap_or_else(|| panic!("no TypeInfo for T{i}:\n{c}"));
     assert!(
         ti.ends_with(&format!(
-            "{{ drop_T{i}, NULL, NULL, copy_T{i}, \"G\", NULL, NULL, NULL }};"
+            "{{ drop_T{i}, NULL, NULL, copy_T{i}, \"G\", NULL, NULL, NULL, \
+             &ti_T{i}, 0, 0, \"G\", NULL, 0 }};"
         )),
         "drop set, walk NULL, copy for a const snapshot, the name the runtime \
-         reports when a const meets a value owning a resource, and no `cmp`, \
-         `hash` or `eq`: {ti}"
+         reports when a const meets a value owning a resource, no `cmp`, \
+         `hash` or `eq`, then heap watch's part: itself as canon, no site, \
+         the name and no reference fields: {ti}"
     );
     assert!(
-        c.contains("o->rc = 1;"),
+        c.contains("rt_rc_set_count(o, 1);"),
         "destructor must run at count 1:\n{c}"
     );
 }
@@ -88,8 +90,9 @@ fn the_reserved_methods_go_into_the_typeinfo_uncast() {
         .find(|l| l.contains("TypeInfo ti_T") && l.contains("K___cmp"))
         .unwrap_or_else(|| panic!("no TypeInfo carries K.cmp:\n{c}"));
     assert!(
-        ti.ends_with("fn_K___cmp, fn_K___hash, fn_K___eq };"),
-        "cmp, hash and eq, in that order and with no cast: {ti}"
+        ti.contains("fn_K___cmp, fn_K___hash, fn_K___eq, &ti_T"),
+        "cmp, hash and eq, in that order and with no cast, before heap \
+         watch's part: {ti}"
     );
 }
 
@@ -100,7 +103,7 @@ fn a_type_without_them_leaves_the_typeinfo_slots_null() {
         .lines()
         .find(|l| l.contains("TypeInfo ti_T"))
         .unwrap_or_else(|| panic!("no TypeInfo:\n{c}"));
-    assert!(ti.ends_with("NULL, NULL, NULL };"), "{ti}");
+    assert!(ti.contains("NULL, NULL, NULL, &ti_T"), "{ti}");
 }
 
 #[test]

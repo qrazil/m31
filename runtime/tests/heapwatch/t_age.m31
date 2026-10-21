@@ -1,0 +1,45 @@
+// Heap watch's age ledger, run by tests/heapwatch/test_heapwatch.sh with a
+// short minute (M31_HEAPWATCH_MINUTE_MS). One site of Session leaks one object
+// in four and frees the rest at once, so its own lifetime says the leaked
+// ones are far too old; Asset is marked forever by type and Mesh by site
+// (M31_AGE), the Config by heapwatch.forever. It prints "ready" once the
+// leak has had time to age, then waits to be killed.
+import heapwatch;
+import timer;
+
+type Session {
+    int id;
+}
+
+type Asset {
+    str name;
+}
+
+type Mesh {
+    int id;
+}
+
+type Config {
+    str name;
+}
+
+List<Session> leaked = [];
+List<Asset> assets = [];
+List<Mesh> meshes = [];
+Config config = heapwatch.forever(Config("main"));
+int round = 0;
+while (true) {
+    Session session = Session(round);
+    if (round % 4 == 0) {
+        leaked.push(session);
+    }
+    if (round < 3) {
+        assets.push(Asset("a"));
+        meshes.push(Mesh(round));
+    }
+    if (round == 400) {
+        print("ready " + (leaked.size() + assets.size() + meshes.size() + config.name.size()).to_str());
+    }
+    timer.sleep_ms(2);
+    round = round + 1;
+}
