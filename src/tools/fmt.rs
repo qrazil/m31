@@ -604,6 +604,8 @@ impl Fmt {
             "interface"
         } else if t.is_enum {
             "enum"
+        } else if t.is_const {
+            "const type"
         } else {
             "type"
         };

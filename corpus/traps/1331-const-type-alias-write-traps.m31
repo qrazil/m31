@@ -1,0 +1,19 @@
+// An instance of a `const type` is frozen at every depth from its
+// construction. A change the compiler cannot see -- a field of it handed to
+// a function that writes it -- traps.
+type Rate {
+    int bp;
+}
+
+const type Money {
+    int cents;
+    List<Rate> rates;
+}
+
+void poke(Rate r) {
+    r.bp = 99;
+}
+
+Money m = Money(100, [Rate(5)]);
+print(m.rates[0].bp);
+poke(m.rates[0]);

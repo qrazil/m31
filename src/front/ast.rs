@@ -168,6 +168,10 @@ pub struct TypeDecl {
     /// different identity to the type checker, and nothing at all at
     /// runtime. Erased before the IR, like generics.
     pub distinct_base: Option<Ty>,
+    /// `const type Money { .. }`: every instance is frozen, deeply, when it
+    /// is constructed (docs/const-decision.md, "The third decision"). Only a
+    /// struct can be `const`.
+    pub is_const: bool,
     pub span: Span,
 }
 

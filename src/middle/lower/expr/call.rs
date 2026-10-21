@@ -390,8 +390,8 @@ impl Lowerer {
             let slots = self.bind_args(&format!("{iname}.{m}"), &decl.params, args, span)?;
             let mut vals = vec![o.val()];
             for (a, p) in slots.iter().zip(decl.params.iter()) {
-                self.refuse_unfrozen_arg(a, p)?;
                 let v = self.lower_expr_as(a, p.ty)?;
+                self.refuse_unfrozen_arg(a, p, v.ty)?;
                 if !self.assignable(v.ty, p.ty) {
                     return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                 }
@@ -550,8 +550,9 @@ impl Lowerer {
     ) -> Result<Val, Diag> {
         let is_default = p.default.as_ref().is_some_and(|d| std::ptr::eq(d, a));
         if !is_default {
-            self.refuse_unfrozen_arg(a, p)?;
-            return self.lower_expr_as(a, p.ty);
+            let v = self.lower_expr_as(a, p.ty)?;
+            self.refuse_unfrozen_arg(a, p, v.ty)?;
+            return Ok(v);
         }
         let module = if module.is_empty() {
             self.cur_module.clone()
@@ -564,8 +565,8 @@ impl Lowerer {
         // A `const` parameter's default is checked like an argument, in
         // the declaring module with no locals: only a constant passes.
         let r = self
-            .refuse_unfrozen_arg(a, p)
-            .and_then(|_| self.lower_expr_as(a, p.ty))
+            .lower_expr_as(a, p.ty)
+            .and_then(|v| self.refuse_unfrozen_arg(a, p, v.ty).map(|_| v))
             .and_then(|v| {
                 if self.assignable(v.ty, p.ty) {
                     Ok(v)
@@ -838,6 +839,17 @@ impl Lowerer {
                     args.pos[0].span(),
                     format!("`{}` cannot be cloned", self.tyname(v.ty)),
                 ));
+            }
+            // A value of a `const type` never changes, so a copy could never
+            // be told from it, and a mutable one would be an instance of the
+            // type that is not frozen. `clone` gives the value itself.
+            if self.is_const_type(v.ty) {
+                if v.owned {
+                    return Ok(v);
+                }
+                self.rc_inc(v.val());
+                self.stmt_temps.push(v.val());
+                return Ok(Val::new(v.val(), v.ty, true));
             }
             // A value that owns a resource cannot be copied
             // (docs/destructors-decision.md): the copy would hold the same

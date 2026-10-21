@@ -1,0 +1,4 @@
+corpus/errors/1334-const-type-holds-a-resource.m31:5:7: `Log` is a `const type`, and it can hold `io.File`, which owns a resource (it has a destructor); a constant holds no I/O, so declare it without `const`
+  |
+5 | const type Log {
+  |       ^

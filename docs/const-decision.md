@@ -452,9 +452,9 @@ shows it.
 
 Decided **2026-10-19** by the author. The deep freeze is implemented
 (2026-10-20; "The deep freeze, as implemented", below), and so are `const`
-parameters and user-type module constants (2026-10-21; "`const` parameters,
-as implemented", "User-type module constants, as implemented"); `const`
-types are not yet.
+parameters, user-type module constants and `const` types (2026-10-21;
+"`const` parameters, as implemented", "User-type module constants, as
+implemented", "`const` types, as implemented").
 
 **The freeze is deep, everywhere.** `const` already means "the value never
 changes, deeply"; the runtime is brought into line with that. A `const`
@@ -696,6 +696,59 @@ copy, a snapshot of one shares it, and it crosses a thread unmoved, as a
 collection constant always did. A user-type constant passes a `const`
 parameter's check like any other module constant.
 
+## `const` types, as implemented
+
+**Syntax.** `const type Money { .. }`, `pub const type ..`, generic or
+not -- the decision's own spelling, since a struct is declared with
+`type`. `const` before `interface`, `enum` or `distinct` is refused: an
+interface has no instances of its own, a distinct type is its base's, and
+an enum's payload is never assigned already; whether a boxed enum's
+mutable payloads should be frozen is left until an enum needs it.
+
+**Construction** (`lower_new`, src/middle/lower/expr/literal.rs) ends with
+`rt_snapshot` on the new object, the call a `const` binding makes: a
+fresh graph is frozen in place, one with a part held elsewhere is
+deep-copied and the copy frozen, and a part frozen for good is shared. So
+the decision's "a value shared elsewhere is deep-copied at construction" is
+`rt_snapshot`'s existing rule, with nothing new in the runtime. Fields may
+be of any type; the owner rejected restricting them to `const` types. A
+module constant of a `const type` is static and immortal, so frozen too, and
+needs nothing more.
+
+**Writes** (`refuse_const_write`, now also `const_type_in`) are refused on
+any chain of fields and indexes that passes through a value whose static
+type is a `const type`, from the root to the target: a local, a parameter,
+a field, an element, `this`, or a bare field name in one of its methods. An
+assignment to a bare field in such a method is refused too. Where the
+compiler cannot see the type, the frozen bit traps, as for every other
+frozen value.
+
+**What the compiler trusts.** Every instance is frozen for good, so:
+
+  - `frozen_place` takes as a root a local or parameter of a `const type`,
+    `this` in one of its methods, and a bare field of that receiver; no
+    read out of them is held. A chain *through* an instance out of a
+    mutable root is still held: the instance is frozen, but the slot that
+    holds it is not, and can be overwritten during the call, freeing it.
+  - A `const` parameter's check accepts an argument whose type, once
+    lowered, is a `const type`, or any chain through one -- so a call's
+    result passes. The check now runs after the argument is lowered, which
+    is what gives it the type.
+  - `spawn` accepts one as frozen for good.
+
+**`clone`** of an instance is the instance, retained. A shallow copy would
+be a mutable instance of a type whose instances are all frozen.
+
+**Resources.** By the rule below, a `const type` with a destructor of its
+own, or with a field that can hold a type with one (`resource_walk`), is
+refused where it is declared (`check_const_types`). Behind an interface the
+type cannot show it, and `rt_snapshot`'s existing walk traps at the
+construction, before anything is frozen or copied.
+
+**Cost.** A construction pays a snapshot: a walk of the new graph, and a
+copy of any part held elsewhere that is not frozen already. Fields that are
+scalars, strings or frozen values cost the walk's test and nothing more.
+
 ## Constants hold no I/O
 
 Decided **2026-10-21** by the author: **`const` values hold no I/O; a value
@@ -712,6 +765,11 @@ and that is intended, not a gap.
 ## What is open
 
   - The hoisting above, now with the `const`-block barrier it needs.
+  - A `const` enum, and an enum module constant: what `match` taking a
+    payload out of a frozen or immortal enum means.
+  - `static_ty` cannot see a call's result type, so `f(make().p)` into a
+    `const` parameter is refused when `make` returns a `const type`, though
+    the value is frozen; the whole result, `f(make())`, is accepted.
   - Whether the required-`const` gate is too noisy in practice on locals
     that are provably unmutated but only incidentally so -- and whether it
     should reach parameters at all, now that a `const` parameter demands a

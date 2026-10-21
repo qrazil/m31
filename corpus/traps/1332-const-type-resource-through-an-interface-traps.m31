@@ -1,0 +1,22 @@
+// A `const type` holds no I/O. Where a field is an interface the compiler
+// cannot see what is behind it, so the construction traps instead, before
+// anything is frozen or copied.
+interface Get {
+    int of();
+}
+
+const type Holder {
+    Get g;
+}
+
+type Res {
+    int id;
+}
+
+void Res.drop() {
+    print(id);
+}
+
+Res r = Res(7);
+Holder h = Holder(() => r.id);
+print(h.g.of());

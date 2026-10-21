@@ -188,6 +188,7 @@ impl Mono {
             variants,
             is_enum: decl.is_enum,
             distinct_base: decl.distinct_base,
+            is_const: decl.is_const,
             span: decl.span,
         });
         Ok(())
@@ -236,6 +237,7 @@ impl Mono {
                 variants: Vec::new(),
                 is_enum: false,
                 distinct_base: None,
+                is_const: false,
                 span,
             });
         }
@@ -327,6 +329,7 @@ impl Mono {
                 Some(b) => Some(self.subst_ty(b, sub, t.span)?),
                 None => None,
             },
+            is_const: t.is_const,
             span: t.span,
         })
     }

@@ -234,14 +234,17 @@ and a store into a frozen object traps before anything is released:
     `h.ps[i].x`, a promoted field) out of a local or parameter that is
     named by a `const` block active at that point, that was bound by a
     `const` declaration, or that is a `const` parameter (its argument was
-    checked frozen at the call site, reference §4.2).
+    checked frozen at the call site, reference §4.2); or out of a local or
+    parameter whose type is a `const type`, or `this` and its bare fields
+    in a method of one (every instance is frozen for good, reference
+    §3.3a).
 
 The whole chain for the second, because every freeze is deep: a `const`
 block freezes everything the named object reaches, and a snapshot shares
 only parts frozen for good, copying any part a block froze
 (docs/const-decision.md, "The deep freeze, as implemented"). A field read
-through `this` or a bare field name inside a method is still held: whether
-the receiver is frozen is not visible there.
+through `this` or a bare field name inside a method of a type that is not
+`const` is still held: whether the receiver is frozen is not visible there.
 
 ### 5.2 Returns are **owned (+1)**
 

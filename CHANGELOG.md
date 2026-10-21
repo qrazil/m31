@@ -32,6 +32,19 @@ change landed on master.
   depth are refused (reference §4.5; docs/const-decision.md, "User-type
   module constants, as implemented"; corpus `1326`, trap `1327`, modules
   `1328`, errors `765` (now an enum field) and `1329`).
+- **`const` types.** `const type Money { .. }`: every instance is frozen,
+  deeply, at its construction, by the snapshot a `const` binding takes --
+  frozen in place when fresh, deep-copied where a part is held elsewhere.
+  Fields may be of any type. A change through any chain that passes through
+  an instance, including a bare field in one of its methods, is a compile
+  error, and one the compiler cannot see traps; `this` is frozen in its
+  methods, reads out of an instance are not held, a value of one passes a
+  `const` parameter and `spawn`, and `clone` gives the value itself. A
+  `const type` that can hold a resource is refused, and one holding a
+  resource behind an interface traps at construction; `const` on an
+  interface, enum or distinct type is refused (reference §3.3a;
+  docs/const-decision.md, "`const` types, as implemented"; corpus `1330`,
+  traps `1331` and `1332`, errors `1333` and `1334`).
 - **Recorded: a constant holds no I/O.** A value that owns a resource is
   refused in every permanent form of `const`; inside a `const` block,
   using one traps, as in 0.10.0, by design (docs/const-decision.md,

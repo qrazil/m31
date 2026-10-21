@@ -255,13 +255,61 @@ impl Lowerer {
     /// it. The runtime traps on the ones it cannot (runtime/rt.c,
     /// `rt_check_mutable`).
     pub(super) fn refuse_const_write(&self, target: &Expr, span: Span) -> Result<(), Diag> {
-        match self.const_root(target) {
-            Some(n) => Err(Diag::new(
+        if let Some(n) = self.const_root(target) {
+            return Err(Diag::new(
                 span,
                 format!("`{n}` is const and cannot be changed; clone({n}) is a copy that can"),
-            )),
+            ));
+        }
+        match self.const_type_in(target) {
+            Some(tid) => Err(self.const_type_write(tid, span)),
             None => Ok(()),
         }
+    }
+
+    /// The first `const type` on a chain of fields and indexes, from its
+    /// root to `e` itself: a change to `e` changes an instance of it, which
+    /// never changes. `this` and a bare field name inside a method of a
+    /// `const type` are in its instance.
+    fn const_type_in(&self, e: &Expr) -> Option<u32> {
+        let own = |t: Option<Ty>| {
+            let tid = self.tdef_of(t?)?;
+            self.tid_is_const(tid).then_some(tid)
+        };
+        match e {
+            Expr::This(_) => self.const_recv(),
+            Expr::Var(n, _) if self.binding(n).is_none() && self.recv_field(n).is_some() => {
+                self.const_recv().or_else(|| own(self.static_ty(e, true)))
+            }
+            Expr::Field(o, _, _) | Expr::Index(o, _, _) => self
+                .const_type_in(o)
+                .or_else(|| own(self.static_ty(e, true))),
+            _ => own(self.static_ty(e, true)),
+        }
+    }
+
+    /// Whether the type `tid` was declared `const type`.
+    pub(super) fn tid_is_const(&self, tid: u32) -> bool {
+        self.type_const.get(tid as usize).copied().unwrap_or(false)
+    }
+
+    /// The receiver's type, inside an instance method of a `const type`:
+    /// `this` is frozen there, since every instance is.
+    pub(super) fn const_recv(&self) -> Option<u32> {
+        let (tid, _) = self.recv?;
+        self.tid_is_const(tid).then_some(tid)
+    }
+
+    /// The diagnostic for a change to an instance of a `const type`.
+    pub(super) fn const_type_write(&self, tid: u32, span: Span) -> Diag {
+        Diag::new(
+            span,
+            format!(
+                "`{}` is a `const type`: no instance of it changes after its \
+                 construction, at any depth; build a new one with the change",
+                self.show_name(&self.typedefs[tid as usize].name)
+            ),
+        )
     }
 
     /// Whether `e` is known, from what is written, to evaluate to an object
@@ -297,8 +345,17 @@ impl Lowerer {
     /// and the callee trusts every chain out of the parameter
     /// (docs/const-decision.md, "The third decision"). A scalar, a `str` and
     /// a value enum are copies or immutable already, so any argument does.
-    pub(super) fn refuse_unfrozen_arg(&self, a: &Expr, p: &Param) -> Result<(), Diag> {
-        if !p.is_const || !self.const_snapshots(p.ty) || self.frozen_arg(a) {
+    ///
+    /// `got` is the argument's type, once lowered: a value of a `const
+    /// type` is frozen for good, wherever it came from -- a call's result
+    /// included -- and so is anything reached through one.
+    pub(super) fn refuse_unfrozen_arg(&self, a: &Expr, p: &Param, got: Ty) -> Result<(), Diag> {
+        if !p.is_const
+            || !self.const_snapshots(p.ty)
+            || self.frozen_arg(a)
+            || self.is_const_type(got)
+            || self.const_type_in(a).is_some()
+        {
             return Ok(());
         }
         // At the top level of the entry file `const` declares a module
@@ -334,11 +391,22 @@ impl Lowerer {
     /// block ends, which the new thread may outlast -- will not do. A module
     /// constant is immortal; a `const` local holds a snapshot, frozen for
     /// good, and `spawn` moves it.
-    pub(super) fn refuse_unfrozen_spawn_arg(&self, a: &Expr, p: &Param) -> Result<(), Diag> {
+    pub(super) fn refuse_unfrozen_spawn_arg(
+        &self,
+        a: &Expr,
+        p: &Param,
+        got: Ty,
+    ) -> Result<(), Diag> {
         // A default is checked where it is lowered, in the declaring module,
         // and only a constant passes there (`lower_slot`).
         let is_default = p.default.as_ref().is_some_and(|d| std::ptr::eq(d, a));
-        if !p.is_const || is_default || !self.const_snapshots(p.ty) || self.immortal_place(a) {
+        if !p.is_const
+            || is_default
+            || !self.const_snapshots(p.ty)
+            || self.immortal_place(a)
+            || self.is_const_type(got)
+            || self.const_type_in(a).is_some()
+        {
             return Ok(());
         }
         if let Expr::Var(n, _) = a {
@@ -352,12 +420,64 @@ impl Lowerer {
             a.span(),
             format!(
                 "`{}` is a `const` parameter of a spawned function, so its argument must \
-                 be frozen for good -- a module constant or a `const` local; a `const` \
+                 be frozen for good -- a module constant, a `const` local or a value of \
+                 a `const type`; a `const` \
                  block, or a `const` parameter that may come from one, ends while the \
                  new thread can still be running",
                 p.name
             ),
         ))
+    }
+
+    /// Whether `t` is a `const type`, every instance of which is frozen,
+    /// deeply, from its construction (`lower_new`).
+    pub(super) fn is_const_type(&self, t: Ty) -> bool {
+        self.tdef_of(t).is_some_and(|tid| self.tid_is_const(tid))
+    }
+
+    /// Refuse a `const type` that can hold a resource: a constant holds no
+    /// I/O (docs/const-decision.md, "Constants hold no I/O"). Where a field
+    /// is an interface the type cannot show it, and `rt_snapshot` traps at
+    /// the construction instead. A `const type` may not have a destructor
+    /// of its own for the same reason.
+    pub(super) fn check_const_types(&mut self, p: &Program) -> Result<(), Diag> {
+        for t in p.types.iter().filter(|t| t.is_const) {
+            let Some(tid) = self.typedefs.iter().position(|d| d.name == t.name) else {
+                continue;
+            };
+            let tid = tid as u32;
+            let mut seen = vec![false; self.typedefs.len()];
+            seen[tid as usize] = true;
+            let owner = if self.has_destructor(tid) {
+                Some(tid)
+            } else {
+                self.field_surface[tid as usize]
+                    .iter()
+                    .find_map(|f| self.resource_walk(*f, &mut seen))
+            };
+            let Some(owner) = owner else { continue };
+            // Named as the declaring module writes them.
+            let saved = std::mem::replace(&mut self.cur_module, t.module.clone());
+            let shown = self.show_name(&t.name);
+            let why = if owner == tid {
+                "it has a destructor, so it owns a resource".to_string()
+            } else {
+                format!(
+                    "it can hold `{}`, which owns a resource (it has a destructor)",
+                    self.show_name(&self.typedefs[owner as usize].name)
+                )
+            };
+            self.cur_module = saved;
+            return Err(Diag::new(
+                t.span,
+                format!(
+                    "`{shown}` is a `const type`, and {why}; a constant holds no I/O, so \
+                     declare it without `const`"
+                ),
+            )
+            .in_module(&t.module));
+        }
+        Ok(())
     }
 
     /// The local, parameter or constant a chain of fields and indexes

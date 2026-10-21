@@ -512,6 +512,21 @@ impl Lowerer {
                 val: v.val(),
             });
         }
+        // A `const type` is frozen from its construction, deeply: the same
+        // snapshot a `const` binding takes (docs/const-decision.md), so a
+        // fresh graph is frozen in place and one with a part held elsewhere
+        // -- `Money(c, rates)` while `rates` is still a mutable local -- is
+        // deep-copied and the copy frozen. It takes the +1 and returns one.
+        if self.is_const_type(ty) {
+            let d = self.new_val(IrTy::Ref);
+            self.push(Inst::Call {
+                dst: Some(d),
+                func: "rt_snapshot".to_string(),
+                args: vec![obj],
+            });
+            self.stmt_temps.push(d);
+            return Ok(Val::new(d, ty, true));
+        }
         self.stmt_temps.push(obj);
         Ok(Val::new(obj, ty, true))
     }

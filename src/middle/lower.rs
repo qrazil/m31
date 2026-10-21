@@ -158,6 +158,10 @@ pub struct Lowerer {
     /// declaration rather than with the file.
     type_module: Vec<String>,
     type_pub: Vec<bool>,
+    /// Whether each type was declared `const type`, parallel to
+    /// `typedefs`: every instance is frozen from its construction
+    /// (`is_const_type`).
+    type_const: Vec<bool>,
     /// Surface payload types per variant, parallel to `typedefs`. The IR
     /// records only `Ref`, which cannot tell `str` from a user type, and a
     /// match arm has to bind the payload at its real type.
@@ -820,6 +824,7 @@ impl Lowerer {
             distinct_base: Vec::new(),
             type_module: Vec::new(),
             type_pub: Vec::new(),
+            type_const: Vec::new(),
             variant_surface: Vec::new(),
             value_enum: HashMap::new(),
             forced_boxed: BTreeSet::new(),
@@ -968,6 +973,7 @@ impl Lowerer {
             self.variant_surface.push(vsurface);
             self.type_module.push(t.module.clone());
             self.type_pub.push(t.is_pub);
+            self.type_const.push(t.is_const);
             self.typedefs.push(TypeDef {
                 name: t.name.clone(),
                 fields,
@@ -1195,6 +1201,7 @@ impl Lowerer {
         // Constants after every function and type is known, so a constant
         // cannot take a name one of them has, and before any body is
         // lowered, so every use finds its value already computed.
+        self.check_const_types(p)?;
         self.register_consts(p)?;
 
         // There is no `main`. The statements written at the top level are

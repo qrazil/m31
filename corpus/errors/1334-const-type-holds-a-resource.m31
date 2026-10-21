@@ -1,0 +1,10 @@
+// A constant holds no I/O: a `const type` cannot have a field of a type
+// that owns a resource, at any depth.
+import io;
+
+const type Log {
+    str name;
+    List<io.File> outs;
+}
+
+print(1);

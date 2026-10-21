@@ -64,6 +64,7 @@ impl Parser {
                 variants,
                 is_enum: true,
                 distinct_base: None,
+                is_const: false,
                 span,
             });
         }
@@ -140,6 +141,28 @@ impl Parser {
                 types.push(self.parse_enum_decl(is_pub)?);
             } else if self.peek() == &Tok::KwType || self.peek() == &Tok::KwInterface {
                 types.push(self.parse_type_decl(is_pub)?);
+            } else if self.peek() == &Tok::KwConst
+                && matches!(
+                    self.peek_at(1),
+                    Tok::KwType | Tok::KwInterface | Tok::KwEnum | Tok::KwDistinct
+                )
+            {
+                // `const type Money { .. }`: every instance frozen from its
+                // construction. Only a struct: an interface has no instances
+                // of its own, an enum's payload is never assigned already,
+                // and a distinct type is its base's.
+                let at = self.span();
+                self.bump();
+                if self.peek() != &Tok::KwType {
+                    return Err(Diag::new(
+                        at,
+                        "only a `type` can be `const`: `const type Name { .. }` makes \
+                         every instance of a struct frozen from its construction",
+                    ));
+                }
+                let mut t = self.parse_type_decl(is_pub)?;
+                t.is_const = true;
+                types.push(t);
             } else if self.peek() == &Tok::KwConst {
                 // At the top level `const` is always a module constant, in
                 // the entry file as much as in a library: one spelling, one
@@ -347,6 +370,7 @@ impl Parser {
             variants: Vec::new(),
             is_enum: false,
             distinct_base: Some(base),
+            is_const: false,
             span,
         })
     }
@@ -445,6 +469,7 @@ impl Parser {
                 variants: Vec::new(),
                 is_enum: false,
                 distinct_base: None,
+                is_const: false,
                 span,
             });
         }
@@ -492,6 +517,7 @@ impl Parser {
             variants: Vec::new(),
             is_enum: false,
             distinct_base: None,
+            is_const: false,
             span,
         })
     }
@@ -587,6 +613,7 @@ impl Parser {
             variants,
             is_enum: true,
             distinct_base: None,
+            is_const: false,
             span,
         })
     }

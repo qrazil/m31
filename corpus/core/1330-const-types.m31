@@ -1,0 +1,72 @@
+// A `const type` (reference §3.3a): every instance is frozen, deeply, from
+// its construction. A field of a mutable type is frozen with the instance;
+// a part held elsewhere is deep-copied, as a `const` binding copies it, so
+// changing the original afterwards does not reach the instance. A change is
+// written as a new instance. Values of it pass a `const` parameter, `this`
+// is frozen in its methods, and `clone` gives the value itself.
+type Rate {
+    str cur;
+    int bp;
+}
+
+const type Money {
+    str cur;
+    int cents;
+    List<Rate> rates;
+}
+
+int Money.total() {
+    int t = cents;
+    for (Rate r in rates) {
+        t = t + r.bp;
+    }
+    return t + first(rates[0]);
+}
+
+Money Money.plus(int c) {
+    return Money(cur, cents + c, rates);
+}
+
+int first(const Rate r) {
+    return r.bp;
+}
+
+int sum(const Money m) {
+    return m.cents;
+}
+
+void poke(Rate r) {
+    r.bp = 99;
+}
+
+const Money ZERO = Money("EUR", 0, []);
+
+void go() {
+    List<Rate> rs = [Rate("USD", 5)];
+    Money m = Money("EUR", 100, rs);
+    rs[0].bp = 7;
+    print(m.rates[0].bp);
+    print(rs[0].bp);
+    print(m.total());
+    Money n = m.plus(1);
+    print(n.cents);
+    print(sum(m));
+    print(sum(Money("X", 3, [])));
+    print(first(m.rates[0]));
+    Money c = clone(m);
+    print(c.cents);
+    print(ZERO.cents);
+    print(sum(ZERO));
+    Money fresh = Money("Y", 1, [Rate("Z", 2)]);
+    print(fresh.rates.size());
+}
+
+go();
+
+const type Pair<T> {
+    T a;
+    T b;
+}
+
+Pair<List<int>> pair = Pair<List<int>>([1], [2]);
+print(pair.a[0] + pair.b[0]);

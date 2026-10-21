@@ -37,8 +37,9 @@
 //!     read out of a module constant, whose whole graph is immortal; and any
 //!     chain of fields and List/Array elements out of a local or parameter
 //!     that an active `const` block names, that a `const` declaration
-//!     bound, or that is a `const` parameter, since every freeze is deep. Anything read through `this` is
-//!     still held: see `frozen_place`;
+//!     bound, that is a `const` parameter, or whose type is a `const type`,
+//!     since every freeze is deep. Anything read through `this` is still
+//!     held, except in a method of a `const type`: see `frozen_place`;
 //!   - a place read that nothing after it can disturb: `may_run_code` is false
 //!     for every later operand and the operation itself runs no user code.
 //!     Between the read and its last use only the runtime executes, and the
@@ -109,6 +110,11 @@ impl Lowerer {
             Expr::Var(name, _) => {
                 self.lookup(name).is_some()
                     || (self.recv_field(name).is_none() && self.resolve_const(name).is_some())
+                    // A field of a frozen receiver: `this` is frozen in every
+                    // method of a `const type`, and kept alive by the caller.
+                    || (self.lookup(name).is_none()
+                        && self.recv_field(name).is_some()
+                        && self.const_recv().is_some())
             }
             Expr::Field(..) | Expr::Index(..) => self.immortal_place(e) || self.frozen_place(e),
             _ => false,
@@ -145,7 +151,10 @@ impl Lowerer {
     ///     its argument frozen (`refuse_unfrozen_arg`), by something that
     ///     lasts at least as long as the call -- a snapshot, a module
     ///     constant, or a `const` block or `const` parameter of a caller,
-    ///     none of which can end while this frame runs.
+    ///     none of which can end while this frame runs;
+    ///   - or of a `const type`, whose every instance is frozen for good
+    ///     from its construction -- a local or parameter of one, `this` in
+    ///     one of its methods, or a bare field of that receiver.
     ///
     /// Every freeze is deep (docs/const-decision.md, "The third decision"):
     /// a block freezes everything the named object reaches, and a snapshot
@@ -163,10 +172,12 @@ impl Lowerer {
     /// separate object but reachable from the root, so it is frozen with it.
     ///
     /// Still held: anything read through `this` or a bare field name inside
-    /// a method, because whether the receiver is frozen is the caller's
-    /// knowledge, not this function's; and a step this function does not
-    /// know the type of (`static_ty` gives up), since it cannot tell whether
-    /// the step is a field of an object at all.
+    /// a method of a type that is not `const`, because whether the receiver
+    /// is frozen is the caller's knowledge, not this function's; a chain
+    /// through an instance of a `const type` out of a mutable root, whose
+    /// slot holding the instance can be overwritten; and a step this
+    /// function does not know the type of (`static_ty` gives up), since it
+    /// cannot tell whether the step is a field of an object at all.
     pub(super) fn frozen_place(&self, e: &Expr) -> bool {
         let (obj, field) = match e {
             Expr::Field(o, f, _) => (&**o, Some(f)),
@@ -175,7 +186,31 @@ impl Lowerer {
         };
         let ty = match obj {
             Expr::Var(name, _) => {
-                let Some(ty) = self.frozen_name(name) else {
+                if let Some(ty) = self.frozen_name(name) {
+                    ty
+                } else if let Some((ty, _)) = self.lookup(name) {
+                    // A local or parameter of a `const type`: every instance
+                    // is frozen for good from its construction.
+                    if !self.is_const_type(ty) {
+                        return false;
+                    }
+                    ty
+                } else if self.recv_field(name).is_some() && self.const_recv().is_some() {
+                    // A bare field of a frozen receiver, which keeps it.
+                    let Some(ty) = self.static_ty(obj, true) else {
+                        return false;
+                    };
+                    ty
+                } else {
+                    return false;
+                }
+            }
+            // `this` in a method of a `const type`.
+            Expr::This(_) => {
+                if self.const_recv().is_none() {
+                    return false;
+                }
+                let Some(ty) = self.static_ty(obj, true) else {
                     return false;
                 };
                 ty
@@ -351,6 +386,16 @@ impl Lowerer {
             Expr::Float(..) => Some(Ty::Float),
             Expr::Bool(..) => Some(Ty::Bool),
             Expr::Str(..) => Some(Ty::Str),
+            // The receiver's type was interned when the method's lowering
+            // began (`lower_func`), so it is found without interning.
+            Expr::This(_) if scoped => {
+                let (tid, _) = self.recv?;
+                let name = &self.typedefs[tid as usize].name;
+                self.ty_exprs
+                    .iter()
+                    .position(|e| e.name == *name && e.args.is_empty())
+                    .map(|i| Ty::User(i as u32))
+            }
             // Outside its scope -- a default, judged from the caller -- even
             // a constant would resolve against the wrong module, so a name
             // is not known there.

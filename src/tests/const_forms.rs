@@ -248,3 +248,99 @@ fn a_type_that_reaches_itself_can_be_a_constant() {
         const N T = N(1, [N(2, []), N(3, [N(4, [])])]);\n\
         print(T.kids[1].kids[0].v);\n");
 }
+
+// ---- const types -----------------------------------------------------------
+
+const MONEY: &str = "type P { int x; }\n\
+                     const type M { int c; P p; List<P> ps; }\n\
+                     void f(P p, M m) { print(p.x + m.c); }\n";
+
+#[test]
+fn a_const_type_is_frozen_at_its_construction() {
+    let out = ir(&format!(
+        "{MONEY}void g(P p) {{ M m = M(1, p, []); print(m.c); }}\n"
+    ));
+    let g = func_ir(&out, "g");
+    let alloc = g.find("alloc").expect("constructed");
+    let snap = g.find("call rt_snapshot(").expect("frozen at construction");
+    assert!(alloc < snap, "{g}");
+    // A type that is not `const` is not.
+    let out = ir("type Q { int c; }\nvoid g() { Q q = Q(1); print(q.c); }\n");
+    assert!(!out.contains("rt_snapshot"), "{out}");
+}
+
+#[test]
+fn nothing_in_a_const_type_changes() {
+    for (body, what) in [
+        ("void g(M m) { m.c = 2; }", "a field"),
+        ("void g(M m) { m.p.x = 2; }", "a field of a field"),
+        ("void g(M m) { m.ps.push(P(1)); }", "a collection field"),
+        ("void g(M m) { m.ps[0] = P(1); }", "an element"),
+        ("void M.g() { c = 2; }", "a bare field in a method"),
+        (
+            "void M.g() { ps.clear(); }",
+            "a bare collection field in a method",
+        ),
+        (
+            "type H { M m; }\nvoid g(H h) { h.m.c = 2; }",
+            "through a mutable holder",
+        ),
+    ] {
+        let e = err(&format!("{MONEY}{body}\n"));
+        assert!(e.contains("`M` is a `const type`"), "{what}: {e}");
+    }
+    // The holder of one, and a collection of them, are ordinary.
+    ir(&format!(
+        "{MONEY}type H {{ M m; }}\nvoid g(H h, List<M> ms) {{ h.m = M(1, P(1), []); ms[0] = h.m; }}\n"
+    ));
+}
+
+#[test]
+fn a_chain_out_of_a_const_type_is_not_held() {
+    // Every instance is frozen for good, so `m.p` cannot be overwritten
+    // while `f` runs, and nor can `this.p` in one of its methods.
+    let out = ir(&format!(
+        "{MONEY}void g(M m) {{ f(m.p, m); f(m.ps[0], m); }}\n\
+         void M.go() {{ f(p, this); f(ps[0], this); }}\n"
+    ));
+    for name in ["g", "M.go"] {
+        let body = func_ir(&out, name);
+        assert_eq!(body.matches("rc_inc").count(), 0, "{body}");
+    }
+}
+
+#[test]
+fn a_const_type_passes_a_const_parameter() {
+    ir(&format!(
+        "{MONEY}int k(const M m) {{ return m.c; }}\nint px(const P p) {{ return p.x; }}\n\
+         M make() {{ return M(1, P(2), []); }}\n\
+         void g(M m) {{ print(k(m) + k(make()) + px(m.p)); }}\n\
+         void M.go() {{ print(px(p)); }}\n"
+    ));
+}
+
+#[test]
+fn clone_of_a_const_type_is_the_value_itself() {
+    let out = ir(&format!("{MONEY}M g(M m) {{ return clone(m); }}\n"));
+    let g = func_ir(&out, "g");
+    assert!(!g.contains("clone") && !g.contains("alloc"), "{g}");
+}
+
+#[test]
+fn a_const_type_holds_no_resource() {
+    let e = err("type R { int fd; }\nvoid R.drop() { }\nconst type M { List<R> rs; }\n");
+    assert!(
+        e.contains("`M` is a `const type`, and it can hold `R`"),
+        "{e}"
+    );
+    let e = err("const type M { int c; }\nvoid M.drop() { }\n");
+    assert!(e.contains("it has a destructor"), "{e}");
+}
+
+#[test]
+fn only_a_struct_can_be_const() {
+    for decl in ["const interface I { int f(); }", "const enum E { A; }"] {
+        let e = err(&format!("{decl}\n"));
+        assert!(e.contains("only a `type` can be `const`"), "{e}");
+    }
+}

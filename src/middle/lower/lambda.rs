@@ -185,6 +185,7 @@ impl Lowerer {
         // becomes is handed to whoever asked for it.
         self.type_module.push(module.clone());
         self.type_pub.push(true);
+        self.type_const.push(false);
         self.fn_refs.insert((key.to_string(), iname), tid);
 
         // `int __ref$by_x$Less.cmp(Point $a0, Point $a1) { return by_x($a0, $a1); }`
@@ -759,6 +760,7 @@ impl Lowerer {
         self.iface_methods.push(Vec::new());
         self.type_module.push(self.cur_module.clone());
         self.type_pub.push(true);
+        self.type_const.push(false);
 
         // The method IS the interface's method: same name, same signature.
         // The parameter names are the lambda's own, because its body uses

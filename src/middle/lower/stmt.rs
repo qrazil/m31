@@ -80,6 +80,11 @@ impl Lowerer {
                 if self.binding(name).is_none() {
                     if let Some((rtid, robj, path)) = self.recv_field(name) {
                         self.check_field_access(rtid, &path, name, *span)?;
+                        // Every instance of a `const type` is frozen, so
+                        // `this` is, in each of its methods.
+                        if let Some(tid) = self.const_recv() {
+                            return Err(self.const_type_write(tid, *span));
+                        }
                         // Walk to the object that actually owns the field.
                         let (owner, owner_tid) = if path.len() == 1 {
                             (robj, rtid)
@@ -408,8 +413,8 @@ impl Lowerer {
                 let slots = self.bind_args(name, &params, args, *span)?;
                 let mut vals = Vec::new();
                 for (a, p) in slots.iter().zip(params.iter()) {
-                    self.refuse_unfrozen_spawn_arg(a, p)?;
                     let v = self.lower_slot(a, p, &module)?;
+                    self.refuse_unfrozen_spawn_arg(a, p, v.ty)?;
                     if !self.assignable(v.ty, p.ty) {
                         return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                     }

@@ -493,6 +493,56 @@ construction, and the diagnostic says whose it is:
 `pub` may be written on a field, never on a parameter, a variant or an
 interface method.
 
+### 3.3a `const` types
+
+```c
+const type Money {
+    str cur;
+    int cents;
+    List<Rate> rates;
+}
+```
+
+**Every instance of a `const type` is frozen, deeply, from the moment it is
+constructed**, and nothing in it ever changes: not a field, not anything a
+field reaches. It is §4.1's `const`, applied to every value of the type
+rather than to one name. A change is written as a new instance:
+
+```c
+Money Money.plus(int c) { return Money(cur, cents + c, rates); }
+```
+
+Its fields may be of any type, `const` or not. The construction freezes
+the new instance and everything it reaches, the way a `const` binding does
+(§4.1): a graph nothing else holds is frozen in place, and one with a part
+held elsewhere — `Money("EUR", 100, rs)` while `rs` is still a local — is
+**deep-copied and the copy frozen**, so changing `rs` afterwards does not
+reach the instance. The cost is paid once, at the construction, and only
+for parts that are not frozen already; every read after it is free.
+
+  - **A change the compiler can see is an error**: a field store, an index
+    store or a changing method of a collection, through any chain that
+    passes through an instance — `m.cents = 1`, `m.rates[0].bp = 1`,
+    `m.rates.push(r)`, and in a method of the type a bare field, `cents =
+    1` or `rates.clear()`. Replacing a field that *holds* one in a mutable
+    object (`h.m = Money(..)`) is not a change to the instance, and is fine.
+  - **A change it cannot see traps**, as for any frozen value: a part of
+    an instance handed to a function that writes it, or a method that
+    changes its receiver through another method.
+  - `this` is frozen in every method of the type, and so is everything
+    read through it.
+  - A value of a `const type`, and anything read out of one, passes a
+    `const` parameter's check (§4.2) wherever the compiler can see its
+    type — a call's result included — and is frozen for good, so it may be
+    passed to `spawn` (§5.9).
+  - `clone(m)` is `m` itself: a copy could never be told from it, and a
+    mutable instance of the type cannot exist.
+  - **It holds no I/O** (§4.1): a `const type` with a destructor, or with a
+    field that can hold a type with one, is refused; one that holds such a
+    value behind an interface traps at the construction.
+  - Only a struct can be `const`: not an interface, an enum or a distinct
+    type.
+
 ### 3.4 Interfaces
 
 An interface is a set of method signatures:
@@ -1221,7 +1271,7 @@ as cycles are not collected (§7.1), it lives until the program ends.
 
     The rule is general: **a constant holds no I/O.** A value that needs
     I/O is not `const`, in any of the forms — a `const` local, a `const`
-    parameter (§4.2), a module constant (§4.5). A `const` block (§4.1a) is
+    parameter (§4.2), a module constant (§4.5), a `const type` (§3.3a). A `const` block (§4.1a) is
     the one place an object that owns a resource is frozen at all, and
     using it there traps.
 
@@ -1360,8 +1410,9 @@ total(buf);                 // error: `buf` is not frozen here
 
 At every call the argument must be, as written, a `const` local, a module
 constant, a name inside an active `const` block (§4.1a), a `const`
-parameter of the calling function, or a field or List/Array element of
-any of them, at any depth (`h.ps[0]`, `lib.T[i]`). Anything else is
+parameter of the calling function, a value of a `const type` (§3.3a), or
+a field or List/Array element of any of them, at any depth (`h.ps[0]`,
+`lib.T[i]`). Anything else is
 refused at compile time, with the fix: freeze the value for the call,
 `const buf { total(buf); }`, or bind it to a `const` local. A literal, a
 construction and a call's result are fresh and mutable, so they are
@@ -2445,7 +2496,8 @@ the same (§4.5):
 static, immortal, never freed, not counted as a leak, and in read-only
 memory.
 
-A **frozen** value is one bound to a `const` (§4.1). It is counted and freed
+A **frozen** value is one bound to a `const` (§4.1), or an instance of a
+`const type` (§3.3a). It is counted and freed
 like any other object — freezing marks it, it does not pin it — but every
 operation that would change it traps instead: a field store, an index store,
 and every changing method of a collection or a `bytes`, whichever name or
@@ -2686,7 +2738,9 @@ constdecl   = "const" type IDENT "=" expr ";" ;       (* a constant expression, 
                                                          operators, collection
                                                          literals, constructions *)
 
-typedecl    = "type" IDENT [ tparams ] "{" { field ";" } "}" ;
+typedecl    = [ "const" ] "type" IDENT [ tparams ] "{" { field ";" } "}" ;
+                                                      (* const: every instance
+                                                         frozen, §3.3a *)
 interface   = "interface" IDENT [ tparams ] "{" { sig ";" } "}" ;
 enumdecl    = "enum" IDENT [ tparams ] "{" { variant ";" } "}" ;
 variant     = IDENT [ "(" type { "," type } ")" ] ;

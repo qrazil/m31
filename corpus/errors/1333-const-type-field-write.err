@@ -1,0 +1,4 @@
+corpus/errors/1333-const-type-field-write.m31:9:10: `Money` is a `const type`: no instance of it changes after its construction, at any depth; build a new one with the change
+  |
+9 |     parts.push(c);
+  |          ^

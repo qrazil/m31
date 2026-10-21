@@ -1,0 +1,13 @@
+// No instance of a `const type` changes after its construction, at any
+// depth, and a method of one cannot change its receiver either.
+const type Money {
+    int cents;
+    List<int> parts;
+}
+
+void Money.add(int c) {
+    parts.push(c);
+}
+
+Money m = Money(1, []);
+m.add(2);
