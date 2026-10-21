@@ -1,0 +1,27 @@
+// Store-heavy: every iteration overwrites reference fields and List slots,
+// which is where heap watch's store hook sits (docs/heap-watch-design.md,
+// "Cost"). Nothing is allocated in the loop.
+type Holder {
+    List<str> items;
+    str last;
+}
+
+Holder holder = Holder([], "");
+int index = 0;
+while (index < 200) {
+    holder.items.push("x");
+    index = index + 1;
+}
+int round = 0;
+int total = 0;
+while (round < 200000) {
+    int slot = 0;
+    while (slot < 200) {
+        holder.items[slot] = holder.last;
+        holder.last = holder.items[(slot + 1) % 200];
+        slot = slot + 1;
+    }
+    total = total + holder.items.size();
+    round = round + 1;
+}
+print(total);

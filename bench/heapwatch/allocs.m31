@@ -1,0 +1,18 @@
+// Allocation-heavy with little else: a struct, a string and a two-element
+// List made and freed on every iteration -- the worst case for heap watch,
+// which counts every allocation and every release (docs/heap-watch-design.md,
+// "Cost").
+type Pair {
+    int left;
+    str right;
+}
+
+int round = 0;
+int total = 0;
+while (round < 3000000) {
+    Pair pair = Pair(round, concat("a", "b"));
+    List<Pair> group = [pair, Pair(1, "c")];
+    total = total + group.size() + pair.right.size();
+    round = round + 1;
+}
+print(total);

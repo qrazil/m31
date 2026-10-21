@@ -668,7 +668,7 @@ while (running) {
   corpus catches them).
 - **A per-site `TypeInfo`** means runtime type checks go through `canon`, and
   the emitted static data grows.
-- **The count drops from 60 bits to 33.** It is still 8.6 billion, and an
+- **The count drops from 59 bits to 33.** It is still 8.6 billion, and an
   overflow traps rather than corrupting.
 - **Age suspects need time**, and a site with no baseline needs a human to
   judge it.
@@ -680,45 +680,72 @@ while (running) {
 
 ---
 
-## Cost (estimates; measure in qrazil/benchmark before deciding)
+## Cost (measured)
 
-For scale: a `malloc`/`free` pair is roughly 20–50 ns.
-
-### Memory
-
-| Item | Size |
-|---|---|
-| per object | **0 B** (spare bits in the count word) |
-| per allocation site, static | ~100 B `TypeInfo` copy. 5 000 sites ≈ 500 KB of binary size. |
-| per site, `lifetime` histogram | 16 × 4 B = 64 B. 5 000 sites ≈ 320 KB. |
-| `live[site][minute]` | dense row for the current minute (sites × 4 B ≈ 20 KB); older minutes sparse, bounded by the number of distinct (site, minute) pairs that still have survivors. Typically tens of KB, and at most 1 entry per live object. |
-| `epoch` rows | sites × 4 B per open depth per thread, allocated lazily; ≈ 20 KB × 1–3 open per task |
-| ledger file on disk | the above, mapped: typically 1–5 MB per process |
-| trace edge table | only while tracing: ~32 B per edge to a traced object, capped (default 1 M edges ≈ 32 MB; past the cap new edges are dropped and the report says so) |
-| per-thread shards | each OS thread keeps its own counters so updates stay non-atomic; the tool sums them. An object made on one thread and freed on another leaves +1 on one shard and −1 on the other, which sums correctly. |
+The proposal's estimates are kept at the end of this section for comparison;
+the measurements replace them.
 
 ### CPU
 
-| Operation | Added cost |
-|---|---|
-| allocate | 3 counter increments (live, epoch, site lookup via `ty`): **~2–3 ns** |
-| free | 2 decrements plus 1 histogram increment (one `clz` for log2): **~3–5 ns**. The sparse `live` lookup for an older minute is a small hash probe. |
-| reference store | 1 compare, usually not taken: **~0.3–1 ns**, plus the spreading walk when it adopts (amortised) |
-| `rc_inc` / `rc_dec` | unchanged. The count mask widens; overflow is checked by a compare `rc_inc` can fold in. |
-| epoch enter / close | tens of ns |
-| trace off (the default) | one load and compare on each reference store, next to the `rc_inc` that already touches `v`: **~0.3 ns** |
-| trace on, store of a traced value | an edge-table insert (a hash probe): **~20–50 ns**, for that type only |
-| trace on, overwrite or free of a traced value | an edge-table remove: **~20–50 ns** |
-| `heapwatch.forever(x)` | a counter move: **~2 ns**, once per object |
-| control page | one load per scheduler tick |
-| scheduler tick (~1/s) | advance the minute; once a minute, check each site's oldest survivor against its threshold: **O(sites)**, never O(objects) |
-| disk | none on the hot path (mmap); suspect log appends are rare |
+Best of 5 runs, interleaved, gcc 14 `-O2`, x86-64 (12 cores, load about
+1.3 from other work), measured 2026-10-21: differences under ~5 % are noise.
+Each column is the program built by that commit's compiler and runtime;
+"off" is the final build run with `M31_HEAPWATCH=0`. `bench/heapwatch/run.sh`
+repeats the on/off comparison for any later change.
 
-**Overall guess:** about **3–7 %** on code that allocates heavily and stores
-many references, and close to 0 on computation-heavy code. That is cheap
-enough to propose it **on by default in every build**, release included,
-because a server is exactly where it is needed. The benchmark must confirm
-this before anything is decided.
+| Benchmark | What it does | before (528cc2a) | + ledger | + trace hook | + epochs | off |
+|---|---|---|---|---|---|---|
+| `bench/trees` | binary trees: allocate and free 16 x 2^19 nodes | 0.55 s | 0.62 s | 0.61 s | 0.64 s (+16 %) | 0.58 s |
+| `bench/heapwatch/allocs` | a struct, a str and a 2-element List per iteration, little else | 0.46 s | 0.57 s | 0.65 s | 0.76 s (+65 %) | 0.50 s |
+| `bench/valenum/result-boxed` | a boxed `Result` per call, 50 M calls | 1.54 s | 2.03 s | 1.96 s | 2.52 s (+64 %) | 1.55 s |
+| `bench/valenum/option-boxed` | a boxed `Option` per call | 0.79 s | 1.01 s | 1.09 s | 1.33 s (+68 %) | 0.85 s |
+| `bench/heapwatch/stores` | 40 M reference stores into fields and List slots, no allocation | 0.66 s | 0.72 s | 0.88 s | 0.79 s (+20 %) | 0.80 s |
+
+What it comes to, per operation: an allocation and its release cost a few
+nanoseconds more with the ledger (three counter updates: a wheel cell on
+each end, a lifetime bucket on release) and about as much again with epochs
+(one more update on each end, in the task's row). The cost is not the
+instructions -- rewriting both ends as straight-line fast paths with every
+slow case out of line changed nothing measurable -- but the dependency of
+each update on the store before it to the same counter, which a tight
+allocate-and-free loop lines up back to back. The store hook (two header
+loads, a global load and an untaken branch per reference store) is about
+20 % of a loop that does nothing but store references, and stays when heap
+watch is off: it is compiled in.
+
+So the estimate of 3-7 % was optimistic for code that does nothing but
+allocate: **+16 % on binary trees, +65 % on loops that allocate and free an
+object or more per iteration and do little else, +20 % on a loop that does
+nothing but store references.** Code that computes between allocations and
+stores pays proportionally less. With `M31_HEAPWATCH=0` the allocation
+benchmarks run within a few percent of the build before heap watch.
+
+**Decision (open question 1): on by default, as the requirement asks**, with
+these numbers on record. A server is exactly where it is needed, and one
+switch turns it off for a process where the allocation rate is the
+bottleneck. If the default should change, it is a one-line change in
+`rt_hw_program` (and the off switch becomes an on switch); see open question
+12 for a cheaper middle ground.
+
+### Memory
+
+| Item | Measured |
+|---|---|
+| per object | **0 B**: spare bits in the count word |
+| per allocation site, static | one 104 B TypeInfo copy; a site's line is 16 B in the line table. An HTTP server program (`tests/http/t_server_stream.m31`) has 341 user-type sites and 735 lines: about 50 KB. |
+| runtime code | +37 KB of text (`examples/tour` 92 KB -> 129 KB); +100 KB of zeroed data (scratch tables), untouched until used |
+| per site and shard, in the ledger | 320 B (the wheel, the lifetime histogram, the forever count); only shards a thread used and sites that allocated are ever written |
+| ledger file | apparent size about 1.3 MB per shard (sites + 4 096 for the runtime's own) times shards (carriers + 8): 27 MB on a 12-core machine, sparse; **written: 20-100 KB** for the corpus's and the tests' programs |
+| resident memory | +250-350 KB on the benchmarks above (19.1 MB -> 19.4 MB on `trees`) |
+| epoch rows | per task, a small table per open depth, 16 cells to start; freed when the task ends |
+| trace edge table | only while tracing: 56 B per edge plus its hash entries, capped (1 M edges by default) |
+
+### The proposal's estimates, for comparison
+
+Allocate ~2-3 ns, free ~3-5 ns, a reference store ~0.3-1 ns, "about 3-7 %
+on code that allocates heavily" -- the per-operation figures were about
+right in instructions and off by the memory dependencies; the percentage
+was off for allocation-bound code.
 
 ---
 
@@ -726,7 +753,7 @@ this before anything is decided.
 
 | Piece | Feasible? | Main risk | How it is caught |
 |---|---|---|---|
-| Count word split (60 → 33 bits + BIRTH, DEPTH, KEPT) | yes; `rc_inc`/`rc_dec` are out-of-line functions in `runtime/rt.h`, so the mask changes in one place | a path that reads the count word raw | sanitizers + an RC_DEBUG check that the flag bits survive every operation |
+| Count word split (59 → 33 bits + BIRTH, EPOCH) | yes; `rc_inc`/`rc_dec` are out-of-line functions in `runtime/rt.h`, so the mask changes in one place | a path that reads the count word raw | sanitizers + an RC_DEBUG check that the flag bits survive every operation |
 | Per-site `TypeInfo` with `canon` | yes; the compiler already emits one `TypeInfo` per type | the 18 `->ty ==` identity checks in `runtime/` must all go through `canon` | a gate that greps for a raw `->ty ==` |
 | `live` / `lifetime` counters, mmap ledger, suspect log | yes; plain memory writes, one file per process | thread shards and file layout versioning | corpus run with the ledger read back by the tool |
 | Forever marks | yes; a reserved `BIRTH` value, no new bit | none notable | corpus |
@@ -750,6 +777,9 @@ runtime for raw type checks and raw count reads.
    test-build trap. Last because its adoption rules are the riskiest part.
 
 Each phase is measured in qrazil/benchmark before the next starts.
+
+All three are built (2026-10-21), one commit each, and measured together in
+"Cost" against the commit before the first.
 
 ## Configuration
 
@@ -820,3 +850,7 @@ Still open:
     missing and such an object were in fact still reachable, stores into it
     would from then on keep, not adopt -- fewer reports, never a false one.
     The corpus gate is what keeps the list complete.
+12. **A cheaper mode?** Epochs are about half of the cost on
+    allocation-bound code. A `M31_HEAPWATCH=ledger` that keeps the ledger
+    and trace but not epoch close would roughly halve it; not built, since
+    the requirement asks for all three always on.

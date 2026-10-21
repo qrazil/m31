@@ -2468,6 +2468,14 @@ before the enclosing one returns.
 
 Refcount operations are non-atomic (§8.3).
 
+A leaked cycle is the program's bug, and heap watch is how it is found
+(docs/heap-watch-design.md): every object is counted, by allocation site, in a
+ledger file that `m31c -heapwatch` reads from a running or a dead process; a
+site whose objects outlive their normal lifetime is reported, and a unit of
+work that ends with a cycle left behind -- a thread, or a block run by
+`heapwatch.epoch` -- is reported the moment it ends. Nothing is ever freed by
+it and nothing about the program's behaviour changes.
+
 ### 7.2 Ownership protocol
 
   - **Arguments are borrowed.** Passing a value you already hold to a
@@ -2543,6 +2551,12 @@ Trapping conditions:
   - binding a `const`, through an interface, to a value that owns a
     resource (§4.1)
   - `trap(msg)`, with the program's own message (§6.6)
+  - more than 8 589 934 591 references to one object (the count is 33 bits;
+    the rest of the header word is heap watch's, docs/heap-watch-design.md)
+  - in a test build (the runtime compiled with `-DRC_DEBUG`, as the corpus
+    is, or `M31_HEAPWATCH_TRAP=1`): a unit of work -- a thread, or a
+    `heapwatch.epoch` -- that ends with objects it made still held only by
+    one another, a leaked cycle (§7.1)
 
 A trap inside a destructor is a trap like any other. **Releasing** a value is
 not on the list above: a destructor may change, or let go of, the collection

@@ -70,6 +70,16 @@ change landed on master.
   word's other bits hold the object's birth minute and its epoch for heap
   watch, so the header stays two words; nothing reads the count word raw
   any more (`RC_COUNT`, `rt_rc_count`, `rt_rc_set_count`).
+- **Heap watch costs allocation-bound code**: measured +16 % on binary trees
+  and about +65 % on loops that do little but allocate and free, +20 % on a
+  loop that only stores references, nothing on code that does neither
+  (docs/heap-watch-design.md, "Cost"; `bench/heapwatch/run.sh`). It is on
+  by default, as the requirement asks; `M31_HEAPWATCH=0` runs within noise of
+  0.10.0.
+- **The corpus and sanitizer runs compile the runtime once per build** and
+  link it into each test, instead of compiling `rt.c` into every test binary
+  four times: the runtime grew by heap watch, and the corpus gate had
+  outgrown its time limit on a loaded machine.
 - **Every allocation site has its own TypeInfo**, a copy of the type's with
   a ledger slot, its source line and a table of its reference fields. A
   type's identity is `o->ty->canon`; the 18 runtime checks that compared
