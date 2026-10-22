@@ -85,7 +85,7 @@ pub type Cipher {
 
 // `data` XORed with the AES-CTR keystream, advancing the counter block. The
 // leftover keystream of a partly used block goes first, whole blocks then go
-// through `aes.Cipher.ctr_xor_at` (a hardware kernel where the CPU has one),
+// through `aes.Cipher.did_ctr_xor_at` (a hardware kernel where the CPU has one),
 // and only a final partial block is done octet by octet.
 bytes Cipher.ctr_xor(bytes data) {
     bytes out = [0; data.size()];
@@ -96,7 +96,7 @@ bytes Cipher.ctr_xor(bytes data) {
         taken = taken + 1;
     }
     int whole = (data.size() - taken) / 16 * 16;
-    if (whole > 0 && aes_schedule.ctr_xor_at(counter, data, taken, whole, out)) {
+    if (whole > 0 && aes_schedule.did_ctr_xor_at(counter, data, taken, whole, out)) {
         taken = taken + whole;
     }
     while (taken < data.size()) {

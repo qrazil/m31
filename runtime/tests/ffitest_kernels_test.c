@@ -37,6 +37,11 @@ void *memset(void *d, int c, unsigned long n) {
     return d;
 }
 
+extern int64_t rt_k_platform(void);
+extern int64_t rt_k_cache_load(void);
+extern void rt_k_cache_store(int64_t value);
+extern void rt_k_cpuid(uint32_t leaf, uint32_t sub, uint32_t *out);
+
 static long sys3(long n, long a, long b, long c) {
 #if defined(__x86_64__)
     long r;
@@ -147,6 +152,29 @@ static void run(void) {
     check(rt_k_ffitest_mix(-1, 0, 0, 0, 0, 1) == 5, "mix negative");
     check(rt_k_ffitest_mix(INT64_C(1) << 40, 0, 0, 0, 0, 0) == INT64_C(1) << 40, "mix keeps 64 bits");
     check(rt_k_ffitest_mix(0, 0, 0, 0, 0, INT64_C(1) << 40) == INT64_C(6) << 40, "mix keeps 64 bits in the last argument");
+    /* platform, the feature cache word and cpuid (runtime/accel_<arch>.S) */
+    {
+#if defined(__x86_64__)
+        check(rt_k_platform() == 1, "platform is x86-64");
+#else
+        check(rt_k_platform() == 2, "platform is aarch64 Linux");
+#endif
+        check(rt_k_cache_load() == 0, "the cache word starts empty");
+        rt_k_cache_store(0x85);
+        check(rt_k_cache_load() == 0x85, "the cache word keeps what was stored");
+        rt_k_cache_store(INT64_C(1) << 40);
+        check(rt_k_cache_load() == INT64_C(1) << 40, "the cache word is 64 bits");
+        rt_k_cache_store(0);
+        check(rt_k_cache_load() == 0, "the cache word can be emptied");
+        uint32_t regs[4] = {0xAAAAAAAAu, 0xAAAAAAAAu, 0xAAAAAAAAu, 0xAAAAAAAAu};
+        rt_k_cpuid(0, 0, regs);
+#if defined(__x86_64__)
+        check(regs[0] >= 1, "cpuid leaf 0 reports at least leaf 1");
+        check((regs[1] | regs[2] | regs[3]) != 0, "cpuid leaf 0 reports a vendor");
+#else
+        check((regs[0] | regs[1] | regs[2] | regs[3]) == 0, "the aarch64 cpuid stub reports an all-zero CPU");
+#endif
+    }
     /* scale */
     {
         uint8_t t[8] = {1, 2, 3, 4, 5, 6, 7, 8};

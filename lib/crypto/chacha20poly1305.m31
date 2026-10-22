@@ -85,17 +85,42 @@
 // forgery oracle -- the exact class of bug RFC 8439 §3 is warning about one
 // paragraph over from the big-number one.
 
+import crypto.accel;
 import crypto.consttime;
 
-// The hardware kernels (docs/CRYPTO-ACCEL.md): `prim`s into runtime/crypto_glue.c.
-// A kernel runs only if the CPU has the instructions and `M31_CRYPTO_ACCEL` has
-// not switched it off (`__crypto_features` says which bits are set: 4 ChaCha20,
-// 8 Poly1305); otherwise the m31 code below does the work. Both give the same
-// bytes -- tests/cryptodiff runs the suite with and without.
-prim int __crypto_features();
-prim int __crypto_chacha20(bytes key, bytes iv, bytes data, bytes out, int off, int len);
-prim int __crypto_poly1305_blocks(bytes state, bytes data, int off, int count, int hibit);
-prim int __crypto_poly1305_finish(bytes state, bytes pad, bytes out);
+// The hardware kernels (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
+// runtime/crypto_*.S, called with spans the compiler range-checks. A kernel runs
+// only if the CPU has the instructions and `M31_CRYPTO_ACCEL` has not switched
+// it off (`accel.features()` says which bits are set: CHACHA, POLY); otherwise
+// the m31 code below does the work. Both give the same bytes -- tests/cryptodiff
+// runs the suite with and without.
+//
+// ChaCha20: `length` octets of `input` at `offset` XORed with the keystream for
+// `key` (32 octets) and `counter_and_nonce` (16 octets: state words 12 to 15,
+// the block counter first), into `output` at `offset`. Only word 12 counts up
+// across blocks.
+prim "c" nonblocking void __k_chacha20(
+    in bytes key[0 .. 32],
+    in bytes counter_and_nonce[0 .. 16],
+    in bytes input[offset .. offset + length],
+    out bytes output[offset .. offset + length],
+    int length,
+    range int offset);
+// Poly1305 over `count` whole 16-octet blocks of `data` at `offset`. `state` is
+// 40 octets: the accumulator h (three little-endian 64-bit words) then the
+// clamped r (two). `high_bit` is 1 for a full block, 0 for a padded last one.
+prim "c" nonblocking void __k_poly1305_blocks(
+    inout bytes state[0 .. 40],
+    in bytes data[offset .. offset + 16 * count],
+    int count,
+    int high_bit in 0 | 1,
+    range int offset);
+// The tag: `state` as above, `pad` the one-time key's last 16 octets, into
+// `tag` (16 octets).
+prim "c" nonblocking void __k_poly1305_finish(
+    in bytes state[0 .. 40],
+    in bytes pad[0 .. 16],
+    out bytes tag[0 .. 16]);
 
 // --- speed notes (docs/CRYPTO-PERF.md) ----------------------------------------
 //
@@ -146,16 +171,16 @@ int word_le(bytes data, int offset) {
 // out flat so there is no call and no array access between the loads and the
 // stores. RFC 8439 §2.1's quarter round, with a, b, c, d the four indices.
 void chacha20_rounds(Array<int> state, Array<int> out) {
-    int x0 = state[0];
-    int x1 = state[1];
-    int x2 = state[2];
-    int x3 = state[3];
-    int x4 = state[4];
-    int x5 = state[5];
-    int x6 = state[6];
-    int x7 = state[7];
-    int x8 = state[8];
-    int x9 = state[9];
+    int x_0 = state[0];
+    int x_1 = state[1];
+    int x_2 = state[2];
+    int x_3 = state[3];
+    int x_4 = state[4];
+    int x_5 = state[5];
+    int x_6 = state[6];
+    int x_7 = state[7];
+    int x_8 = state[8];
+    int x_9 = state[9];
     int x10 = state[10];
     int x11 = state[11];
     int x12 = state[12];
@@ -167,129 +192,129 @@ void chacha20_rounds(Array<int> state, Array<int> out) {
         // at the end of the last iteration; the first iteration's come from
         // 32-bit words). Saying so again costs one AND each and is what lets
         // the C compiler drop the sign fill from every `>>` below.
-        x0 = x0 & 0xFFFF_FFFF;
-        x1 = x1 & 0xFFFF_FFFF;
-        x2 = x2 & 0xFFFF_FFFF;
-        x3 = x3 & 0xFFFF_FFFF;
-        x4 = x4 & 0xFFFF_FFFF;
-        x5 = x5 & 0xFFFF_FFFF;
-        x6 = x6 & 0xFFFF_FFFF;
-        x7 = x7 & 0xFFFF_FFFF;
-        x8 = x8 & 0xFFFF_FFFF;
-        x9 = x9 & 0xFFFF_FFFF;
+        x_0 = x_0 & 0xFFFF_FFFF;
+        x_1 = x_1 & 0xFFFF_FFFF;
+        x_2 = x_2 & 0xFFFF_FFFF;
+        x_3 = x_3 & 0xFFFF_FFFF;
+        x_4 = x_4 & 0xFFFF_FFFF;
+        x_5 = x_5 & 0xFFFF_FFFF;
+        x_6 = x_6 & 0xFFFF_FFFF;
+        x_7 = x_7 & 0xFFFF_FFFF;
+        x_8 = x_8 & 0xFFFF_FFFF;
+        x_9 = x_9 & 0xFFFF_FFFF;
         x10 = x10 & 0xFFFF_FFFF;
         x11 = x11 & 0xFFFF_FFFF;
         x12 = x12 & 0xFFFF_FFFF;
         x13 = x13 & 0xFFFF_FFFF;
         x14 = x14 & 0xFFFF_FFFF;
         x15 = x15 & 0xFFFF_FFFF;
-        x0 = x0 + x4 & 0xFFFF_FFFF;
-        x12 = x12 ^ x0;
+        x_0 = x_0 + x_4 & 0xFFFF_FFFF;
+        x12 = x12 ^ x_0;
         x12 = (x12 << 16 | x12 >> 16) & 0xFFFF_FFFF;
-        x8 = x8 + x12 & 0xFFFF_FFFF;
-        x4 = x4 ^ x8;
-        x4 = (x4 << 12 | x4 >> 20) & 0xFFFF_FFFF;
-        x0 = x0 + x4 & 0xFFFF_FFFF;
-        x12 = x12 ^ x0;
+        x_8 = x_8 + x12 & 0xFFFF_FFFF;
+        x_4 = x_4 ^ x_8;
+        x_4 = (x_4 << 12 | x_4 >> 20) & 0xFFFF_FFFF;
+        x_0 = x_0 + x_4 & 0xFFFF_FFFF;
+        x12 = x12 ^ x_0;
         x12 = (x12 << 8 | x12 >> 24) & 0xFFFF_FFFF;
-        x8 = x8 + x12 & 0xFFFF_FFFF;
-        x4 = x4 ^ x8;
-        x4 = (x4 << 7 | x4 >> 25) & 0xFFFF_FFFF;
-        x1 = x1 + x5 & 0xFFFF_FFFF;
-        x13 = x13 ^ x1;
+        x_8 = x_8 + x12 & 0xFFFF_FFFF;
+        x_4 = x_4 ^ x_8;
+        x_4 = (x_4 << 7 | x_4 >> 25) & 0xFFFF_FFFF;
+        x_1 = x_1 + x_5 & 0xFFFF_FFFF;
+        x13 = x13 ^ x_1;
         x13 = (x13 << 16 | x13 >> 16) & 0xFFFF_FFFF;
-        x9 = x9 + x13 & 0xFFFF_FFFF;
-        x5 = x5 ^ x9;
-        x5 = (x5 << 12 | x5 >> 20) & 0xFFFF_FFFF;
-        x1 = x1 + x5 & 0xFFFF_FFFF;
-        x13 = x13 ^ x1;
+        x_9 = x_9 + x13 & 0xFFFF_FFFF;
+        x_5 = x_5 ^ x_9;
+        x_5 = (x_5 << 12 | x_5 >> 20) & 0xFFFF_FFFF;
+        x_1 = x_1 + x_5 & 0xFFFF_FFFF;
+        x13 = x13 ^ x_1;
         x13 = (x13 << 8 | x13 >> 24) & 0xFFFF_FFFF;
-        x9 = x9 + x13 & 0xFFFF_FFFF;
-        x5 = x5 ^ x9;
-        x5 = (x5 << 7 | x5 >> 25) & 0xFFFF_FFFF;
-        x2 = x2 + x6 & 0xFFFF_FFFF;
-        x14 = x14 ^ x2;
+        x_9 = x_9 + x13 & 0xFFFF_FFFF;
+        x_5 = x_5 ^ x_9;
+        x_5 = (x_5 << 7 | x_5 >> 25) & 0xFFFF_FFFF;
+        x_2 = x_2 + x_6 & 0xFFFF_FFFF;
+        x14 = x14 ^ x_2;
         x14 = (x14 << 16 | x14 >> 16) & 0xFFFF_FFFF;
         x10 = x10 + x14 & 0xFFFF_FFFF;
-        x6 = x6 ^ x10;
-        x6 = (x6 << 12 | x6 >> 20) & 0xFFFF_FFFF;
-        x2 = x2 + x6 & 0xFFFF_FFFF;
-        x14 = x14 ^ x2;
+        x_6 = x_6 ^ x10;
+        x_6 = (x_6 << 12 | x_6 >> 20) & 0xFFFF_FFFF;
+        x_2 = x_2 + x_6 & 0xFFFF_FFFF;
+        x14 = x14 ^ x_2;
         x14 = (x14 << 8 | x14 >> 24) & 0xFFFF_FFFF;
         x10 = x10 + x14 & 0xFFFF_FFFF;
-        x6 = x6 ^ x10;
-        x6 = (x6 << 7 | x6 >> 25) & 0xFFFF_FFFF;
-        x3 = x3 + x7 & 0xFFFF_FFFF;
-        x15 = x15 ^ x3;
+        x_6 = x_6 ^ x10;
+        x_6 = (x_6 << 7 | x_6 >> 25) & 0xFFFF_FFFF;
+        x_3 = x_3 + x_7 & 0xFFFF_FFFF;
+        x15 = x15 ^ x_3;
         x15 = (x15 << 16 | x15 >> 16) & 0xFFFF_FFFF;
         x11 = x11 + x15 & 0xFFFF_FFFF;
-        x7 = x7 ^ x11;
-        x7 = (x7 << 12 | x7 >> 20) & 0xFFFF_FFFF;
-        x3 = x3 + x7 & 0xFFFF_FFFF;
-        x15 = x15 ^ x3;
+        x_7 = x_7 ^ x11;
+        x_7 = (x_7 << 12 | x_7 >> 20) & 0xFFFF_FFFF;
+        x_3 = x_3 + x_7 & 0xFFFF_FFFF;
+        x15 = x15 ^ x_3;
         x15 = (x15 << 8 | x15 >> 24) & 0xFFFF_FFFF;
         x11 = x11 + x15 & 0xFFFF_FFFF;
-        x7 = x7 ^ x11;
-        x7 = (x7 << 7 | x7 >> 25) & 0xFFFF_FFFF;
-        x0 = x0 + x5 & 0xFFFF_FFFF;
-        x15 = x15 ^ x0;
+        x_7 = x_7 ^ x11;
+        x_7 = (x_7 << 7 | x_7 >> 25) & 0xFFFF_FFFF;
+        x_0 = x_0 + x_5 & 0xFFFF_FFFF;
+        x15 = x15 ^ x_0;
         x15 = (x15 << 16 | x15 >> 16) & 0xFFFF_FFFF;
         x10 = x10 + x15 & 0xFFFF_FFFF;
-        x5 = x5 ^ x10;
-        x5 = (x5 << 12 | x5 >> 20) & 0xFFFF_FFFF;
-        x0 = x0 + x5 & 0xFFFF_FFFF;
-        x15 = x15 ^ x0;
+        x_5 = x_5 ^ x10;
+        x_5 = (x_5 << 12 | x_5 >> 20) & 0xFFFF_FFFF;
+        x_0 = x_0 + x_5 & 0xFFFF_FFFF;
+        x15 = x15 ^ x_0;
         x15 = (x15 << 8 | x15 >> 24) & 0xFFFF_FFFF;
         x10 = x10 + x15 & 0xFFFF_FFFF;
-        x5 = x5 ^ x10;
-        x5 = (x5 << 7 | x5 >> 25) & 0xFFFF_FFFF;
-        x1 = x1 + x6 & 0xFFFF_FFFF;
-        x12 = x12 ^ x1;
+        x_5 = x_5 ^ x10;
+        x_5 = (x_5 << 7 | x_5 >> 25) & 0xFFFF_FFFF;
+        x_1 = x_1 + x_6 & 0xFFFF_FFFF;
+        x12 = x12 ^ x_1;
         x12 = (x12 << 16 | x12 >> 16) & 0xFFFF_FFFF;
         x11 = x11 + x12 & 0xFFFF_FFFF;
-        x6 = x6 ^ x11;
-        x6 = (x6 << 12 | x6 >> 20) & 0xFFFF_FFFF;
-        x1 = x1 + x6 & 0xFFFF_FFFF;
-        x12 = x12 ^ x1;
+        x_6 = x_6 ^ x11;
+        x_6 = (x_6 << 12 | x_6 >> 20) & 0xFFFF_FFFF;
+        x_1 = x_1 + x_6 & 0xFFFF_FFFF;
+        x12 = x12 ^ x_1;
         x12 = (x12 << 8 | x12 >> 24) & 0xFFFF_FFFF;
         x11 = x11 + x12 & 0xFFFF_FFFF;
-        x6 = x6 ^ x11;
-        x6 = (x6 << 7 | x6 >> 25) & 0xFFFF_FFFF;
-        x2 = x2 + x7 & 0xFFFF_FFFF;
-        x13 = x13 ^ x2;
+        x_6 = x_6 ^ x11;
+        x_6 = (x_6 << 7 | x_6 >> 25) & 0xFFFF_FFFF;
+        x_2 = x_2 + x_7 & 0xFFFF_FFFF;
+        x13 = x13 ^ x_2;
         x13 = (x13 << 16 | x13 >> 16) & 0xFFFF_FFFF;
-        x8 = x8 + x13 & 0xFFFF_FFFF;
-        x7 = x7 ^ x8;
-        x7 = (x7 << 12 | x7 >> 20) & 0xFFFF_FFFF;
-        x2 = x2 + x7 & 0xFFFF_FFFF;
-        x13 = x13 ^ x2;
+        x_8 = x_8 + x13 & 0xFFFF_FFFF;
+        x_7 = x_7 ^ x_8;
+        x_7 = (x_7 << 12 | x_7 >> 20) & 0xFFFF_FFFF;
+        x_2 = x_2 + x_7 & 0xFFFF_FFFF;
+        x13 = x13 ^ x_2;
         x13 = (x13 << 8 | x13 >> 24) & 0xFFFF_FFFF;
-        x8 = x8 + x13 & 0xFFFF_FFFF;
-        x7 = x7 ^ x8;
-        x7 = (x7 << 7 | x7 >> 25) & 0xFFFF_FFFF;
-        x3 = x3 + x4 & 0xFFFF_FFFF;
-        x14 = x14 ^ x3;
+        x_8 = x_8 + x13 & 0xFFFF_FFFF;
+        x_7 = x_7 ^ x_8;
+        x_7 = (x_7 << 7 | x_7 >> 25) & 0xFFFF_FFFF;
+        x_3 = x_3 + x_4 & 0xFFFF_FFFF;
+        x14 = x14 ^ x_3;
         x14 = (x14 << 16 | x14 >> 16) & 0xFFFF_FFFF;
-        x9 = x9 + x14 & 0xFFFF_FFFF;
-        x4 = x4 ^ x9;
-        x4 = (x4 << 12 | x4 >> 20) & 0xFFFF_FFFF;
-        x3 = x3 + x4 & 0xFFFF_FFFF;
-        x14 = x14 ^ x3;
+        x_9 = x_9 + x14 & 0xFFFF_FFFF;
+        x_4 = x_4 ^ x_9;
+        x_4 = (x_4 << 12 | x_4 >> 20) & 0xFFFF_FFFF;
+        x_3 = x_3 + x_4 & 0xFFFF_FFFF;
+        x14 = x14 ^ x_3;
         x14 = (x14 << 8 | x14 >> 24) & 0xFFFF_FFFF;
-        x9 = x9 + x14 & 0xFFFF_FFFF;
-        x4 = x4 ^ x9;
-        x4 = (x4 << 7 | x4 >> 25) & 0xFFFF_FFFF;
+        x_9 = x_9 + x14 & 0xFFFF_FFFF;
+        x_4 = x_4 ^ x_9;
+        x_4 = (x_4 << 7 | x_4 >> 25) & 0xFFFF_FFFF;
     }
-    out[0] = x0 + state[0] & 0xFFFF_FFFF;
-    out[1] = x1 + state[1] & 0xFFFF_FFFF;
-    out[2] = x2 + state[2] & 0xFFFF_FFFF;
-    out[3] = x3 + state[3] & 0xFFFF_FFFF;
-    out[4] = x4 + state[4] & 0xFFFF_FFFF;
-    out[5] = x5 + state[5] & 0xFFFF_FFFF;
-    out[6] = x6 + state[6] & 0xFFFF_FFFF;
-    out[7] = x7 + state[7] & 0xFFFF_FFFF;
-    out[8] = x8 + state[8] & 0xFFFF_FFFF;
-    out[9] = x9 + state[9] & 0xFFFF_FFFF;
+    out[0] = x_0 + state[0] & 0xFFFF_FFFF;
+    out[1] = x_1 + state[1] & 0xFFFF_FFFF;
+    out[2] = x_2 + state[2] & 0xFFFF_FFFF;
+    out[3] = x_3 + state[3] & 0xFFFF_FFFF;
+    out[4] = x_4 + state[4] & 0xFFFF_FFFF;
+    out[5] = x_5 + state[5] & 0xFFFF_FFFF;
+    out[6] = x_6 + state[6] & 0xFFFF_FFFF;
+    out[7] = x_7 + state[7] & 0xFFFF_FFFF;
+    out[8] = x_8 + state[8] & 0xFFFF_FFFF;
+    out[9] = x_9 + state[9] & 0xFFFF_FFFF;
     out[10] = x10 + state[10] & 0xFFFF_FFFF;
     out[11] = x11 + state[11] & 0xFFFF_FFFF;
     out[12] = x12 + state[12] & 0xFFFF_FFFF;
@@ -360,9 +385,9 @@ bytes block_bytes(Array<int> state) {
 void chacha20_xor(Array<int> state, int counter, int wide, bytes data, int count, bytes out) {
     // The kernel counts word 12 only, so a 64-bit counter that would carry into
     // word 13 inside this call takes the portable path.
-    if (count > 0 && (__crypto_features() & 4) != 0 && (wide == 0 || (counter & 0xFFFF_FFFF) + blocks_for(count) <= 0x1_0000_0000)) {
+    if (count > 0 && (accel.features() & accel.CHACHA) != 0 && (wide == 0 || (counter & 0xFFFF_FFFF) + blocks_for(count) <= 0x1_0000_0000)) {
         bytes key = [0; 32];
-        bytes iv = [0; 16];
+        bytes counter_nonce = [0; 16];
         for (int i in 0 .. 8) {
             int word = state[4 + i];
             for (int j in 0 .. 4) {
@@ -374,14 +399,13 @@ void chacha20_xor(Array<int> state, int counter, int wide, bytes data, int count
             counter_high = counter >> 32 & 0xFFFF_FFFF;
         }
         for (int j in 0 .. 4) {
-            iv[j] = counter >> (8 * j) & 0xFF;
-            iv[4 + j] = counter_high >> (8 * j) & 0xFF;
-            iv[8 + j] = state[14] >> (8 * j) & 0xFF;
-            iv[12 + j] = state[15] >> (8 * j) & 0xFF;
+            counter_nonce[j] = counter >> (8 * j) & 0xFF;
+            counter_nonce[4 + j] = counter_high >> (8 * j) & 0xFF;
+            counter_nonce[8 + j] = state[14] >> (8 * j) & 0xFF;
+            counter_nonce[12 + j] = state[15] >> (8 * j) & 0xFF;
         }
-        if (__crypto_chacha20(key, iv, data, out, 0, count) == 0) {
-            return;
-        }
+        __k_chacha20(key, counter_nonce, data, out, count, 0);
+        return;
     }
     Array<int> stream = [0; 16];
     int position = 0;
@@ -394,11 +418,11 @@ void chacha20_xor(Array<int> state, int counter, int wide, bytes data, int count
         chacha20_rounds(state, stream);
         for (int i in 0 .. 16) {
             int word = stream[i] & 0xFFFF_FFFF;
-            int at = position + 4 * i;
-            out[at] = data[at] ^ (word & 0xFF);
-            out[at + 1] = data[at + 1] ^ (word >> 8 & 0xFF);
-            out[at + 2] = data[at + 2] ^ (word >> 16 & 0xFF);
-            out[at + 3] = data[at + 3] ^ (word >> 24 & 0xFF);
+            int word_start = position + 4 * i;
+            out[word_start] = data[word_start] ^ (word & 0xFF);
+            out[word_start + 1] = data[word_start + 1] ^ (word >> 8 & 0xFF);
+            out[word_start + 2] = data[word_start + 2] ^ (word >> 16 & 0xFF);
+            out[word_start + 3] = data[word_start + 3] ^ (word >> 24 & 0xFF);
         }
         position = position + 64;
         block_index = block_index + 1;
@@ -506,59 +530,59 @@ pub bytes openssh_encrypt(bytes key, int counter, bytes nonce, bytes data) {
 // `k7`: `r` in the first four, clamped and split into limbs in one step (each
 // limb a shifted, masked read of the 128-bit number; the mask is also RFC 8439
 // §2.5.1's clamp for the bits it keeps), `s` in the last four.
-Array<int> poly_limbs(int k0, int k1, int k2, int k3, int k4, int k5, int k6, int k7) {
-    Array<int> p = [0; 18];
-    int r1 = (k0 >> 26 | k1 << 6) & 0x03FF_FF03;
-    int r2 = (k1 >> 20 | k2 << 12) & 0x03FF_C0FF;
-    int r3 = (k2 >> 14 | k3 << 18) & 0x03F0_3FFF;
-    int r4 = k3 >> 8 & 0x000F_FFFF;
-    p[5] = k0 & 0x03FF_FFFF;
-    p[6] = r1;
-    p[7] = r2;
-    p[8] = r3;
-    p[9] = r4;
-    p[10] = r1 * 5;
-    p[11] = r2 * 5;
-    p[12] = r3 * 5;
-    p[13] = r4 * 5;
-    p[14] = k4;
-    p[15] = k5;
-    p[16] = k6;
-    p[17] = k7;
-    return p;
+Array<int> poly_limbs(int k_0, int k_1, int k_2, int k_3, int k_4, int k_5, int k_6, int k_7) {
+    Array<int> poly = [0; 18];
+    int r_1 = (k_0 >> 26 | k_1 << 6) & 0x03FF_FF03;
+    int r_2 = (k_1 >> 20 | k_2 << 12) & 0x03FF_C0FF;
+    int r_3 = (k_2 >> 14 | k_3 << 18) & 0x03F0_3FFF;
+    int r_4 = k_3 >> 8 & 0x000F_FFFF;
+    poly[5] = k_0 & 0x03FF_FFFF;
+    poly[6] = r_1;
+    poly[7] = r_2;
+    poly[8] = r_3;
+    poly[9] = r_4;
+    poly[10] = r_1 * 5;
+    poly[11] = r_2 * 5;
+    poly[12] = r_3 * 5;
+    poly[13] = r_4 * 5;
+    poly[14] = k_4;
+    poly[15] = k_5;
+    poly[16] = k_6;
+    poly[17] = k_7;
+    return poly;
 }
 
 // A running Poly1305: the five-limb state above for the portable code, or the
 // kernel's 40-octet state (h as three 64-bit words, r as two) and the 16-octet
-// pad when a kernel will do the blocks. `hardware` says which.
+// pad when a kernel will do the blocks. `is_hardware` says which.
 type Poly {
     Array<int> limbs;
     bytes packed;
     bytes pad;
-    bool hardware;
+    bool is_hardware;
 }
 
 // Eight bytes of `value`, little-endian, into `out` at `at`.
-void put64(bytes out, int at, int value) {
+void put64(bytes out, int position, int value) {
     for (int j in 0 .. 8) {
-        out[at + j] = value >> (8 * j) & 0xFF;
+        out[position + j] = value >> (8 * j) & 0xFF;
     }
 }
 
 // The `Poly` for the one-time key whose eight little-endian words are `k0` to `k7`.
-Poly poly_start(int k0, int k1, int k2, int k3, int k4, int k5, int k6, int k7) {
-    if ((__crypto_features() & 8) != 0) {
+Poly poly_start(int k_0, int k_1, int k_2, int k_3, int k_4, int k_5, int k_6, int k_7) {
+    if ((accel.features() & accel.POLY) != 0) {
         // r clamped (RFC 8439 §2.5.1) as two 64-bit words: the same masks as the
         // limb version, applied to the 32-bit words.
         bytes packed = [0; 40];
-        put64(packed, 24, (k0 & 0x0FFF_FFFF) | ((k1 & 0x0FFF_FFFC) << 32));
-        put64(packed, 32, (k2 & 0x0FFF_FFFC) | ((k3 & 0x0FFF_FFFC) << 32));
+        put64(packed, 24, (k_0 & 0x0FFF_FFFF) | ((k_1 & 0x0FFF_FFFC) << 32));
+        put64(packed, 32, (k_2 & 0x0FFF_FFFC) | ((k_3 & 0x0FFF_FFFC) << 32));
         bytes pad = [0; 16];
-        put64(pad, 0, k4 | (k5 << 32));
-        put64(pad, 8, k6 | (k7 << 32));
+        put64(pad, 0, k_4 | (k_5 << 32));
+        put64(pad, 8, k_6 | (k_7 << 32));
         return Poly([0; 1], packed, pad, true);
     }
-    return Poly(poly_limbs(k0, k1, k2, k3, k4, k5, k6, k7), [0; 1], [0; 1], false);
+    return Poly(poly_limbs(k_0, k_1, k_2, k_3, k_4, k_5, k_6, k_7), [0; 1], [0; 1], false);
 }
 
 // `block_count` whole 16-octet blocks of `data` from `start`, folded into the
@@ -568,21 +592,21 @@ Poly poly_start(int k0, int k1, int k2, int k3, int k4, int k5, int k6, int k7) 
 // bare `mac`, where the trailing `0x01` the caller already wrote stands for
 // it. The accumulator is left slightly above five 26-bit limbs when the final
 // carry itself overflows a limb, which `poly_finish`'s own full carry accounts for.
-void poly_blocks_limbs(Array<int> p, bytes data, int start, int block_count, int hibit) {
-    int h0 = p[0];
-    int h1 = p[1];
-    int h2 = p[2];
-    int h3 = p[3];
-    int h4 = p[4];
-    int r0 = p[5];
-    int r1 = p[6];
-    int r2 = p[7];
-    int r3 = p[8];
-    int r4 = p[9];
-    int s1 = p[10];
-    int s2 = p[11];
-    int s3 = p[12];
-    int s4 = p[13];
+void poly_blocks_limbs(Array<int> poly, bytes data, int start, int block_count, int hibit) {
+    int h_0 = poly[0];
+    int h_1 = poly[1];
+    int h_2 = poly[2];
+    int h_3 = poly[3];
+    int h_4 = poly[4];
+    int r_0 = poly[5];
+    int r_1 = poly[6];
+    int r_2 = poly[7];
+    int r_3 = poly[8];
+    int r_4 = poly[9];
+    int s_1 = poly[10];
+    int s_2 = poly[11];
+    int s_3 = poly[12];
+    int s_4 = poly[13];
     int offset = start;
     for (int index in 0 .. block_count) {
         int word_0 = data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24);
@@ -591,59 +615,57 @@ void poly_blocks_limbs(Array<int> p, bytes data, int start, int block_count, int
         int word_3 = data[offset + 12] | (data[offset + 13] << 8) | (data[offset + 14] << 16) | (data[offset + 15] << 24);
         // The block as five overlapping 26-bit windows of the 128-bit
         // little-endian number it is.
-        h0 = h0 + (word_0 & 0x03FF_FFFF);
-        h1 = h1 + ((word_0 >> 26 | word_1 << 6) & 0x03FF_FFFF);
-        h2 = h2 + ((word_1 >> 20 | word_2 << 12) & 0x03FF_FFFF);
-        h3 = h3 + ((word_2 >> 14 | word_3 << 18) & 0x03FF_FFFF);
-        h4 = h4 + (word_3 >> 8 | hibit);
+        h_0 = h_0 + (word_0 & 0x03FF_FFFF);
+        h_1 = h_1 + ((word_0 >> 26 | word_1 << 6) & 0x03FF_FFFF);
+        h_2 = h_2 + ((word_1 >> 20 | word_2 << 12) & 0x03FF_FFFF);
+        h_3 = h_3 + ((word_2 >> 14 | word_3 << 18) & 0x03FF_FFFF);
+        h_4 = h_4 + (word_3 >> 8 | hibit);
         // h *= r, mod 2^130 - 5, a limb at a time: d[i] collects every
         // partial product that lands in limb i, the wraparound from limb 5 and
-        // up folded back in by using s[k] = 5 * r[k] (2^130 = 5 mod p).
-        int d0 = h0.wrapping_mul(r0).wrapping_add(h1.wrapping_mul(s4)).wrapping_add(h2.wrapping_mul(s3)).wrapping_add(h3.wrapping_mul(s2)).wrapping_add(h4.wrapping_mul(s1));
-        int d1 = h0.wrapping_mul(r1).wrapping_add(h1.wrapping_mul(r0)).wrapping_add(h2.wrapping_mul(s4)).wrapping_add(h3.wrapping_mul(s3)).wrapping_add(h4.wrapping_mul(s2));
-        int d2 = h0.wrapping_mul(r2).wrapping_add(h1.wrapping_mul(r1)).wrapping_add(h2.wrapping_mul(r0)).wrapping_add(h3.wrapping_mul(s4)).wrapping_add(h4.wrapping_mul(s3));
-        int d3 = h0.wrapping_mul(r3).wrapping_add(h1.wrapping_mul(r2)).wrapping_add(h2.wrapping_mul(r1)).wrapping_add(h3.wrapping_mul(r0)).wrapping_add(h4.wrapping_mul(s4));
-        int d4 = h0.wrapping_mul(r4).wrapping_add(h1.wrapping_mul(r3)).wrapping_add(h2.wrapping_mul(r2)).wrapping_add(h3.wrapping_mul(r1)).wrapping_add(h4.wrapping_mul(r0));
+        // up folded back in by using s[k] = 5 * r[k] (2^130 = 5 mod poly).
+        int d_0 = h_0.wrapping_mul(r_0).wrapping_add(h_1.wrapping_mul(s_4)).wrapping_add(h_2.wrapping_mul(s_3)).wrapping_add(h_3.wrapping_mul(s_2)).wrapping_add(h_4.wrapping_mul(s_1));
+        int d_1 = h_0.wrapping_mul(r_1).wrapping_add(h_1.wrapping_mul(r_0)).wrapping_add(h_2.wrapping_mul(s_4)).wrapping_add(h_3.wrapping_mul(s_3)).wrapping_add(h_4.wrapping_mul(s_2));
+        int d_2 = h_0.wrapping_mul(r_2).wrapping_add(h_1.wrapping_mul(r_1)).wrapping_add(h_2.wrapping_mul(r_0)).wrapping_add(h_3.wrapping_mul(s_4)).wrapping_add(h_4.wrapping_mul(s_3));
+        int d_3 = h_0.wrapping_mul(r_3).wrapping_add(h_1.wrapping_mul(r_2)).wrapping_add(h_2.wrapping_mul(r_1)).wrapping_add(h_3.wrapping_mul(r_0)).wrapping_add(h_4.wrapping_mul(s_4));
+        int d_4 = h_0.wrapping_mul(r_4).wrapping_add(h_1.wrapping_mul(r_3)).wrapping_add(h_2.wrapping_mul(r_2)).wrapping_add(h_3.wrapping_mul(r_1)).wrapping_add(h_4.wrapping_mul(r_0));
         // Carry radix-2^26, left to right, the last carry folded back into
-        // limb 0 times 5 (again 2^130 = 5 mod p).
-        int carry = d0 >> 26;
-        h0 = d0 & 0x03FF_FFFF;
-        d1 = d1 + carry;
-        carry = d1 >> 26;
-        h1 = d1 & 0x03FF_FFFF;
-        d2 = d2 + carry;
-        carry = d2 >> 26;
-        h2 = d2 & 0x03FF_FFFF;
-        d3 = d3 + carry;
-        carry = d3 >> 26;
-        h3 = d3 & 0x03FF_FFFF;
-        d4 = d4 + carry;
-        carry = d4 >> 26;
-        h4 = d4 & 0x03FF_FFFF;
-        h0 = h0 + carry * 5;
-        carry = h0 >> 26;
-        h0 = h0 & 0x03FF_FFFF;
-        h1 = h1 + carry;
+        // limb 0 times 5 (again 2^130 = 5 mod poly).
+        int carry = d_0 >> 26;
+        h_0 = d_0 & 0x03FF_FFFF;
+        d_1 = d_1 + carry;
+        carry = d_1 >> 26;
+        h_1 = d_1 & 0x03FF_FFFF;
+        d_2 = d_2 + carry;
+        carry = d_2 >> 26;
+        h_2 = d_2 & 0x03FF_FFFF;
+        d_3 = d_3 + carry;
+        carry = d_3 >> 26;
+        h_3 = d_3 & 0x03FF_FFFF;
+        d_4 = d_4 + carry;
+        carry = d_4 >> 26;
+        h_4 = d_4 & 0x03FF_FFFF;
+        h_0 = h_0 + carry * 5;
+        carry = h_0 >> 26;
+        h_0 = h_0 & 0x03FF_FFFF;
+        h_1 = h_1 + carry;
         offset = offset + 16;
     }
-    p[0] = h0;
-    p[1] = h1;
-    p[2] = h2;
-    p[3] = h3;
-    p[4] = h4;
+    poly[0] = h_0;
+    poly[1] = h_1;
+    poly[2] = h_2;
+    poly[3] = h_3;
+    poly[4] = h_4;
 }
 
 // `block_count` whole blocks, by the kernel or by `poly_blocks_limbs`.
 void poly_blocks(Poly poly, bytes data, int start, int block_count, int hibit) {
-    if (poly.hardware) {
+    if (poly.is_hardware) {
         if (block_count > 0) {
             int high = 0;
             if (hibit != 0) {
                 high = 1;
             }
-            if (__crypto_poly1305_blocks(poly.packed, data, start, block_count, high) != 0) {
-                trap("poly1305: kernel refused after being offered");
-            }
+            __k_poly1305_blocks(poly.packed, data, block_count, high, start);
         }
     } else {
         poly_blocks_limbs(poly.limbs, data, start, block_count, hibit);
@@ -655,9 +677,9 @@ void poly_blocks(Poly poly, bytes data, int start, int block_count, int hibit) {
 // bare `mac` (RFC 8439 §2.5.1: a `0x01` octet after the message, no implicit
 // high bit) and 0 for the AEAD's segments (§2.8: zero padding to 16, then
 // every block, the padded one included, carries the high bit).
-void poly_feed(Poly p, bytes data, int start, int end, int terminated) {
+void poly_feed(Poly poly, bytes data, int start, int end, int terminated) {
     int whole = (end - start) / 16;
-    poly_blocks(p, data, start, whole, 1 << 24);
+    poly_blocks(poly, data, start, whole, 1 << 24);
     int taken = start + whole * 16;
     if (taken < end) {
         bytes last = [0; 16];
@@ -666,9 +688,9 @@ void poly_feed(Poly p, bytes data, int start, int end, int terminated) {
         }
         if (terminated == 1) {
             last[end - taken] = 1;
-            poly_blocks(p, last, 0, 1, 0);
+            poly_blocks(poly, last, 0, 1, 0);
         } else {
-            poly_blocks(p, last, 0, 1, 1 << 24);
+            poly_blocks(poly, last, 0, 1, 1 << 24);
         }
     }
 }
@@ -676,76 +698,74 @@ void poly_feed(Poly p, bytes data, int start, int end, int terminated) {
 // The 16-octet tag: the full carry `poly_blocks` leaves undone, the final
 // reduction mod 2^130 - 5, then (h + s) mod 2^128.
 bytes poly_finish(Poly poly) {
-    if (poly.hardware) {
+    if (poly.is_hardware) {
         bytes tag = [0; 16];
-        if (__crypto_poly1305_finish(poly.packed, poly.pad, tag) != 0) {
-            trap("poly1305: kernel refused after being offered");
-        }
+        __k_poly1305_finish(poly.packed, poly.pad, tag);
         return tag;
     }
-    Array<int> p = poly.limbs;
-    int h0 = p[0];
-    int h1 = p[1];
-    int h2 = p[2];
-    int h3 = p[3];
-    int h4 = p[4];
-    int carry = h1 >> 26;
-    h1 = h1 & 0x03FF_FFFF;
-    h2 = h2 + carry;
-    carry = h2 >> 26;
-    h2 = h2 & 0x03FF_FFFF;
-    h3 = h3 + carry;
-    carry = h3 >> 26;
-    h3 = h3 & 0x03FF_FFFF;
-    h4 = h4 + carry;
-    carry = h4 >> 26;
-    h4 = h4 & 0x03FF_FFFF;
-    h0 = h0 + carry * 5;
-    carry = h0 >> 26;
-    h0 = h0 & 0x03FF_FFFF;
-    h1 = h1 + carry;
-    // `h` is below 2*p but may still be at or past p (RFC 8439's own "P" =
-    // 2^130-5): compute h - p alongside h, and keep whichever of the two is
-    // actually less than p. `g4`'s top bit (bit 31 of its 32-bit range) is 1
-    // exactly when `h - p` borrowed, i.e. exactly when h was already below p.
-    int g0 = h0 + 5;  // RFC 8439 §2.5.1: h - P
-    carry = g0 >> 26;
-    g0 = g0 & 0x03FF_FFFF;
-    int g1 = h1 + carry;  // RFC 8439 §2.5.1: h - P
-    carry = g1 >> 26;
-    g1 = g1 & 0x03FF_FFFF;
-    int g2 = h2 + carry;  // RFC 8439 §2.5.1: h - P
-    carry = g2 >> 26;
-    g2 = g2 & 0x03FF_FFFF;
-    int g3 = h3 + carry;  // RFC 8439 §2.5.1: h - P
-    carry = g3 >> 26;
-    g3 = g3 & 0x03FF_FFFF;
-    int g4 = h4 + carry - (1 << 26) & 0xFFFF_FFFF;  // RFC 8439 §2.5.1: h - P
+    Array<int> limb_words = poly.limbs;
+    int h_0 = limb_words[0];
+    int h_1 = limb_words[1];
+    int h_2 = limb_words[2];
+    int h_3 = limb_words[3];
+    int h_4 = limb_words[4];
+    int carry = h_1 >> 26;
+    h_1 = h_1 & 0x03FF_FFFF;
+    h_2 = h_2 + carry;
+    carry = h_2 >> 26;
+    h_2 = h_2 & 0x03FF_FFFF;
+    h_3 = h_3 + carry;
+    carry = h_3 >> 26;
+    h_3 = h_3 & 0x03FF_FFFF;
+    h_4 = h_4 + carry;
+    carry = h_4 >> 26;
+    h_4 = h_4 & 0x03FF_FFFF;
+    h_0 = h_0 + carry * 5;
+    carry = h_0 >> 26;
+    h_0 = h_0 & 0x03FF_FFFF;
+    h_1 = h_1 + carry;
+    // `h` is below 2*limb_words but may still be at or past limb_words (RFC 8439's own "P" =
+    // 2^130-5): compute h - limb_words alongside h, and keep whichever of the two is
+    // actually less than limb_words. `g4`'s top bit (bit 31 of its 32-bit range) is 1
+    // exactly when `h - p` borrowed, i.e. exactly when h was already below limb_words.
+    int g_0 = h_0 + 5;  // RFC 8439 §2.5.1: h - P
+    carry = g_0 >> 26;
+    g_0 = g_0 & 0x03FF_FFFF;
+    int g_1 = h_1 + carry;  // RFC 8439 §2.5.1: h - P
+    carry = g_1 >> 26;
+    g_1 = g_1 & 0x03FF_FFFF;
+    int g_2 = h_2 + carry;  // RFC 8439 §2.5.1: h - P
+    carry = g_2 >> 26;
+    g_2 = g_2 & 0x03FF_FFFF;
+    int g_3 = h_3 + carry;  // RFC 8439 §2.5.1: h - P
+    carry = g_3 >> 26;
+    g_3 = g_3 & 0x03FF_FFFF;
+    int g_4 = h_4 + carry - (1 << 26) & 0xFFFF_FFFF;  // RFC 8439 §2.5.1: h - P
     // `bit - 1` is all-zero bits when `bit` is 1 and all-one bits when `bit`
     // is 0 (two's complement -1), which turns the single bit into the two
     // masks below -- an arithmetic recreation of the branch so both paths
     // take the same time regardless of which one the result needs.
-    int mask = (g4 >> 31 & 1) - 1 & 0xFFFF_FFFF;
+    int mask = (g_4 >> 31 & 1) - 1 & 0xFFFF_FFFF;
     int notmask = ~mask & 0xFFFF_FFFF;
-    h0 = h0 & notmask | g0 & mask;
-    h1 = h1 & notmask | g1 & mask;
-    h2 = h2 & notmask | g2 & mask;
-    h3 = h3 & notmask | g3 & mask;
-    h4 = h4 & notmask | g4 & mask;
+    h_0 = h_0 & notmask | g_0 & mask;
+    h_1 = h_1 & notmask | g_1 & mask;
+    h_2 = h_2 & notmask | g_2 & mask;
+    h_3 = h_3 & notmask | g_3 & mask;
+    h_4 = h_4 & notmask | g_4 & mask;
     // Five 26-bit limbs back to four 32-bit words, then tag = (h + s) mod
     // 2^128: a 128-bit little-endian add, each carry taken from the previous
     // word's overflow past 32 bits.
-    int tag_0 = (h0 | h1 << 26) & 0xFFFF_FFFF;
-    int tag_1 = (h1 >> 6 | h2 << 20) & 0xFFFF_FFFF;
-    int tag_2 = (h2 >> 12 | h3 << 14) & 0xFFFF_FFFF;
-    int tag_3 = (h3 >> 18 | h4 << 8) & 0xFFFF_FFFF;
-    int word_sum = tag_0 + p[14];
+    int tag_0 = (h_0 | h_1 << 26) & 0xFFFF_FFFF;
+    int tag_1 = (h_1 >> 6 | h_2 << 20) & 0xFFFF_FFFF;
+    int tag_2 = (h_2 >> 12 | h_3 << 14) & 0xFFFF_FFFF;
+    int tag_3 = (h_3 >> 18 | h_4 << 8) & 0xFFFF_FFFF;
+    int word_sum = tag_0 + limb_words[14];
     tag_0 = word_sum & 0xFFFF_FFFF;
-    word_sum = tag_1 + p[15] + (word_sum >> 32);
+    word_sum = tag_1 + limb_words[15] + (word_sum >> 32);
     tag_1 = word_sum & 0xFFFF_FFFF;
-    word_sum = tag_2 + p[16] + (word_sum >> 32);
+    word_sum = tag_2 + limb_words[16] + (word_sum >> 32);
     tag_2 = word_sum & 0xFFFF_FFFF;
-    word_sum = tag_3 + p[17] + (word_sum >> 32);
+    word_sum = tag_3 + limb_words[17] + (word_sum >> 32);
     tag_3 = word_sum & 0xFFFF_FFFF;
     bytes out = [0; 16];
     for (int i in 0 .. 4) {
@@ -774,9 +794,9 @@ pub bytes mac(bytes key, bytes message) {
     if (key.size() != 32) {
         trap("poly1305: key must be 32 bytes");
     }
-    Poly p = poly_start(word_le(key, 0), word_le(key, 4), word_le(key, 8), word_le(key, 12), word_le(key, 16), word_le(key, 20), word_le(key, 24), word_le(key, 28));
-    poly_feed(p, message, 0, message.size(), 1);
-    return poly_finish(p);
+    Poly poly = poly_start(word_le(key, 0), word_le(key, 4), word_le(key, 8), word_le(key, 12), word_le(key, 16), word_le(key, 20), word_le(key, 24), word_le(key, 28));
+    poly_feed(poly, message, 0, message.size(), 1);
+    return poly_finish(poly);
 }
 
 // --- the AEAD construction ---------------------------------------------------
@@ -817,17 +837,17 @@ Poly aead_state(Array<int> state, bytes aad, bytes ciphertext, int ciphertext_le
     Array<int> words = [0; 16];
     state[12] = 0;
     chacha20_rounds(state, words);
-    Poly p = poly_start(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
-    poly_feed(p, aad, 0, aad.size(), 0);
-    poly_feed(p, ciphertext, 0, ciphertext_length, 0);
+    Poly poly = poly_start(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
+    poly_feed(poly, aad, 0, aad.size(), 0);
+    poly_feed(poly, ciphertext, 0, ciphertext_length, 0);
     bytes lengths = [0; 16];
     int aad_length = aad.size();
     for (int i in 0 .. 8) {
         lengths[i] = aad_length >> (8 * i) & 0xFF;
         lengths[8 + i] = ciphertext_length >> (8 * i) & 0xFF;
     }
-    poly_blocks(p, lengths, 0, 1, 1 << 24);
-    return p;
+    poly_blocks(poly, lengths, 0, 1, 1 << 24);
+    return poly;
 }
 
 /// Encrypt and authenticate: RFC 8439 §2.8, `AEAD_CHACHA20_POLY1305`'s
@@ -843,8 +863,8 @@ pub bytes seal(bytes key, bytes nonce, bytes plaintext, bytes aad) {
     Array<int> state = ietf_state(key, nonce);
     bytes out = [0; length + 16];
     chacha20_xor(state, 1, 0, plaintext, length, out);
-    Poly p = aead_state(state, aad, out, length);
-    bytes tag = poly_finish(p);
+    Poly poly = aead_state(state, aad, out, length);
+    bytes tag = poly_finish(poly);
     for (int i in 0 .. 16) {
         out[length + i] = tag[i];
     }
@@ -862,8 +882,8 @@ pub Result<bytes, Error> open(bytes key, bytes nonce, bytes sealed, bytes aad) {
     }
     int length = sealed.size() - 16;
     Array<int> state = ietf_state(key, nonce);
-    Poly p = aead_state(state, aad, sealed, length);
-    bytes want = poly_finish(p);
+    Poly poly = aead_state(state, aad, sealed, length);
+    bytes want = poly_finish(poly);
     if (!consttime.is_equal(want, sealed.substr(length, sealed.size()))) {
         return Result<bytes, Error>.Err(Error.Tag);
     }

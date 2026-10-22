@@ -51,13 +51,29 @@
 // process's memory. It is still far from AES-NI (see docs/CRYPTO-ACCEL.md):
 // a few tens of MiB/s against several GiB/s.
 
-// The hardware kernels (docs/CRYPTO-ACCEL.md): `prim`s into runtime/crypto_glue.c.
-// A kernel runs only if the CPU has AES-NI and PCLMULQDQ (or ARMv8 AES and PMULL)
-// and `M31_CRYPTO_ACCEL` has not switched it off (`__crypto_features` bit 1);
-// otherwise the bitsliced m31 code below does the work, with the same bytes out.
-prim int __crypto_features();
-prim int __crypto_aes_ecb(bytes schedule, int rounds, bytes data, bytes out, int off, int count);
-prim int __crypto_aes_ctr(bytes schedule, int rounds, bytes counter, bytes data, bytes out, int off, int count);
+import crypto.accel;
+
+// The hardware kernels (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
+// runtime/crypto_*.S, called with spans the compiler range-checks. A kernel runs
+// only if the CPU has AES-NI and PCLMULQDQ (or ARMv8 AES and PMULL), the key is
+// AES-128 or AES-256, and `M31_CRYPTO_ACCEL` has not switched it off
+// (`accel.features()`); otherwise the bitsliced m31 code below does the work,
+// with the same bytes out. `schedule` is the standard expanded key.
+prim "c" nonblocking void __k_aes_ecb(
+    in bytes schedule[0 .. 16 * (rounds + 1)],
+    int rounds in 10 | 14,
+    in bytes input[offset .. offset + 16 * count],
+    out bytes output[offset .. offset + 16 * count],
+    int count,
+    range int offset);
+prim "c" nonblocking void __k_aes_ctr(
+    in bytes schedule[0 .. 16 * (rounds + 1)],
+    int rounds in 10 | 14,
+    inout bytes counter[0 .. 16],
+    in bytes input[offset .. offset + 16 * count],
+    out bytes output[offset .. offset + 16 * count],
+    int count,
+    range int offset);
 
 /// A key schedule, ready to encrypt blocks. Built by `cipher`.
 pub type Cipher {
@@ -79,6 +95,12 @@ pub bytes Cipher.encrypt_block(bytes block) {
     return encrypt_blocks(block);
 }
 
+// Whether the kernels may run for this key: the CPU has them, they are not
+// switched off, and the key is AES-128 or AES-256 (the round counts they take).
+bool Cipher.has_kernel() {
+    return (accel.features() & accel.AES) != 0 && (rounds == 10 || rounds == 14);
+}
+
 /// Encrypts `blocks`, any whole number of 16-octet blocks, each independently
 /// (ECB -- the building block of CTR and GCM, not a mode to use on its own).
 /// Any length that is not a multiple of 16 traps.
@@ -88,7 +110,8 @@ pub bytes Cipher.encrypt_blocks(bytes blocks) {
         trap("aes: input must be a whole number of 16-octet blocks");
     }
     bytes out = [0; size];
-    if (size > 0 && (__crypto_features() & 1) != 0 && __crypto_aes_ecb(schedule, rounds, blocks, out, 0, size / 16) == 0) {
+    if (size > 0 && has_kernel()) {
+        __k_aes_ecb(schedule, rounds, blocks, out, size / 16, 0);
         return out;
     }
     Array<int> planes = [0; 8];
@@ -100,10 +123,10 @@ pub bytes Cipher.encrypt_blocks(bytes blocks) {
             batch = 64;
         }
         for (int j in 0 .. 8) {
-            int at = position + 8 * j;
+            int octet_at = position + 8 * j;
             int word = 0;
-            if (at + 8 <= position + batch) {
-                word = blocks[at] | (blocks[at + 1] << 8) | (blocks[at + 2] << 16) | (blocks[at + 3] << 24) | (blocks[at + 4] << 32) | (blocks[at + 5] << 40) | (blocks[at + 6] << 48) | (blocks[at + 7] << 56);
+            if (octet_at + 8 <= position + batch) {
+                word = blocks[octet_at] | (blocks[octet_at + 1] << 8) | (blocks[octet_at + 2] << 16) | (blocks[octet_at + 3] << 24) | (blocks[octet_at + 4] << 32) | (blocks[octet_at + 5] << 40) | (blocks[octet_at + 6] << 48) | (blocks[octet_at + 7] << 56);
             }
             words[j] = word;
         }
@@ -113,9 +136,9 @@ pub bytes Cipher.encrypt_blocks(bytes blocks) {
         int limit = batch;
         for (int j in 0 .. 8) {
             int word = words[j];
-            for (int m in 0 .. 8) {
-                if (8 * j + m < limit) {
-                    out[position + 8 * j + m] = word >> (8 * m) & 0xFF;
+            for (int octet_index in 0 .. 8) {
+                if (8 * j + octet_index < limit) {
+                    out[position + 8 * j + octet_index] = word >> (8 * octet_index) & 0xFF;
                 }
             }
         }
@@ -131,19 +154,19 @@ pub bytes Cipher.encrypt_blocks(bytes blocks) {
 /// nothing when this CPU has no kernel, so the caller runs its own loop.
 /// `out` may be `data` itself. The increment is over all 128 bits, so a
 /// caller whose counter is only the low 32 bits (GCM) must not wrap it.
-pub bool Cipher.ctr_xor(bytes counter, bytes data, int count, bytes out) {
-    return ctr_xor_at(counter, data, 0, count, out);
+pub bool Cipher.did_ctr_xor(bytes counter, bytes data, int count, bytes out) {
+    return did_ctr_xor_at(counter, data, 0, count, out);
 }
 
 /// `ctr_xor` for `data[off .. off + count)` into `out[off .. off + count)`:
 /// the same range of both, so a caller can work through a buffer in pieces.
-pub bool Cipher.ctr_xor_at(bytes counter, bytes data, int off, int count, bytes out) {
-    if (count <= 0 || (__crypto_features() & 1) == 0 || counter.size() != 16) {
+pub bool Cipher.did_ctr_xor_at(bytes counter, bytes data, int off, int count, bytes out) {
+    if (count <= 0 || !has_kernel() || counter.size() != 16) {
         return false;
     }
     int whole = count / 16;
-    if (whole > 0 && __crypto_aes_ctr(schedule, rounds, counter, data, out, off, whole) != 0) {
-        return false;
+    if (whole > 0) {
+        __k_aes_ctr(schedule, rounds, counter, data, out, whole, off);
     }
     int rest = count - whole * 16;
     if (rest > 0) {
@@ -168,33 +191,33 @@ pub bool Cipher.ctr_xor_at(bytes counter, bytes data, int off, int count, bytes 
 // 8 * b + m. Three delta swaps; the masks keep `>>`'s sign fill out. Its own
 // inverse.
 int transpose_bits(int x) {
-    int t = (x ^ (x >> 7)) & 0x00AA_00AA_00AA_00AA;
-    x = x ^ t ^ (t << 7);
-    t = (x ^ (x >> 14)) & 0x0000_CCCC_0000_CCCC;
-    x = x ^ t ^ (t << 14);
-    t = (x ^ (x >> 28)) & 0x0000_0000_F0F0_F0F0;
-    return x ^ t ^ (t << 28);
+    int temp = (x ^ (x >> 7)) & 0x00AA_00AA_00AA_00AA;
+    x = x ^ temp ^ (temp << 7);
+    temp = (x ^ (x >> 14)) & 0x0000_CCCC_0000_CCCC;
+    x = x ^ temp ^ (temp << 14);
+    temp = (x ^ (x >> 28)) & 0x0000_0000_F0F0_F0F0;
+    return x ^ temp ^ (temp << 28);
 }
 
 // The 8x8 byte transpose across eight words: byte b of out[j] is byte j of
 // in[b]. Three delta swaps at 32, 16 and 8 bits. Its own inverse.
-void transpose_bytes(Array<int> a) {
+void transpose_bytes(Array<int> lanes) {
     for (int i in 0 .. 4) {
-        int t = (a[i] >> 32 ^ a[i + 4]) & 0x0000_0000_FFFF_FFFF;
-        a[i + 4] = a[i + 4] ^ t;
-        a[i] = a[i] ^ t << 32;
+        int temp = (lanes[i] >> 32 ^ lanes[i + 4]) & 0x0000_0000_FFFF_FFFF;
+        lanes[i + 4] = lanes[i + 4] ^ temp;
+        lanes[i] = lanes[i] ^ temp << 32;
     }
     for (int i in 0 .. 8) {
         if (i % 4 < 2) {
-            int t = (a[i] >> 16 ^ a[i + 2]) & 0x0000_FFFF_0000_FFFF;
-            a[i + 2] = a[i + 2] ^ t;
-            a[i] = a[i] ^ t << 16;
+            int temp = (lanes[i] >> 16 ^ lanes[i + 2]) & 0x0000_FFFF_0000_FFFF;
+            lanes[i + 2] = lanes[i + 2] ^ temp;
+            lanes[i] = lanes[i] ^ temp << 16;
         }
     }
     for (int i in 0 .. 4) {
-        int t = (a[2 * i] >> 8 ^ a[2 * i + 1]) & 0x00FF_00FF_00FF_00FF;
-        a[2 * i + 1] = a[2 * i + 1] ^ t;
-        a[2 * i] = a[2 * i] ^ t << 8;
+        int temp = (lanes[2 * i] >> 8 ^ lanes[2 * i + 1]) & 0x00FF_00FF_00FF_00FF;
+        lanes[2 * i + 1] = lanes[2 * i + 1] ^ temp;
+        lanes[2 * i] = lanes[2 * i] ^ temp << 8;
     }
 }
 
@@ -226,159 +249,159 @@ int word_le(bytes data, int offset) {
 // SubBytes on the four bytes of a 32-bit word: the same circuit, with the
 // bytes as positions 0-3 of each plane.
 int substitute_word(int word) {
-    int u0 = (word >> 0 & 1) | (word >> 8 & 1) << 1 | (word >> 16 & 1) << 2 | (word >> 24 & 1) << 3;
-    int u1 = (word >> 1 & 1) | (word >> 9 & 1) << 1 | (word >> 17 & 1) << 2 | (word >> 25 & 1) << 3;
-    int u2 = (word >> 2 & 1) | (word >> 10 & 1) << 1 | (word >> 18 & 1) << 2 | (word >> 26 & 1) << 3;
-    int u3 = (word >> 3 & 1) | (word >> 11 & 1) << 1 | (word >> 19 & 1) << 2 | (word >> 27 & 1) << 3;
-    int u4 = (word >> 4 & 1) | (word >> 12 & 1) << 1 | (word >> 20 & 1) << 2 | (word >> 28 & 1) << 3;
-    int u5 = (word >> 5 & 1) | (word >> 13 & 1) << 1 | (word >> 21 & 1) << 2 | (word >> 29 & 1) << 3;
-    int u6 = (word >> 6 & 1) | (word >> 14 & 1) << 1 | (word >> 22 & 1) << 2 | (word >> 30 & 1) << 3;
-    int u7 = (word >> 7 & 1) | (word >> 15 & 1) << 1 | (word >> 23 & 1) << 2 | (word >> 31 & 1) << 3;
-    int s0 = 0;
-    int s1 = 0;
-    int s2 = 0;
-    int s3 = 0;
-    int s4 = 0;
-    int s5 = 0;
-    int s6 = 0;
-    int s7 = 0;
-    int gT1 = u7 ^ u4;
-    int gT2 = u7 ^ u2;
-    int gT3 = u7 ^ u1;
-    int gT4 = u4 ^ u2;
-    int gT5 = u3 ^ u1;
-    int gT6 = gT1 ^ gT5;
-    int gT7 = u6 ^ u5;
-    int gT8 = u0 ^ gT6;
-    int gT9 = u0 ^ gT7;
-    int gT10 = gT6 ^ gT7;
-    int gT11 = u6 ^ u2;
-    int gT12 = u5 ^ u2;
-    int gT13 = gT3 ^ gT4;
-    int gT14 = gT6 ^ gT11;
-    int gT15 = gT5 ^ gT11;
-    int gT16 = gT5 ^ gT12;
-    int gT17 = gT9 ^ gT16;
-    int gT18 = u4 ^ u0;
-    int gT19 = gT7 ^ gT18;
-    int gT20 = gT1 ^ gT19;
-    int gT21 = u1 ^ u0;
-    int gT22 = gT7 ^ gT21;
-    int gT23 = gT2 ^ gT22;
-    int gT24 = gT2 ^ gT10;
-    int gT25 = gT20 ^ gT17;
-    int gT26 = gT3 ^ gT16;
-    int gT27 = gT1 ^ gT12;
-    int gM1 = gT13 & gT6;
-    int gM2 = gT23 & gT8;
-    int gM3 = gT14 ^ gM1;
-    int gM4 = gT19 & u0;
-    int gM5 = gM4 ^ gM1;
-    int gM6 = gT3 & gT16;
-    int gM7 = gT22 & gT9;
-    int gM8 = gT26 ^ gM6;
-    int gM9 = gT20 & gT17;
-    int gM10 = gM9 ^ gM6;
-    int gM11 = gT1 & gT15;
-    int gM12 = gT4 & gT27;
-    int gM13 = gM12 ^ gM11;
-    int gM14 = gT2 & gT10;
-    int gM15 = gM14 ^ gM11;
-    int gM16 = gM3 ^ gM2;
-    int gM17 = gM5 ^ gT24;
-    int gM18 = gM8 ^ gM7;
-    int gM19 = gM10 ^ gM15;
-    int gM20 = gM16 ^ gM13;
-    int gM21 = gM17 ^ gM15;
-    int gM22 = gM18 ^ gM13;
-    int gM23 = gM19 ^ gT25;
-    int gM24 = gM22 ^ gM23;
-    int gM25 = gM22 & gM20;
-    int gM26 = gM21 ^ gM25;
-    int gM27 = gM20 ^ gM21;
-    int gM28 = gM23 ^ gM25;
-    int gM29 = gM28 & gM27;
-    int gM30 = gM26 & gM24;
-    int gM31 = gM20 & gM23;
-    int gM32 = gM27 & gM31;
-    int gM33 = gM27 ^ gM25;
-    int gM34 = gM21 & gM22;
-    int gM35 = gM24 & gM34;
-    int gM36 = gM24 ^ gM25;
-    int gM37 = gM21 ^ gM29;
-    int gM38 = gM32 ^ gM33;
-    int gM39 = gM23 ^ gM30;
-    int gM40 = gM35 ^ gM36;
-    int gM41 = gM38 ^ gM40;
-    int gM42 = gM37 ^ gM39;
-    int gM43 = gM37 ^ gM38;
-    int gM44 = gM39 ^ gM40;
-    int gM45 = gM42 ^ gM41;
-    int gM46 = gM44 & gT6;
-    int gM47 = gM40 & gT8;
-    int gM48 = gM39 & u0;
-    int gM49 = gM43 & gT16;
-    int gM50 = gM38 & gT9;
-    int gM51 = gM37 & gT17;
-    int gM52 = gM42 & gT15;
-    int gM53 = gM45 & gT27;
-    int gM54 = gM41 & gT10;
-    int gM55 = gM44 & gT13;
-    int gM56 = gM40 & gT23;
-    int gM57 = gM39 & gT19;
-    int gM58 = gM43 & gT3;
-    int gM59 = gM38 & gT22;
-    int gM60 = gM37 & gT20;
-    int gM61 = gM42 & gT1;
-    int gM62 = gM45 & gT4;
-    int gM63 = gM41 & gT2;
-    int gL0 = gM61 ^ gM62;
-    int gL1 = gM50 ^ gM56;
-    int gL2 = gM46 ^ gM48;
-    int gL3 = gM47 ^ gM55;
-    int gL4 = gM54 ^ gM58;
-    int gL5 = gM49 ^ gM61;
-    int gL6 = gM62 ^ gL5;
-    int gL7 = gM46 ^ gL3;
-    int gL8 = gM51 ^ gM59;
-    int gL9 = gM52 ^ gM53;
-    int gL10 = gM53 ^ gL4;
-    int gL11 = gM60 ^ gL2;
-    int gL12 = gM48 ^ gM51;
-    int gL13 = gM50 ^ gL0;
-    int gL14 = gM52 ^ gM61;
-    int gL15 = gM55 ^ gL1;
-    int gL16 = gM56 ^ gL0;
-    int gL17 = gM57 ^ gL1;
-    int gL18 = gM58 ^ gL8;
-    int gL19 = gM63 ^ gL4;
-    int gL20 = gL0 ^ gL1;
-    int gL21 = gL1 ^ gL7;
-    int gL22 = gL3 ^ gL12;
-    int gL23 = gL18 ^ gL2;
-    int gL24 = gL15 ^ gL9;
-    int gL25 = gL6 ^ gL10;
-    int gL26 = gL7 ^ gL9;
-    int gL27 = gL8 ^ gL10;
-    int gL28 = gL11 ^ gL14;
-    int gL29 = gL11 ^ gL17;
-    s7 = gL6 ^ gL24;
-    s6 = ~(gL16 ^ gL26);
-    s5 = ~(gL19 ^ gL28);
-    s4 = gL6 ^ gL21;
-    s3 = gL20 ^ gL22;
-    s2 = gL25 ^ gL29;
-    s1 = ~(gL13 ^ gL27);
-    s0 = ~(gL6 ^ gL23);
+    int u_0 = (word >> 0 & 1) | (word >> 8 & 1) << 1 | (word >> 16 & 1) << 2 | (word >> 24 & 1) << 3;
+    int u_1 = (word >> 1 & 1) | (word >> 9 & 1) << 1 | (word >> 17 & 1) << 2 | (word >> 25 & 1) << 3;
+    int u_2 = (word >> 2 & 1) | (word >> 10 & 1) << 1 | (word >> 18 & 1) << 2 | (word >> 26 & 1) << 3;
+    int u_3 = (word >> 3 & 1) | (word >> 11 & 1) << 1 | (word >> 19 & 1) << 2 | (word >> 27 & 1) << 3;
+    int u_4 = (word >> 4 & 1) | (word >> 12 & 1) << 1 | (word >> 20 & 1) << 2 | (word >> 28 & 1) << 3;
+    int u_5 = (word >> 5 & 1) | (word >> 13 & 1) << 1 | (word >> 21 & 1) << 2 | (word >> 29 & 1) << 3;
+    int u_6 = (word >> 6 & 1) | (word >> 14 & 1) << 1 | (word >> 22 & 1) << 2 | (word >> 30 & 1) << 3;
+    int u_7 = (word >> 7 & 1) | (word >> 15 & 1) << 1 | (word >> 23 & 1) << 2 | (word >> 31 & 1) << 3;
+    int s_0 = 0;
+    int s_1 = 0;
+    int s_2 = 0;
+    int s_3 = 0;
+    int s_4 = 0;
+    int s_5 = 0;
+    int s_6 = 0;
+    int s_7 = 0;
+    int g_t1 = u_7 ^ u_4;
+    int g_t2 = u_7 ^ u_2;
+    int g_t3 = u_7 ^ u_1;
+    int g_t4 = u_4 ^ u_2;
+    int g_t5 = u_3 ^ u_1;
+    int g_t6 = g_t1 ^ g_t5;
+    int g_t7 = u_6 ^ u_5;
+    int g_t8 = u_0 ^ g_t6;
+    int g_t9 = u_0 ^ g_t7;
+    int g_t10 = g_t6 ^ g_t7;
+    int g_t11 = u_6 ^ u_2;
+    int g_t12 = u_5 ^ u_2;
+    int g_t13 = g_t3 ^ g_t4;
+    int g_t14 = g_t6 ^ g_t11;
+    int g_t15 = g_t5 ^ g_t11;
+    int g_t16 = g_t5 ^ g_t12;
+    int g_t17 = g_t9 ^ g_t16;
+    int g_t18 = u_4 ^ u_0;
+    int g_t19 = g_t7 ^ g_t18;
+    int g_t20 = g_t1 ^ g_t19;
+    int g_t21 = u_1 ^ u_0;
+    int g_t22 = g_t7 ^ g_t21;
+    int g_t23 = g_t2 ^ g_t22;
+    int g_t24 = g_t2 ^ g_t10;
+    int g_t25 = g_t20 ^ g_t17;
+    int g_t26 = g_t3 ^ g_t16;
+    int g_t27 = g_t1 ^ g_t12;
+    int g_m1 = g_t13 & g_t6;
+    int g_m2 = g_t23 & g_t8;
+    int g_m3 = g_t14 ^ g_m1;
+    int g_m4 = g_t19 & u_0;
+    int g_m5 = g_m4 ^ g_m1;
+    int g_m6 = g_t3 & g_t16;
+    int g_m7 = g_t22 & g_t9;
+    int g_m8 = g_t26 ^ g_m6;
+    int g_m9 = g_t20 & g_t17;
+    int g_m10 = g_m9 ^ g_m6;
+    int g_m11 = g_t1 & g_t15;
+    int g_m12 = g_t4 & g_t27;
+    int g_m13 = g_m12 ^ g_m11;
+    int g_m14 = g_t2 & g_t10;
+    int g_m15 = g_m14 ^ g_m11;
+    int g_m16 = g_m3 ^ g_m2;
+    int g_m17 = g_m5 ^ g_t24;
+    int g_m18 = g_m8 ^ g_m7;
+    int g_m19 = g_m10 ^ g_m15;
+    int g_m20 = g_m16 ^ g_m13;
+    int g_m21 = g_m17 ^ g_m15;
+    int g_m22 = g_m18 ^ g_m13;
+    int g_m23 = g_m19 ^ g_t25;
+    int g_m24 = g_m22 ^ g_m23;
+    int g_m25 = g_m22 & g_m20;
+    int g_m26 = g_m21 ^ g_m25;
+    int g_m27 = g_m20 ^ g_m21;
+    int g_m28 = g_m23 ^ g_m25;
+    int g_m29 = g_m28 & g_m27;
+    int g_m30 = g_m26 & g_m24;
+    int g_m31 = g_m20 & g_m23;
+    int g_m32 = g_m27 & g_m31;
+    int g_m33 = g_m27 ^ g_m25;
+    int g_m34 = g_m21 & g_m22;
+    int g_m35 = g_m24 & g_m34;
+    int g_m36 = g_m24 ^ g_m25;
+    int g_m37 = g_m21 ^ g_m29;
+    int g_m38 = g_m32 ^ g_m33;
+    int g_m39 = g_m23 ^ g_m30;
+    int g_m40 = g_m35 ^ g_m36;
+    int g_m41 = g_m38 ^ g_m40;
+    int g_m42 = g_m37 ^ g_m39;
+    int g_m43 = g_m37 ^ g_m38;
+    int g_m44 = g_m39 ^ g_m40;
+    int g_m45 = g_m42 ^ g_m41;
+    int g_m46 = g_m44 & g_t6;
+    int g_m47 = g_m40 & g_t8;
+    int g_m48 = g_m39 & u_0;
+    int g_m49 = g_m43 & g_t16;
+    int g_m50 = g_m38 & g_t9;
+    int g_m51 = g_m37 & g_t17;
+    int g_m52 = g_m42 & g_t15;
+    int g_m53 = g_m45 & g_t27;
+    int g_m54 = g_m41 & g_t10;
+    int g_m55 = g_m44 & g_t13;
+    int g_m56 = g_m40 & g_t23;
+    int g_m57 = g_m39 & g_t19;
+    int g_m58 = g_m43 & g_t3;
+    int g_m59 = g_m38 & g_t22;
+    int g_m60 = g_m37 & g_t20;
+    int g_m61 = g_m42 & g_t1;
+    int g_m62 = g_m45 & g_t4;
+    int g_m63 = g_m41 & g_t2;
+    int g_l0 = g_m61 ^ g_m62;
+    int g_l1 = g_m50 ^ g_m56;
+    int g_l2 = g_m46 ^ g_m48;
+    int g_l3 = g_m47 ^ g_m55;
+    int g_l4 = g_m54 ^ g_m58;
+    int g_l5 = g_m49 ^ g_m61;
+    int g_l6 = g_m62 ^ g_l5;
+    int g_l7 = g_m46 ^ g_l3;
+    int g_l8 = g_m51 ^ g_m59;
+    int g_l9 = g_m52 ^ g_m53;
+    int g_l10 = g_m53 ^ g_l4;
+    int g_l11 = g_m60 ^ g_l2;
+    int g_l12 = g_m48 ^ g_m51;
+    int g_l13 = g_m50 ^ g_l0;
+    int g_l14 = g_m52 ^ g_m61;
+    int g_l15 = g_m55 ^ g_l1;
+    int g_l16 = g_m56 ^ g_l0;
+    int g_l17 = g_m57 ^ g_l1;
+    int g_l18 = g_m58 ^ g_l8;
+    int g_l19 = g_m63 ^ g_l4;
+    int g_l20 = g_l0 ^ g_l1;
+    int g_l21 = g_l1 ^ g_l7;
+    int g_l22 = g_l3 ^ g_l12;
+    int g_l23 = g_l18 ^ g_l2;
+    int g_l24 = g_l15 ^ g_l9;
+    int g_l25 = g_l6 ^ g_l10;
+    int g_l26 = g_l7 ^ g_l9;
+    int g_l27 = g_l8 ^ g_l10;
+    int g_l28 = g_l11 ^ g_l14;
+    int g_l29 = g_l11 ^ g_l17;
+    s_7 = g_l6 ^ g_l24;
+    s_6 = ~(g_l16 ^ g_l26);
+    s_5 = ~(g_l19 ^ g_l28);
+    s_4 = g_l6 ^ g_l21;
+    s_3 = g_l20 ^ g_l22;
+    s_2 = g_l25 ^ g_l29;
+    s_1 = ~(g_l13 ^ g_l27);
+    s_0 = ~(g_l6 ^ g_l23);
     int out = 0;
-    out = out | (s0 & 1) << 0 | (s0 >> 1 & 1) << 8 | (s0 >> 2 & 1) << 16 | (s0 >> 3 & 1) << 24;
-    out = out | (s1 & 1) << 1 | (s1 >> 1 & 1) << 9 | (s1 >> 2 & 1) << 17 | (s1 >> 3 & 1) << 25;
-    out = out | (s2 & 1) << 2 | (s2 >> 1 & 1) << 10 | (s2 >> 2 & 1) << 18 | (s2 >> 3 & 1) << 26;
-    out = out | (s3 & 1) << 3 | (s3 >> 1 & 1) << 11 | (s3 >> 2 & 1) << 19 | (s3 >> 3 & 1) << 27;
-    out = out | (s4 & 1) << 4 | (s4 >> 1 & 1) << 12 | (s4 >> 2 & 1) << 20 | (s4 >> 3 & 1) << 28;
-    out = out | (s5 & 1) << 5 | (s5 >> 1 & 1) << 13 | (s5 >> 2 & 1) << 21 | (s5 >> 3 & 1) << 29;
-    out = out | (s6 & 1) << 6 | (s6 >> 1 & 1) << 14 | (s6 >> 2 & 1) << 22 | (s6 >> 3 & 1) << 30;
-    out = out | (s7 & 1) << 7 | (s7 >> 1 & 1) << 15 | (s7 >> 2 & 1) << 23 | (s7 >> 3 & 1) << 31;
+    out = out | (s_0 & 1) << 0 | (s_0 >> 1 & 1) << 8 | (s_0 >> 2 & 1) << 16 | (s_0 >> 3 & 1) << 24;
+    out = out | (s_1 & 1) << 1 | (s_1 >> 1 & 1) << 9 | (s_1 >> 2 & 1) << 17 | (s_1 >> 3 & 1) << 25;
+    out = out | (s_2 & 1) << 2 | (s_2 >> 1 & 1) << 10 | (s_2 >> 2 & 1) << 18 | (s_2 >> 3 & 1) << 26;
+    out = out | (s_3 & 1) << 3 | (s_3 >> 1 & 1) << 11 | (s_3 >> 2 & 1) << 19 | (s_3 >> 3 & 1) << 27;
+    out = out | (s_4 & 1) << 4 | (s_4 >> 1 & 1) << 12 | (s_4 >> 2 & 1) << 20 | (s_4 >> 3 & 1) << 28;
+    out = out | (s_5 & 1) << 5 | (s_5 >> 1 & 1) << 13 | (s_5 >> 2 & 1) << 21 | (s_5 >> 3 & 1) << 29;
+    out = out | (s_6 & 1) << 6 | (s_6 >> 1 & 1) << 14 | (s_6 >> 2 & 1) << 22 | (s_6 >> 3 & 1) << 30;
+    out = out | (s_7 & 1) << 7 | (s_7 >> 1 & 1) << 15 | (s_7 >> 2 & 1) << 23 | (s_7 >> 3 & 1) << 31;
     return out;
 }
 
@@ -426,9 +449,9 @@ pub Cipher cipher(bytes key) {
         halves[1] = words[4 * round + 2] | (words[4 * round + 3] << 32);
         Array<int> planes = [0; 8];
         pack_planes(halves, planes);
-        for (int k in 0 .. 8) {
-            int plane = planes[k] & 0xFFFF;
-            round_keys[8 * round + k] = plane | (plane << 16) | (plane << 32) | (plane << 48);
+        for (int plane_index in 0 .. 8) {
+            int plane = planes[plane_index] & 0xFFFF;
+            round_keys[8 * round + plane_index] = plane | (plane << 16) | (plane << 32) | (plane << 48);
         }
     }
     bytes schedule = [0; 16 * (rounds + 1)];
@@ -445,358 +468,358 @@ pub Cipher cipher(bytes key) {
 // ShiftRows, MixColumns, AddRoundKey) and the last round, which has no
 // MixColumns, is written out after it.
 void encrypt_planes(Array<int> planes, Array<int> round_keys, int rounds) {
-    int p0 = planes[0] ^ round_keys[0];
-    int p1 = planes[1] ^ round_keys[1];
-    int p2 = planes[2] ^ round_keys[2];
-    int p3 = planes[3] ^ round_keys[3];
-    int p4 = planes[4] ^ round_keys[4];
-    int p5 = planes[5] ^ round_keys[5];
-    int p6 = planes[6] ^ round_keys[6];
-    int p7 = planes[7] ^ round_keys[7];
+    int p_0 = planes[0] ^ round_keys[0];
+    int p_1 = planes[1] ^ round_keys[1];
+    int p_2 = planes[2] ^ round_keys[2];
+    int p_3 = planes[3] ^ round_keys[3];
+    int p_4 = planes[4] ^ round_keys[4];
+    int p_5 = planes[5] ^ round_keys[5];
+    int p_6 = planes[6] ^ round_keys[6];
+    int p_7 = planes[7] ^ round_keys[7];
     for (int round in 1 .. rounds) {
-        int s0 = 0;
-        int s1 = 0;
-        int s2 = 0;
-        int s3 = 0;
-        int s4 = 0;
-        int s5 = 0;
-        int s6 = 0;
-        int s7 = 0;
-        int gT1 = p7 ^ p4;
-        int gT2 = p7 ^ p2;
-        int gT3 = p7 ^ p1;
-        int gT4 = p4 ^ p2;
-        int gT5 = p3 ^ p1;
-        int gT6 = gT1 ^ gT5;
-        int gT7 = p6 ^ p5;
-        int gT8 = p0 ^ gT6;
-        int gT9 = p0 ^ gT7;
-        int gT10 = gT6 ^ gT7;
-        int gT11 = p6 ^ p2;
-        int gT12 = p5 ^ p2;
-        int gT13 = gT3 ^ gT4;
-        int gT14 = gT6 ^ gT11;
-        int gT15 = gT5 ^ gT11;
-        int gT16 = gT5 ^ gT12;
-        int gT17 = gT9 ^ gT16;
-        int gT18 = p4 ^ p0;
-        int gT19 = gT7 ^ gT18;
-        int gT20 = gT1 ^ gT19;
-        int gT21 = p1 ^ p0;
-        int gT22 = gT7 ^ gT21;
-        int gT23 = gT2 ^ gT22;
-        int gT24 = gT2 ^ gT10;
-        int gT25 = gT20 ^ gT17;
-        int gT26 = gT3 ^ gT16;
-        int gT27 = gT1 ^ gT12;
-        int gM1 = gT13 & gT6;
-        int gM2 = gT23 & gT8;
-        int gM3 = gT14 ^ gM1;
-        int gM4 = gT19 & p0;
-        int gM5 = gM4 ^ gM1;
-        int gM6 = gT3 & gT16;
-        int gM7 = gT22 & gT9;
-        int gM8 = gT26 ^ gM6;
-        int gM9 = gT20 & gT17;
-        int gM10 = gM9 ^ gM6;
-        int gM11 = gT1 & gT15;
-        int gM12 = gT4 & gT27;
-        int gM13 = gM12 ^ gM11;
-        int gM14 = gT2 & gT10;
-        int gM15 = gM14 ^ gM11;
-        int gM16 = gM3 ^ gM2;
-        int gM17 = gM5 ^ gT24;
-        int gM18 = gM8 ^ gM7;
-        int gM19 = gM10 ^ gM15;
-        int gM20 = gM16 ^ gM13;
-        int gM21 = gM17 ^ gM15;
-        int gM22 = gM18 ^ gM13;
-        int gM23 = gM19 ^ gT25;
-        int gM24 = gM22 ^ gM23;
-        int gM25 = gM22 & gM20;
-        int gM26 = gM21 ^ gM25;
-        int gM27 = gM20 ^ gM21;
-        int gM28 = gM23 ^ gM25;
-        int gM29 = gM28 & gM27;
-        int gM30 = gM26 & gM24;
-        int gM31 = gM20 & gM23;
-        int gM32 = gM27 & gM31;
-        int gM33 = gM27 ^ gM25;
-        int gM34 = gM21 & gM22;
-        int gM35 = gM24 & gM34;
-        int gM36 = gM24 ^ gM25;
-        int gM37 = gM21 ^ gM29;
-        int gM38 = gM32 ^ gM33;
-        int gM39 = gM23 ^ gM30;
-        int gM40 = gM35 ^ gM36;
-        int gM41 = gM38 ^ gM40;
-        int gM42 = gM37 ^ gM39;
-        int gM43 = gM37 ^ gM38;
-        int gM44 = gM39 ^ gM40;
-        int gM45 = gM42 ^ gM41;
-        int gM46 = gM44 & gT6;
-        int gM47 = gM40 & gT8;
-        int gM48 = gM39 & p0;
-        int gM49 = gM43 & gT16;
-        int gM50 = gM38 & gT9;
-        int gM51 = gM37 & gT17;
-        int gM52 = gM42 & gT15;
-        int gM53 = gM45 & gT27;
-        int gM54 = gM41 & gT10;
-        int gM55 = gM44 & gT13;
-        int gM56 = gM40 & gT23;
-        int gM57 = gM39 & gT19;
-        int gM58 = gM43 & gT3;
-        int gM59 = gM38 & gT22;
-        int gM60 = gM37 & gT20;
-        int gM61 = gM42 & gT1;
-        int gM62 = gM45 & gT4;
-        int gM63 = gM41 & gT2;
-        int gL0 = gM61 ^ gM62;
-        int gL1 = gM50 ^ gM56;
-        int gL2 = gM46 ^ gM48;
-        int gL3 = gM47 ^ gM55;
-        int gL4 = gM54 ^ gM58;
-        int gL5 = gM49 ^ gM61;
-        int gL6 = gM62 ^ gL5;
-        int gL7 = gM46 ^ gL3;
-        int gL8 = gM51 ^ gM59;
-        int gL9 = gM52 ^ gM53;
-        int gL10 = gM53 ^ gL4;
-        int gL11 = gM60 ^ gL2;
-        int gL12 = gM48 ^ gM51;
-        int gL13 = gM50 ^ gL0;
-        int gL14 = gM52 ^ gM61;
-        int gL15 = gM55 ^ gL1;
-        int gL16 = gM56 ^ gL0;
-        int gL17 = gM57 ^ gL1;
-        int gL18 = gM58 ^ gL8;
-        int gL19 = gM63 ^ gL4;
-        int gL20 = gL0 ^ gL1;
-        int gL21 = gL1 ^ gL7;
-        int gL22 = gL3 ^ gL12;
-        int gL23 = gL18 ^ gL2;
-        int gL24 = gL15 ^ gL9;
-        int gL25 = gL6 ^ gL10;
-        int gL26 = gL7 ^ gL9;
-        int gL27 = gL8 ^ gL10;
-        int gL28 = gL11 ^ gL14;
-        int gL29 = gL11 ^ gL17;
-        s7 = gL6 ^ gL24;
-        s6 = ~(gL16 ^ gL26);
-        s5 = ~(gL19 ^ gL28);
-        s4 = gL6 ^ gL21;
-        s3 = gL20 ^ gL22;
-        s2 = gL25 ^ gL29;
-        s1 = ~(gL13 ^ gL27);
-        s0 = ~(gL6 ^ gL23);
-        int r0 = (s0 & 0x1111_1111_1111_1111) | (s0 >> 4 & 0x0222_0222_0222_0222) | (s0 << 12 & 0x2000_2000_2000_2000) | (s0 >> 8 & 0x0044_0044_0044_0044) | (s0 << 8 & 0x4400_4400_4400_4400) | (s0 >> 12 & 0x0008_0008_0008_0008) | (s0 << 4 & 0x8880_8880_8880_8880);
-        int r1 = (s1 & 0x1111_1111_1111_1111) | (s1 >> 4 & 0x0222_0222_0222_0222) | (s1 << 12 & 0x2000_2000_2000_2000) | (s1 >> 8 & 0x0044_0044_0044_0044) | (s1 << 8 & 0x4400_4400_4400_4400) | (s1 >> 12 & 0x0008_0008_0008_0008) | (s1 << 4 & 0x8880_8880_8880_8880);
-        int r2 = (s2 & 0x1111_1111_1111_1111) | (s2 >> 4 & 0x0222_0222_0222_0222) | (s2 << 12 & 0x2000_2000_2000_2000) | (s2 >> 8 & 0x0044_0044_0044_0044) | (s2 << 8 & 0x4400_4400_4400_4400) | (s2 >> 12 & 0x0008_0008_0008_0008) | (s2 << 4 & 0x8880_8880_8880_8880);
-        int r3 = (s3 & 0x1111_1111_1111_1111) | (s3 >> 4 & 0x0222_0222_0222_0222) | (s3 << 12 & 0x2000_2000_2000_2000) | (s3 >> 8 & 0x0044_0044_0044_0044) | (s3 << 8 & 0x4400_4400_4400_4400) | (s3 >> 12 & 0x0008_0008_0008_0008) | (s3 << 4 & 0x8880_8880_8880_8880);
-        int r4 = (s4 & 0x1111_1111_1111_1111) | (s4 >> 4 & 0x0222_0222_0222_0222) | (s4 << 12 & 0x2000_2000_2000_2000) | (s4 >> 8 & 0x0044_0044_0044_0044) | (s4 << 8 & 0x4400_4400_4400_4400) | (s4 >> 12 & 0x0008_0008_0008_0008) | (s4 << 4 & 0x8880_8880_8880_8880);
-        int r5 = (s5 & 0x1111_1111_1111_1111) | (s5 >> 4 & 0x0222_0222_0222_0222) | (s5 << 12 & 0x2000_2000_2000_2000) | (s5 >> 8 & 0x0044_0044_0044_0044) | (s5 << 8 & 0x4400_4400_4400_4400) | (s5 >> 12 & 0x0008_0008_0008_0008) | (s5 << 4 & 0x8880_8880_8880_8880);
-        int r6 = (s6 & 0x1111_1111_1111_1111) | (s6 >> 4 & 0x0222_0222_0222_0222) | (s6 << 12 & 0x2000_2000_2000_2000) | (s6 >> 8 & 0x0044_0044_0044_0044) | (s6 << 8 & 0x4400_4400_4400_4400) | (s6 >> 12 & 0x0008_0008_0008_0008) | (s6 << 4 & 0x8880_8880_8880_8880);
-        int r7 = (s7 & 0x1111_1111_1111_1111) | (s7 >> 4 & 0x0222_0222_0222_0222) | (s7 << 12 & 0x2000_2000_2000_2000) | (s7 >> 8 & 0x0044_0044_0044_0044) | (s7 << 8 & 0x4400_4400_4400_4400) | (s7 >> 12 & 0x0008_0008_0008_0008) | (s7 << 4 & 0x8880_8880_8880_8880);
-        int b1_0 = (r0 >> 1 & 0x7777_7777_7777_7777) | (r0 & 0x1111_1111_1111_1111) << 3;
-        int b2_0 = (r0 >> 2 & 0x3333_3333_3333_3333) | (r0 << 2 & 0xcccc_cccc_cccc_cccc);
-        int b3_0 = (r0 >> 3 & 0x1111_1111_1111_1111) | (r0 << 1 & 0xeeee_eeee_eeee_eeee);
-        int q0 = r0 ^ b1_0;
-        int b1_1 = (r1 >> 1 & 0x7777_7777_7777_7777) | (r1 & 0x1111_1111_1111_1111) << 3;
-        int b2_1 = (r1 >> 2 & 0x3333_3333_3333_3333) | (r1 << 2 & 0xcccc_cccc_cccc_cccc);
-        int b3_1 = (r1 >> 3 & 0x1111_1111_1111_1111) | (r1 << 1 & 0xeeee_eeee_eeee_eeee);
-        int q1 = r1 ^ b1_1;
-        int b1_2 = (r2 >> 1 & 0x7777_7777_7777_7777) | (r2 & 0x1111_1111_1111_1111) << 3;
-        int b2_2 = (r2 >> 2 & 0x3333_3333_3333_3333) | (r2 << 2 & 0xcccc_cccc_cccc_cccc);
-        int b3_2 = (r2 >> 3 & 0x1111_1111_1111_1111) | (r2 << 1 & 0xeeee_eeee_eeee_eeee);
-        int q2 = r2 ^ b1_2;
-        int b1_3 = (r3 >> 1 & 0x7777_7777_7777_7777) | (r3 & 0x1111_1111_1111_1111) << 3;
-        int b2_3 = (r3 >> 2 & 0x3333_3333_3333_3333) | (r3 << 2 & 0xcccc_cccc_cccc_cccc);
-        int b3_3 = (r3 >> 3 & 0x1111_1111_1111_1111) | (r3 << 1 & 0xeeee_eeee_eeee_eeee);
-        int q3 = r3 ^ b1_3;
-        int b1_4 = (r4 >> 1 & 0x7777_7777_7777_7777) | (r4 & 0x1111_1111_1111_1111) << 3;
-        int b2_4 = (r4 >> 2 & 0x3333_3333_3333_3333) | (r4 << 2 & 0xcccc_cccc_cccc_cccc);
-        int b3_4 = (r4 >> 3 & 0x1111_1111_1111_1111) | (r4 << 1 & 0xeeee_eeee_eeee_eeee);
-        int q4 = r4 ^ b1_4;
-        int b1_5 = (r5 >> 1 & 0x7777_7777_7777_7777) | (r5 & 0x1111_1111_1111_1111) << 3;
-        int b2_5 = (r5 >> 2 & 0x3333_3333_3333_3333) | (r5 << 2 & 0xcccc_cccc_cccc_cccc);
-        int b3_5 = (r5 >> 3 & 0x1111_1111_1111_1111) | (r5 << 1 & 0xeeee_eeee_eeee_eeee);
-        int q5 = r5 ^ b1_5;
-        int b1_6 = (r6 >> 1 & 0x7777_7777_7777_7777) | (r6 & 0x1111_1111_1111_1111) << 3;
-        int b2_6 = (r6 >> 2 & 0x3333_3333_3333_3333) | (r6 << 2 & 0xcccc_cccc_cccc_cccc);
-        int b3_6 = (r6 >> 3 & 0x1111_1111_1111_1111) | (r6 << 1 & 0xeeee_eeee_eeee_eeee);
-        int q6 = r6 ^ b1_6;
-        int b1_7 = (r7 >> 1 & 0x7777_7777_7777_7777) | (r7 & 0x1111_1111_1111_1111) << 3;
-        int b2_7 = (r7 >> 2 & 0x3333_3333_3333_3333) | (r7 << 2 & 0xcccc_cccc_cccc_cccc);
-        int b3_7 = (r7 >> 3 & 0x1111_1111_1111_1111) | (r7 << 1 & 0xeeee_eeee_eeee_eeee);
-        int q7 = r7 ^ b1_7;
-        int m0 = (q7) ^ b1_0 ^ b2_0 ^ b3_0;
-        int m1 = (q0 ^ q7) ^ b1_1 ^ b2_1 ^ b3_1;
-        int m2 = (q1) ^ b1_2 ^ b2_2 ^ b3_2;
-        int m3 = (q2 ^ q7) ^ b1_3 ^ b2_3 ^ b3_3;
-        int m4 = (q3 ^ q7) ^ b1_4 ^ b2_4 ^ b3_4;
-        int m5 = (q4) ^ b1_5 ^ b2_5 ^ b3_5;
-        int m6 = (q5) ^ b1_6 ^ b2_6 ^ b3_6;
-        int m7 = (q6) ^ b1_7 ^ b2_7 ^ b3_7;
-        p0 = m0 ^ round_keys[8 * round + 0];
-        p1 = m1 ^ round_keys[8 * round + 1];
-        p2 = m2 ^ round_keys[8 * round + 2];
-        p3 = m3 ^ round_keys[8 * round + 3];
-        p4 = m4 ^ round_keys[8 * round + 4];
-        p5 = m5 ^ round_keys[8 * round + 5];
-        p6 = m6 ^ round_keys[8 * round + 6];
-        p7 = m7 ^ round_keys[8 * round + 7];
+        int s_0 = 0;
+        int s_1 = 0;
+        int s_2 = 0;
+        int s_3 = 0;
+        int s_4 = 0;
+        int s_5 = 0;
+        int s_6 = 0;
+        int s_7 = 0;
+        int g_t1 = p_7 ^ p_4;
+        int g_t2 = p_7 ^ p_2;
+        int g_t3 = p_7 ^ p_1;
+        int g_t4 = p_4 ^ p_2;
+        int g_t5 = p_3 ^ p_1;
+        int g_t6 = g_t1 ^ g_t5;
+        int g_t7 = p_6 ^ p_5;
+        int g_t8 = p_0 ^ g_t6;
+        int g_t9 = p_0 ^ g_t7;
+        int g_t10 = g_t6 ^ g_t7;
+        int g_t11 = p_6 ^ p_2;
+        int g_t12 = p_5 ^ p_2;
+        int g_t13 = g_t3 ^ g_t4;
+        int g_t14 = g_t6 ^ g_t11;
+        int g_t15 = g_t5 ^ g_t11;
+        int g_t16 = g_t5 ^ g_t12;
+        int g_t17 = g_t9 ^ g_t16;
+        int g_t18 = p_4 ^ p_0;
+        int g_t19 = g_t7 ^ g_t18;
+        int g_t20 = g_t1 ^ g_t19;
+        int g_t21 = p_1 ^ p_0;
+        int g_t22 = g_t7 ^ g_t21;
+        int g_t23 = g_t2 ^ g_t22;
+        int g_t24 = g_t2 ^ g_t10;
+        int g_t25 = g_t20 ^ g_t17;
+        int g_t26 = g_t3 ^ g_t16;
+        int g_t27 = g_t1 ^ g_t12;
+        int g_m1 = g_t13 & g_t6;
+        int g_m2 = g_t23 & g_t8;
+        int g_m3 = g_t14 ^ g_m1;
+        int g_m4 = g_t19 & p_0;
+        int g_m5 = g_m4 ^ g_m1;
+        int g_m6 = g_t3 & g_t16;
+        int g_m7 = g_t22 & g_t9;
+        int g_m8 = g_t26 ^ g_m6;
+        int g_m9 = g_t20 & g_t17;
+        int g_m10 = g_m9 ^ g_m6;
+        int g_m11 = g_t1 & g_t15;
+        int g_m12 = g_t4 & g_t27;
+        int g_m13 = g_m12 ^ g_m11;
+        int g_m14 = g_t2 & g_t10;
+        int g_m15 = g_m14 ^ g_m11;
+        int g_m16 = g_m3 ^ g_m2;
+        int g_m17 = g_m5 ^ g_t24;
+        int g_m18 = g_m8 ^ g_m7;
+        int g_m19 = g_m10 ^ g_m15;
+        int g_m20 = g_m16 ^ g_m13;
+        int g_m21 = g_m17 ^ g_m15;
+        int g_m22 = g_m18 ^ g_m13;
+        int g_m23 = g_m19 ^ g_t25;
+        int g_m24 = g_m22 ^ g_m23;
+        int g_m25 = g_m22 & g_m20;
+        int g_m26 = g_m21 ^ g_m25;
+        int g_m27 = g_m20 ^ g_m21;
+        int g_m28 = g_m23 ^ g_m25;
+        int g_m29 = g_m28 & g_m27;
+        int g_m30 = g_m26 & g_m24;
+        int g_m31 = g_m20 & g_m23;
+        int g_m32 = g_m27 & g_m31;
+        int g_m33 = g_m27 ^ g_m25;
+        int g_m34 = g_m21 & g_m22;
+        int g_m35 = g_m24 & g_m34;
+        int g_m36 = g_m24 ^ g_m25;
+        int g_m37 = g_m21 ^ g_m29;
+        int g_m38 = g_m32 ^ g_m33;
+        int g_m39 = g_m23 ^ g_m30;
+        int g_m40 = g_m35 ^ g_m36;
+        int g_m41 = g_m38 ^ g_m40;
+        int g_m42 = g_m37 ^ g_m39;
+        int g_m43 = g_m37 ^ g_m38;
+        int g_m44 = g_m39 ^ g_m40;
+        int g_m45 = g_m42 ^ g_m41;
+        int g_m46 = g_m44 & g_t6;
+        int g_m47 = g_m40 & g_t8;
+        int g_m48 = g_m39 & p_0;
+        int g_m49 = g_m43 & g_t16;
+        int g_m50 = g_m38 & g_t9;
+        int g_m51 = g_m37 & g_t17;
+        int g_m52 = g_m42 & g_t15;
+        int g_m53 = g_m45 & g_t27;
+        int g_m54 = g_m41 & g_t10;
+        int g_m55 = g_m44 & g_t13;
+        int g_m56 = g_m40 & g_t23;
+        int g_m57 = g_m39 & g_t19;
+        int g_m58 = g_m43 & g_t3;
+        int g_m59 = g_m38 & g_t22;
+        int g_m60 = g_m37 & g_t20;
+        int g_m61 = g_m42 & g_t1;
+        int g_m62 = g_m45 & g_t4;
+        int g_m63 = g_m41 & g_t2;
+        int g_l0 = g_m61 ^ g_m62;
+        int g_l1 = g_m50 ^ g_m56;
+        int g_l2 = g_m46 ^ g_m48;
+        int g_l3 = g_m47 ^ g_m55;
+        int g_l4 = g_m54 ^ g_m58;
+        int g_l5 = g_m49 ^ g_m61;
+        int g_l6 = g_m62 ^ g_l5;
+        int g_l7 = g_m46 ^ g_l3;
+        int g_l8 = g_m51 ^ g_m59;
+        int g_l9 = g_m52 ^ g_m53;
+        int g_l10 = g_m53 ^ g_l4;
+        int g_l11 = g_m60 ^ g_l2;
+        int g_l12 = g_m48 ^ g_m51;
+        int g_l13 = g_m50 ^ g_l0;
+        int g_l14 = g_m52 ^ g_m61;
+        int g_l15 = g_m55 ^ g_l1;
+        int g_l16 = g_m56 ^ g_l0;
+        int g_l17 = g_m57 ^ g_l1;
+        int g_l18 = g_m58 ^ g_l8;
+        int g_l19 = g_m63 ^ g_l4;
+        int g_l20 = g_l0 ^ g_l1;
+        int g_l21 = g_l1 ^ g_l7;
+        int g_l22 = g_l3 ^ g_l12;
+        int g_l23 = g_l18 ^ g_l2;
+        int g_l24 = g_l15 ^ g_l9;
+        int g_l25 = g_l6 ^ g_l10;
+        int g_l26 = g_l7 ^ g_l9;
+        int g_l27 = g_l8 ^ g_l10;
+        int g_l28 = g_l11 ^ g_l14;
+        int g_l29 = g_l11 ^ g_l17;
+        s_7 = g_l6 ^ g_l24;
+        s_6 = ~(g_l16 ^ g_l26);
+        s_5 = ~(g_l19 ^ g_l28);
+        s_4 = g_l6 ^ g_l21;
+        s_3 = g_l20 ^ g_l22;
+        s_2 = g_l25 ^ g_l29;
+        s_1 = ~(g_l13 ^ g_l27);
+        s_0 = ~(g_l6 ^ g_l23);
+        int r_0 = (s_0 & 0x1111_1111_1111_1111) | (s_0 >> 4 & 0x0222_0222_0222_0222) | (s_0 << 12 & 0x2000_2000_2000_2000) | (s_0 >> 8 & 0x0044_0044_0044_0044) | (s_0 << 8 & 0x4400_4400_4400_4400) | (s_0 >> 12 & 0x0008_0008_0008_0008) | (s_0 << 4 & 0x8880_8880_8880_8880);
+        int r_1 = (s_1 & 0x1111_1111_1111_1111) | (s_1 >> 4 & 0x0222_0222_0222_0222) | (s_1 << 12 & 0x2000_2000_2000_2000) | (s_1 >> 8 & 0x0044_0044_0044_0044) | (s_1 << 8 & 0x4400_4400_4400_4400) | (s_1 >> 12 & 0x0008_0008_0008_0008) | (s_1 << 4 & 0x8880_8880_8880_8880);
+        int r_2 = (s_2 & 0x1111_1111_1111_1111) | (s_2 >> 4 & 0x0222_0222_0222_0222) | (s_2 << 12 & 0x2000_2000_2000_2000) | (s_2 >> 8 & 0x0044_0044_0044_0044) | (s_2 << 8 & 0x4400_4400_4400_4400) | (s_2 >> 12 & 0x0008_0008_0008_0008) | (s_2 << 4 & 0x8880_8880_8880_8880);
+        int r_3 = (s_3 & 0x1111_1111_1111_1111) | (s_3 >> 4 & 0x0222_0222_0222_0222) | (s_3 << 12 & 0x2000_2000_2000_2000) | (s_3 >> 8 & 0x0044_0044_0044_0044) | (s_3 << 8 & 0x4400_4400_4400_4400) | (s_3 >> 12 & 0x0008_0008_0008_0008) | (s_3 << 4 & 0x8880_8880_8880_8880);
+        int r_4 = (s_4 & 0x1111_1111_1111_1111) | (s_4 >> 4 & 0x0222_0222_0222_0222) | (s_4 << 12 & 0x2000_2000_2000_2000) | (s_4 >> 8 & 0x0044_0044_0044_0044) | (s_4 << 8 & 0x4400_4400_4400_4400) | (s_4 >> 12 & 0x0008_0008_0008_0008) | (s_4 << 4 & 0x8880_8880_8880_8880);
+        int r_5 = (s_5 & 0x1111_1111_1111_1111) | (s_5 >> 4 & 0x0222_0222_0222_0222) | (s_5 << 12 & 0x2000_2000_2000_2000) | (s_5 >> 8 & 0x0044_0044_0044_0044) | (s_5 << 8 & 0x4400_4400_4400_4400) | (s_5 >> 12 & 0x0008_0008_0008_0008) | (s_5 << 4 & 0x8880_8880_8880_8880);
+        int r_6 = (s_6 & 0x1111_1111_1111_1111) | (s_6 >> 4 & 0x0222_0222_0222_0222) | (s_6 << 12 & 0x2000_2000_2000_2000) | (s_6 >> 8 & 0x0044_0044_0044_0044) | (s_6 << 8 & 0x4400_4400_4400_4400) | (s_6 >> 12 & 0x0008_0008_0008_0008) | (s_6 << 4 & 0x8880_8880_8880_8880);
+        int r_7 = (s_7 & 0x1111_1111_1111_1111) | (s_7 >> 4 & 0x0222_0222_0222_0222) | (s_7 << 12 & 0x2000_2000_2000_2000) | (s_7 >> 8 & 0x0044_0044_0044_0044) | (s_7 << 8 & 0x4400_4400_4400_4400) | (s_7 >> 12 & 0x0008_0008_0008_0008) | (s_7 << 4 & 0x8880_8880_8880_8880);
+        int b1_0 = (r_0 >> 1 & 0x7777_7777_7777_7777) | (r_0 & 0x1111_1111_1111_1111) << 3;
+        int b2_0 = (r_0 >> 2 & 0x3333_3333_3333_3333) | (r_0 << 2 & 0xcccc_cccc_cccc_cccc);
+        int b3_0 = (r_0 >> 3 & 0x1111_1111_1111_1111) | (r_0 << 1 & 0xeeee_eeee_eeee_eeee);
+        int q_0 = r_0 ^ b1_0;
+        int b1_1 = (r_1 >> 1 & 0x7777_7777_7777_7777) | (r_1 & 0x1111_1111_1111_1111) << 3;
+        int b2_1 = (r_1 >> 2 & 0x3333_3333_3333_3333) | (r_1 << 2 & 0xcccc_cccc_cccc_cccc);
+        int b3_1 = (r_1 >> 3 & 0x1111_1111_1111_1111) | (r_1 << 1 & 0xeeee_eeee_eeee_eeee);
+        int q_1 = r_1 ^ b1_1;
+        int b1_2 = (r_2 >> 1 & 0x7777_7777_7777_7777) | (r_2 & 0x1111_1111_1111_1111) << 3;
+        int b2_2 = (r_2 >> 2 & 0x3333_3333_3333_3333) | (r_2 << 2 & 0xcccc_cccc_cccc_cccc);
+        int b3_2 = (r_2 >> 3 & 0x1111_1111_1111_1111) | (r_2 << 1 & 0xeeee_eeee_eeee_eeee);
+        int q_2 = r_2 ^ b1_2;
+        int b1_3 = (r_3 >> 1 & 0x7777_7777_7777_7777) | (r_3 & 0x1111_1111_1111_1111) << 3;
+        int b2_3 = (r_3 >> 2 & 0x3333_3333_3333_3333) | (r_3 << 2 & 0xcccc_cccc_cccc_cccc);
+        int b3_3 = (r_3 >> 3 & 0x1111_1111_1111_1111) | (r_3 << 1 & 0xeeee_eeee_eeee_eeee);
+        int q_3 = r_3 ^ b1_3;
+        int b1_4 = (r_4 >> 1 & 0x7777_7777_7777_7777) | (r_4 & 0x1111_1111_1111_1111) << 3;
+        int b2_4 = (r_4 >> 2 & 0x3333_3333_3333_3333) | (r_4 << 2 & 0xcccc_cccc_cccc_cccc);
+        int b3_4 = (r_4 >> 3 & 0x1111_1111_1111_1111) | (r_4 << 1 & 0xeeee_eeee_eeee_eeee);
+        int q_4 = r_4 ^ b1_4;
+        int b1_5 = (r_5 >> 1 & 0x7777_7777_7777_7777) | (r_5 & 0x1111_1111_1111_1111) << 3;
+        int b2_5 = (r_5 >> 2 & 0x3333_3333_3333_3333) | (r_5 << 2 & 0xcccc_cccc_cccc_cccc);
+        int b3_5 = (r_5 >> 3 & 0x1111_1111_1111_1111) | (r_5 << 1 & 0xeeee_eeee_eeee_eeee);
+        int q_5 = r_5 ^ b1_5;
+        int b1_6 = (r_6 >> 1 & 0x7777_7777_7777_7777) | (r_6 & 0x1111_1111_1111_1111) << 3;
+        int b2_6 = (r_6 >> 2 & 0x3333_3333_3333_3333) | (r_6 << 2 & 0xcccc_cccc_cccc_cccc);
+        int b3_6 = (r_6 >> 3 & 0x1111_1111_1111_1111) | (r_6 << 1 & 0xeeee_eeee_eeee_eeee);
+        int q_6 = r_6 ^ b1_6;
+        int b1_7 = (r_7 >> 1 & 0x7777_7777_7777_7777) | (r_7 & 0x1111_1111_1111_1111) << 3;
+        int b2_7 = (r_7 >> 2 & 0x3333_3333_3333_3333) | (r_7 << 2 & 0xcccc_cccc_cccc_cccc);
+        int b3_7 = (r_7 >> 3 & 0x1111_1111_1111_1111) | (r_7 << 1 & 0xeeee_eeee_eeee_eeee);
+        int q_7 = r_7 ^ b1_7;
+        int m_0 = (q_7) ^ b1_0 ^ b2_0 ^ b3_0;
+        int m_1 = (q_0 ^ q_7) ^ b1_1 ^ b2_1 ^ b3_1;
+        int m_2 = (q_1) ^ b1_2 ^ b2_2 ^ b3_2;
+        int m_3 = (q_2 ^ q_7) ^ b1_3 ^ b2_3 ^ b3_3;
+        int m_4 = (q_3 ^ q_7) ^ b1_4 ^ b2_4 ^ b3_4;
+        int m_5 = (q_4) ^ b1_5 ^ b2_5 ^ b3_5;
+        int m_6 = (q_5) ^ b1_6 ^ b2_6 ^ b3_6;
+        int m_7 = (q_6) ^ b1_7 ^ b2_7 ^ b3_7;
+        p_0 = m_0 ^ round_keys[8 * round + 0];
+        p_1 = m_1 ^ round_keys[8 * round + 1];
+        p_2 = m_2 ^ round_keys[8 * round + 2];
+        p_3 = m_3 ^ round_keys[8 * round + 3];
+        p_4 = m_4 ^ round_keys[8 * round + 4];
+        p_5 = m_5 ^ round_keys[8 * round + 5];
+        p_6 = m_6 ^ round_keys[8 * round + 6];
+        p_7 = m_7 ^ round_keys[8 * round + 7];
     }
-    int s0 = 0;
-    int s1 = 0;
-    int s2 = 0;
-    int s3 = 0;
-    int s4 = 0;
-    int s5 = 0;
-    int s6 = 0;
-    int s7 = 0;
-    int gT1 = p7 ^ p4;
-    int gT2 = p7 ^ p2;
-    int gT3 = p7 ^ p1;
-    int gT4 = p4 ^ p2;
-    int gT5 = p3 ^ p1;
-    int gT6 = gT1 ^ gT5;
-    int gT7 = p6 ^ p5;
-    int gT8 = p0 ^ gT6;
-    int gT9 = p0 ^ gT7;
-    int gT10 = gT6 ^ gT7;
-    int gT11 = p6 ^ p2;
-    int gT12 = p5 ^ p2;
-    int gT13 = gT3 ^ gT4;
-    int gT14 = gT6 ^ gT11;
-    int gT15 = gT5 ^ gT11;
-    int gT16 = gT5 ^ gT12;
-    int gT17 = gT9 ^ gT16;
-    int gT18 = p4 ^ p0;
-    int gT19 = gT7 ^ gT18;
-    int gT20 = gT1 ^ gT19;
-    int gT21 = p1 ^ p0;
-    int gT22 = gT7 ^ gT21;
-    int gT23 = gT2 ^ gT22;
-    int gT24 = gT2 ^ gT10;
-    int gT25 = gT20 ^ gT17;
-    int gT26 = gT3 ^ gT16;
-    int gT27 = gT1 ^ gT12;
-    int gM1 = gT13 & gT6;
-    int gM2 = gT23 & gT8;
-    int gM3 = gT14 ^ gM1;
-    int gM4 = gT19 & p0;
-    int gM5 = gM4 ^ gM1;
-    int gM6 = gT3 & gT16;
-    int gM7 = gT22 & gT9;
-    int gM8 = gT26 ^ gM6;
-    int gM9 = gT20 & gT17;
-    int gM10 = gM9 ^ gM6;
-    int gM11 = gT1 & gT15;
-    int gM12 = gT4 & gT27;
-    int gM13 = gM12 ^ gM11;
-    int gM14 = gT2 & gT10;
-    int gM15 = gM14 ^ gM11;
-    int gM16 = gM3 ^ gM2;
-    int gM17 = gM5 ^ gT24;
-    int gM18 = gM8 ^ gM7;
-    int gM19 = gM10 ^ gM15;
-    int gM20 = gM16 ^ gM13;
-    int gM21 = gM17 ^ gM15;
-    int gM22 = gM18 ^ gM13;
-    int gM23 = gM19 ^ gT25;
-    int gM24 = gM22 ^ gM23;
-    int gM25 = gM22 & gM20;
-    int gM26 = gM21 ^ gM25;
-    int gM27 = gM20 ^ gM21;
-    int gM28 = gM23 ^ gM25;
-    int gM29 = gM28 & gM27;
-    int gM30 = gM26 & gM24;
-    int gM31 = gM20 & gM23;
-    int gM32 = gM27 & gM31;
-    int gM33 = gM27 ^ gM25;
-    int gM34 = gM21 & gM22;
-    int gM35 = gM24 & gM34;
-    int gM36 = gM24 ^ gM25;
-    int gM37 = gM21 ^ gM29;
-    int gM38 = gM32 ^ gM33;
-    int gM39 = gM23 ^ gM30;
-    int gM40 = gM35 ^ gM36;
-    int gM41 = gM38 ^ gM40;
-    int gM42 = gM37 ^ gM39;
-    int gM43 = gM37 ^ gM38;
-    int gM44 = gM39 ^ gM40;
-    int gM45 = gM42 ^ gM41;
-    int gM46 = gM44 & gT6;
-    int gM47 = gM40 & gT8;
-    int gM48 = gM39 & p0;
-    int gM49 = gM43 & gT16;
-    int gM50 = gM38 & gT9;
-    int gM51 = gM37 & gT17;
-    int gM52 = gM42 & gT15;
-    int gM53 = gM45 & gT27;
-    int gM54 = gM41 & gT10;
-    int gM55 = gM44 & gT13;
-    int gM56 = gM40 & gT23;
-    int gM57 = gM39 & gT19;
-    int gM58 = gM43 & gT3;
-    int gM59 = gM38 & gT22;
-    int gM60 = gM37 & gT20;
-    int gM61 = gM42 & gT1;
-    int gM62 = gM45 & gT4;
-    int gM63 = gM41 & gT2;
-    int gL0 = gM61 ^ gM62;
-    int gL1 = gM50 ^ gM56;
-    int gL2 = gM46 ^ gM48;
-    int gL3 = gM47 ^ gM55;
-    int gL4 = gM54 ^ gM58;
-    int gL5 = gM49 ^ gM61;
-    int gL6 = gM62 ^ gL5;
-    int gL7 = gM46 ^ gL3;
-    int gL8 = gM51 ^ gM59;
-    int gL9 = gM52 ^ gM53;
-    int gL10 = gM53 ^ gL4;
-    int gL11 = gM60 ^ gL2;
-    int gL12 = gM48 ^ gM51;
-    int gL13 = gM50 ^ gL0;
-    int gL14 = gM52 ^ gM61;
-    int gL15 = gM55 ^ gL1;
-    int gL16 = gM56 ^ gL0;
-    int gL17 = gM57 ^ gL1;
-    int gL18 = gM58 ^ gL8;
-    int gL19 = gM63 ^ gL4;
-    int gL20 = gL0 ^ gL1;
-    int gL21 = gL1 ^ gL7;
-    int gL22 = gL3 ^ gL12;
-    int gL23 = gL18 ^ gL2;
-    int gL24 = gL15 ^ gL9;
-    int gL25 = gL6 ^ gL10;
-    int gL26 = gL7 ^ gL9;
-    int gL27 = gL8 ^ gL10;
-    int gL28 = gL11 ^ gL14;
-    int gL29 = gL11 ^ gL17;
-    s7 = gL6 ^ gL24;
-    s6 = ~(gL16 ^ gL26);
-    s5 = ~(gL19 ^ gL28);
-    s4 = gL6 ^ gL21;
-    s3 = gL20 ^ gL22;
-    s2 = gL25 ^ gL29;
-    s1 = ~(gL13 ^ gL27);
-    s0 = ~(gL6 ^ gL23);
-    int r0 = (s0 & 0x1111_1111_1111_1111) | (s0 >> 4 & 0x0222_0222_0222_0222) | (s0 << 12 & 0x2000_2000_2000_2000) | (s0 >> 8 & 0x0044_0044_0044_0044) | (s0 << 8 & 0x4400_4400_4400_4400) | (s0 >> 12 & 0x0008_0008_0008_0008) | (s0 << 4 & 0x8880_8880_8880_8880);
-    int r1 = (s1 & 0x1111_1111_1111_1111) | (s1 >> 4 & 0x0222_0222_0222_0222) | (s1 << 12 & 0x2000_2000_2000_2000) | (s1 >> 8 & 0x0044_0044_0044_0044) | (s1 << 8 & 0x4400_4400_4400_4400) | (s1 >> 12 & 0x0008_0008_0008_0008) | (s1 << 4 & 0x8880_8880_8880_8880);
-    int r2 = (s2 & 0x1111_1111_1111_1111) | (s2 >> 4 & 0x0222_0222_0222_0222) | (s2 << 12 & 0x2000_2000_2000_2000) | (s2 >> 8 & 0x0044_0044_0044_0044) | (s2 << 8 & 0x4400_4400_4400_4400) | (s2 >> 12 & 0x0008_0008_0008_0008) | (s2 << 4 & 0x8880_8880_8880_8880);
-    int r3 = (s3 & 0x1111_1111_1111_1111) | (s3 >> 4 & 0x0222_0222_0222_0222) | (s3 << 12 & 0x2000_2000_2000_2000) | (s3 >> 8 & 0x0044_0044_0044_0044) | (s3 << 8 & 0x4400_4400_4400_4400) | (s3 >> 12 & 0x0008_0008_0008_0008) | (s3 << 4 & 0x8880_8880_8880_8880);
-    int r4 = (s4 & 0x1111_1111_1111_1111) | (s4 >> 4 & 0x0222_0222_0222_0222) | (s4 << 12 & 0x2000_2000_2000_2000) | (s4 >> 8 & 0x0044_0044_0044_0044) | (s4 << 8 & 0x4400_4400_4400_4400) | (s4 >> 12 & 0x0008_0008_0008_0008) | (s4 << 4 & 0x8880_8880_8880_8880);
-    int r5 = (s5 & 0x1111_1111_1111_1111) | (s5 >> 4 & 0x0222_0222_0222_0222) | (s5 << 12 & 0x2000_2000_2000_2000) | (s5 >> 8 & 0x0044_0044_0044_0044) | (s5 << 8 & 0x4400_4400_4400_4400) | (s5 >> 12 & 0x0008_0008_0008_0008) | (s5 << 4 & 0x8880_8880_8880_8880);
-    int r6 = (s6 & 0x1111_1111_1111_1111) | (s6 >> 4 & 0x0222_0222_0222_0222) | (s6 << 12 & 0x2000_2000_2000_2000) | (s6 >> 8 & 0x0044_0044_0044_0044) | (s6 << 8 & 0x4400_4400_4400_4400) | (s6 >> 12 & 0x0008_0008_0008_0008) | (s6 << 4 & 0x8880_8880_8880_8880);
-    int r7 = (s7 & 0x1111_1111_1111_1111) | (s7 >> 4 & 0x0222_0222_0222_0222) | (s7 << 12 & 0x2000_2000_2000_2000) | (s7 >> 8 & 0x0044_0044_0044_0044) | (s7 << 8 & 0x4400_4400_4400_4400) | (s7 >> 12 & 0x0008_0008_0008_0008) | (s7 << 4 & 0x8880_8880_8880_8880);
-    planes[0] = r0 ^ round_keys[8 * rounds + 0];
-    planes[1] = r1 ^ round_keys[8 * rounds + 1];
-    planes[2] = r2 ^ round_keys[8 * rounds + 2];
-    planes[3] = r3 ^ round_keys[8 * rounds + 3];
-    planes[4] = r4 ^ round_keys[8 * rounds + 4];
-    planes[5] = r5 ^ round_keys[8 * rounds + 5];
-    planes[6] = r6 ^ round_keys[8 * rounds + 6];
-    planes[7] = r7 ^ round_keys[8 * rounds + 7];
+    int s_0 = 0;
+    int s_1 = 0;
+    int s_2 = 0;
+    int s_3 = 0;
+    int s_4 = 0;
+    int s_5 = 0;
+    int s_6 = 0;
+    int s_7 = 0;
+    int g_t1 = p_7 ^ p_4;
+    int g_t2 = p_7 ^ p_2;
+    int g_t3 = p_7 ^ p_1;
+    int g_t4 = p_4 ^ p_2;
+    int g_t5 = p_3 ^ p_1;
+    int g_t6 = g_t1 ^ g_t5;
+    int g_t7 = p_6 ^ p_5;
+    int g_t8 = p_0 ^ g_t6;
+    int g_t9 = p_0 ^ g_t7;
+    int g_t10 = g_t6 ^ g_t7;
+    int g_t11 = p_6 ^ p_2;
+    int g_t12 = p_5 ^ p_2;
+    int g_t13 = g_t3 ^ g_t4;
+    int g_t14 = g_t6 ^ g_t11;
+    int g_t15 = g_t5 ^ g_t11;
+    int g_t16 = g_t5 ^ g_t12;
+    int g_t17 = g_t9 ^ g_t16;
+    int g_t18 = p_4 ^ p_0;
+    int g_t19 = g_t7 ^ g_t18;
+    int g_t20 = g_t1 ^ g_t19;
+    int g_t21 = p_1 ^ p_0;
+    int g_t22 = g_t7 ^ g_t21;
+    int g_t23 = g_t2 ^ g_t22;
+    int g_t24 = g_t2 ^ g_t10;
+    int g_t25 = g_t20 ^ g_t17;
+    int g_t26 = g_t3 ^ g_t16;
+    int g_t27 = g_t1 ^ g_t12;
+    int g_m1 = g_t13 & g_t6;
+    int g_m2 = g_t23 & g_t8;
+    int g_m3 = g_t14 ^ g_m1;
+    int g_m4 = g_t19 & p_0;
+    int g_m5 = g_m4 ^ g_m1;
+    int g_m6 = g_t3 & g_t16;
+    int g_m7 = g_t22 & g_t9;
+    int g_m8 = g_t26 ^ g_m6;
+    int g_m9 = g_t20 & g_t17;
+    int g_m10 = g_m9 ^ g_m6;
+    int g_m11 = g_t1 & g_t15;
+    int g_m12 = g_t4 & g_t27;
+    int g_m13 = g_m12 ^ g_m11;
+    int g_m14 = g_t2 & g_t10;
+    int g_m15 = g_m14 ^ g_m11;
+    int g_m16 = g_m3 ^ g_m2;
+    int g_m17 = g_m5 ^ g_t24;
+    int g_m18 = g_m8 ^ g_m7;
+    int g_m19 = g_m10 ^ g_m15;
+    int g_m20 = g_m16 ^ g_m13;
+    int g_m21 = g_m17 ^ g_m15;
+    int g_m22 = g_m18 ^ g_m13;
+    int g_m23 = g_m19 ^ g_t25;
+    int g_m24 = g_m22 ^ g_m23;
+    int g_m25 = g_m22 & g_m20;
+    int g_m26 = g_m21 ^ g_m25;
+    int g_m27 = g_m20 ^ g_m21;
+    int g_m28 = g_m23 ^ g_m25;
+    int g_m29 = g_m28 & g_m27;
+    int g_m30 = g_m26 & g_m24;
+    int g_m31 = g_m20 & g_m23;
+    int g_m32 = g_m27 & g_m31;
+    int g_m33 = g_m27 ^ g_m25;
+    int g_m34 = g_m21 & g_m22;
+    int g_m35 = g_m24 & g_m34;
+    int g_m36 = g_m24 ^ g_m25;
+    int g_m37 = g_m21 ^ g_m29;
+    int g_m38 = g_m32 ^ g_m33;
+    int g_m39 = g_m23 ^ g_m30;
+    int g_m40 = g_m35 ^ g_m36;
+    int g_m41 = g_m38 ^ g_m40;
+    int g_m42 = g_m37 ^ g_m39;
+    int g_m43 = g_m37 ^ g_m38;
+    int g_m44 = g_m39 ^ g_m40;
+    int g_m45 = g_m42 ^ g_m41;
+    int g_m46 = g_m44 & g_t6;
+    int g_m47 = g_m40 & g_t8;
+    int g_m48 = g_m39 & p_0;
+    int g_m49 = g_m43 & g_t16;
+    int g_m50 = g_m38 & g_t9;
+    int g_m51 = g_m37 & g_t17;
+    int g_m52 = g_m42 & g_t15;
+    int g_m53 = g_m45 & g_t27;
+    int g_m54 = g_m41 & g_t10;
+    int g_m55 = g_m44 & g_t13;
+    int g_m56 = g_m40 & g_t23;
+    int g_m57 = g_m39 & g_t19;
+    int g_m58 = g_m43 & g_t3;
+    int g_m59 = g_m38 & g_t22;
+    int g_m60 = g_m37 & g_t20;
+    int g_m61 = g_m42 & g_t1;
+    int g_m62 = g_m45 & g_t4;
+    int g_m63 = g_m41 & g_t2;
+    int g_l0 = g_m61 ^ g_m62;
+    int g_l1 = g_m50 ^ g_m56;
+    int g_l2 = g_m46 ^ g_m48;
+    int g_l3 = g_m47 ^ g_m55;
+    int g_l4 = g_m54 ^ g_m58;
+    int g_l5 = g_m49 ^ g_m61;
+    int g_l6 = g_m62 ^ g_l5;
+    int g_l7 = g_m46 ^ g_l3;
+    int g_l8 = g_m51 ^ g_m59;
+    int g_l9 = g_m52 ^ g_m53;
+    int g_l10 = g_m53 ^ g_l4;
+    int g_l11 = g_m60 ^ g_l2;
+    int g_l12 = g_m48 ^ g_m51;
+    int g_l13 = g_m50 ^ g_l0;
+    int g_l14 = g_m52 ^ g_m61;
+    int g_l15 = g_m55 ^ g_l1;
+    int g_l16 = g_m56 ^ g_l0;
+    int g_l17 = g_m57 ^ g_l1;
+    int g_l18 = g_m58 ^ g_l8;
+    int g_l19 = g_m63 ^ g_l4;
+    int g_l20 = g_l0 ^ g_l1;
+    int g_l21 = g_l1 ^ g_l7;
+    int g_l22 = g_l3 ^ g_l12;
+    int g_l23 = g_l18 ^ g_l2;
+    int g_l24 = g_l15 ^ g_l9;
+    int g_l25 = g_l6 ^ g_l10;
+    int g_l26 = g_l7 ^ g_l9;
+    int g_l27 = g_l8 ^ g_l10;
+    int g_l28 = g_l11 ^ g_l14;
+    int g_l29 = g_l11 ^ g_l17;
+    s_7 = g_l6 ^ g_l24;
+    s_6 = ~(g_l16 ^ g_l26);
+    s_5 = ~(g_l19 ^ g_l28);
+    s_4 = g_l6 ^ g_l21;
+    s_3 = g_l20 ^ g_l22;
+    s_2 = g_l25 ^ g_l29;
+    s_1 = ~(g_l13 ^ g_l27);
+    s_0 = ~(g_l6 ^ g_l23);
+    int r_0 = (s_0 & 0x1111_1111_1111_1111) | (s_0 >> 4 & 0x0222_0222_0222_0222) | (s_0 << 12 & 0x2000_2000_2000_2000) | (s_0 >> 8 & 0x0044_0044_0044_0044) | (s_0 << 8 & 0x4400_4400_4400_4400) | (s_0 >> 12 & 0x0008_0008_0008_0008) | (s_0 << 4 & 0x8880_8880_8880_8880);
+    int r_1 = (s_1 & 0x1111_1111_1111_1111) | (s_1 >> 4 & 0x0222_0222_0222_0222) | (s_1 << 12 & 0x2000_2000_2000_2000) | (s_1 >> 8 & 0x0044_0044_0044_0044) | (s_1 << 8 & 0x4400_4400_4400_4400) | (s_1 >> 12 & 0x0008_0008_0008_0008) | (s_1 << 4 & 0x8880_8880_8880_8880);
+    int r_2 = (s_2 & 0x1111_1111_1111_1111) | (s_2 >> 4 & 0x0222_0222_0222_0222) | (s_2 << 12 & 0x2000_2000_2000_2000) | (s_2 >> 8 & 0x0044_0044_0044_0044) | (s_2 << 8 & 0x4400_4400_4400_4400) | (s_2 >> 12 & 0x0008_0008_0008_0008) | (s_2 << 4 & 0x8880_8880_8880_8880);
+    int r_3 = (s_3 & 0x1111_1111_1111_1111) | (s_3 >> 4 & 0x0222_0222_0222_0222) | (s_3 << 12 & 0x2000_2000_2000_2000) | (s_3 >> 8 & 0x0044_0044_0044_0044) | (s_3 << 8 & 0x4400_4400_4400_4400) | (s_3 >> 12 & 0x0008_0008_0008_0008) | (s_3 << 4 & 0x8880_8880_8880_8880);
+    int r_4 = (s_4 & 0x1111_1111_1111_1111) | (s_4 >> 4 & 0x0222_0222_0222_0222) | (s_4 << 12 & 0x2000_2000_2000_2000) | (s_4 >> 8 & 0x0044_0044_0044_0044) | (s_4 << 8 & 0x4400_4400_4400_4400) | (s_4 >> 12 & 0x0008_0008_0008_0008) | (s_4 << 4 & 0x8880_8880_8880_8880);
+    int r_5 = (s_5 & 0x1111_1111_1111_1111) | (s_5 >> 4 & 0x0222_0222_0222_0222) | (s_5 << 12 & 0x2000_2000_2000_2000) | (s_5 >> 8 & 0x0044_0044_0044_0044) | (s_5 << 8 & 0x4400_4400_4400_4400) | (s_5 >> 12 & 0x0008_0008_0008_0008) | (s_5 << 4 & 0x8880_8880_8880_8880);
+    int r_6 = (s_6 & 0x1111_1111_1111_1111) | (s_6 >> 4 & 0x0222_0222_0222_0222) | (s_6 << 12 & 0x2000_2000_2000_2000) | (s_6 >> 8 & 0x0044_0044_0044_0044) | (s_6 << 8 & 0x4400_4400_4400_4400) | (s_6 >> 12 & 0x0008_0008_0008_0008) | (s_6 << 4 & 0x8880_8880_8880_8880);
+    int r_7 = (s_7 & 0x1111_1111_1111_1111) | (s_7 >> 4 & 0x0222_0222_0222_0222) | (s_7 << 12 & 0x2000_2000_2000_2000) | (s_7 >> 8 & 0x0044_0044_0044_0044) | (s_7 << 8 & 0x4400_4400_4400_4400) | (s_7 >> 12 & 0x0008_0008_0008_0008) | (s_7 << 4 & 0x8880_8880_8880_8880);
+    planes[0] = r_0 ^ round_keys[8 * rounds + 0];
+    planes[1] = r_1 ^ round_keys[8 * rounds + 1];
+    planes[2] = r_2 ^ round_keys[8 * rounds + 2];
+    planes[3] = r_3 ^ round_keys[8 * rounds + 3];
+    planes[4] = r_4 ^ round_keys[8 * rounds + 4];
+    planes[5] = r_5 ^ round_keys[8 * rounds + 5];
+    planes[6] = r_6 ^ round_keys[8 * rounds + 6];
+    planes[7] = r_7 ^ round_keys[8 * rounds + 7];
 }

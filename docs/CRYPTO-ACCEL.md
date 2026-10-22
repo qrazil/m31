@@ -5,22 +5,36 @@ acceptable where it buys real speed. This is what was built, what it measured,
 the security notes, and what is left. Measurements and method are in
 `docs/CRYPTO-PERF.md`.
 
-## The mechanism: no compiler change
+## The mechanism: `prim "c"`, no C
 
-m31 has no FFI and does not need one here. `docs/stdlib-seam.md` already has the
-tool: a `prim` declaration in a stdlib module lowers to a call of `rt_<name>`
-(strip the underscores, prefix `rt_`), allowed only in modules that come out of
-`lib/`, and a `prim` may write into a `bytes` it is handed. The kernels use exactly
-that, so **no file under `src/` changed** (no owner sign-off needed on the compiler).
+*(Rewritten 2026-10-21. The first version of this branch reached the kernels
+through `prim`s into a 352-line hand-written C file, `runtime/crypto_glue.c`.
+The owner then decided that m31 needs assembly and FFI in the future, so the
+compiler grew a safe way to call assembly from library code, and the glue is
+gone. `docs/ffi-decision.md` is the design.)*
+
+A `prim "c"` declaration in a stdlib module names an assembly function that takes
+integers and pointers, and says which `bytes` or `Array<int>` ranges it reads and
+writes. The **compiler** emits the call: it evaluates each range with overflow
+checks, checks it against the buffer's **size** (the rule `rt_read` follows),
+checks a written buffer is not frozen, and passes the pointers. A bad range traps
+before the kernel runs. No raw pointer exists in m31 source.
 
 ```
-lib/crypto/sha256.m31 ... prim int __crypto_sha256(bytes state, bytes data, int off, int n);
-                          if ((__crypto_features() & 2) != 0) { ... kernel ... } else { m31 code }
-runtime/rt.h             int64_t rt_crypto_sha256(Obj *state, Obj *data, int64_t off, int64_t n);
-runtime/crypto_glue.c    unpack the Bytes, range-check, feature-check, call rt_k_sha256
+lib/crypto/sha256.m31   prim "c" nonblocking void __k_sha256(
+                            inout bytes state[0 .. 32],
+                            in bytes data[offset .. offset + 64 * count],
+                            int count,
+                            range int offset);
+                        if ((accel.features() & accel.SHA256) != 0) { ... kernel ... } else { m31 code }
+lib/crypto/accel.m31    which kernels this process may call: cpuid, AT_HWCAP, M31_CRYPTO_ACCEL, in m31
 runtime/crypto_x86_64.S  rt_k_sha256: SHA-NI
 runtime/crypto_aarch64.S rt_k_sha256: ARMv8 SHA2
+runtime/accel_*.S        rt_k_platform, rt_k_cache_load/store (and the aarch64 rt_k_cpuid stub)
 ```
+
+There is **no C** for the crypto: `runtime/crypto_glue.c` and the `rt_crypto_*`
+prototypes are deleted, `rt.c` has no crypto line.
 
 * **The assembly is in separate `.S` files next to `ctx_switch_*.S`** and is `#include`d
   at the end of the matching `ctx_switch_*.S`, so every script that already links
@@ -28,18 +42,22 @@ runtime/crypto_aarch64.S rt_k_sha256: ARMv8 SHA2
   kernels with no new file to name. Same conventions as the context switch: C_SYM for
   Mach-O's underscore, `.note.GNU-stack` on ELF only, `.type`/`.size` on ELF only,
   System V / AAPCS64, x18 untouched.
-* **`runtime/crypto_glue.c` is the only C**, about 300 lines, `#include`d by `rt.c`. It does
-  three things and implements no primitive: feature detection (cpuid via a four-line asm
-  function on x86-64; `getauxval(AT_HWCAP)` on Linux aarch64; `sysctlbyname("hw.optional.arm.FEAT_*")`
-  on macOS), argument unpacking with a range check against the buffer's **size** (the rule
-  `rt_read` follows), and the `M31_CRYPTO_ACCEL` switch. The C was unavoidable for detection on
-  aarch64 and for the `Bytes` layout; it is deliberately that small.
+* **Feature detection is m31** (`lib/crypto/accel.m31`): `cpuid` through an assembly
+  function that writes the four registers into a `bytes` on x86-64; `AT_HWCAP` read from
+  `/proc/self/auxv` with the file API on Linux aarch64 (without `/proc` only the kernels
+  that need no extension run); a documented static assumption on Apple silicon (every
+  arm64 Mac has AES, PMULL, SHA-1, SHA-256), which `M31_CRYPTO_ACCEL=off` overrides. The
+  answer is computed once and kept in one word of the runtime (`rt_k_cache_*`, assembly),
+  because an m31 module may not hold mutable state and `cpuid` traps to the hypervisor
+  on a VM.
 * **Fallback**: a kernel runs only when the CPU has the instructions
-  (`__crypto_features()` bit set) and `M31_CRYPTO_ACCEL` has not switched it off; otherwise
-  the m31 implementation runs, producing the same bytes. `M31_CRYPTO_ACCEL=off` disables
-  all; `M31_CRYPTO_ACCEL=-aes,-sha256,-sha512,-sha1,-chacha,-poly,-fe` disables the named
-  kernels. `tests/cryptodiff/test.sh` runs the whole differential suite with kernels on and
-  off, so the two paths are held to the same oracles (hashlib, OpenSSL via `cryptography`).
+  (`accel.features()` bit set) and `M31_CRYPTO_ACCEL` (read with `os.env`) has not switched
+  it off; otherwise the m31 implementation runs, producing the same bytes.
+  `M31_CRYPTO_ACCEL=off` disables all; `M31_CRYPTO_ACCEL=-aes,-sha256,-sha512,-sha1,-chacha,-poly,-fe`
+  disables the named kernels. `tests/cryptodiff/test.sh` runs the whole differential suite
+  with kernels on and off, so the two paths are held to the same oracles (hashlib, OpenSSL
+  via `cryptography`). On a target without kernels (`RT_HAVE_KERNELS` 0) `accel.features()`
+  is 0 and no kernel is reached.
 * The limbs a field kernel returns are **bit-identical** to the m31 code's (it is ref10's
   multiply and carry chain, instruction for instruction), so a process can mix the paths.
 
@@ -86,9 +104,11 @@ bigint model of the field.
 * **aarch64, every kernel**: assembled with clang (`--target=aarch64-linux-gnu`), linked with rust-lld
   into a freestanding program with the vectors embedded, run under `qemu-aarch64 -cpu max`
   (about 1800 checks). The harness was shown to fail when a kernel is corrupted. **Not run:**
-  the m31 library on aarch64 (no cross libc here, so the glue's `getauxval` path, `rt.c`
-  and the dispatch have only been compiled for x86-64), the macOS build (Mach-O syntax and
-  the `sysctlbyname` names are written from the same pattern as `ctx_switch_aarch64.S`
+  the m31 library on aarch64 (no cross libc here, so the `/proc/self/auxv` path of
+  `accel.m31`, `rt.c` and the dispatch have only been compiled for x86-64; the pure parts
+  of `accel.m31`, the `AT_HWCAP` parser and the `M31_CRYPTO_ACCEL` grammar, are run by a
+  corpus program on x86-64 over synthetic input), the macOS build (Mach-O syntax, and the
+  static feature assumption, are written from the same pattern as `ctx_switch_aarch64.S`
   but never assembled by Apple's tools), and real ARM silicon. The aarch64 and macOS
   CI jobs are the first real test of those three; the first thing to check there is
   `runtime/tests/crypto_kernels_test.py aarch64` and `tests/cryptodiff/test.sh`.
@@ -107,9 +127,10 @@ bigint model of the field.
   library and are table-free anyway. Nothing was added that indexes memory by a secret.
 * **What is not verified**: no timing measurement on hardware, no analysis of microarchitectural
   leaks beyond the above; the same caveat the m31 headers already carry.
-* **Memory safety**: every pointer a kernel receives comes from a `Bytes` after a range check
-  against its size, output buffers are checked mutable, and the kernels read and write exactly
-  `n` blocks (or `len` octets); the tests put canary bytes either side. The ChaCha20 kernel
+* **Memory safety**: every pointer a kernel receives is derived by compiler-emitted code from
+  an m31 value after a range check against its size (docs/ffi-decision.md), output buffers
+  are checked mutable, and the kernels read and write exactly `n` blocks (or `len` octets);
+  the tests put canary bytes either side. The ChaCha20 kernel
   zeroes its stack frame (key and keystream) before returning; the AES and field kernels
   leave only xmm/GPR residue in caller-saved registers.
 * **Counter semantics**: the CTR kernel increments all 128 bits; GCM never wraps the low 32 bits
@@ -121,9 +142,9 @@ bigint model of the field.
 
 ## What is left, and the options
 
-1. **Done and recommended to keep**: kernels behind `prim`, no compiler change. Cost: three
-   runtime files (about 2000 lines of assembly, mostly generated-by-hand repetition of
-   documented sequences) and one 300-line glue file; risk: assembly bugs, bounded by the
+1. **Done and recommended to keep**: kernels behind `prim "c"`. Cost: the runtime assembly
+   files (about 2000 lines of assembly, mostly generated-by-hand repetition of
+   documented sequences) and `lib/crypto/accel.m31`; no C; risk: assembly bugs, bounded by the
    tests above and the always-available m31 fallback.
 2. **Language intrinsics** (`rotl32`, 64x64->128 multiply-high, `restrict`/no-alias, bounds-check
    elision, `bytes.load_le32/le64`). Gain: the portable path (CPUs without the extensions,

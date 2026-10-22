@@ -49,15 +49,21 @@
 // kept non-negative and below 2^32, the way `lib/crypto/chacha20poly1305.m31`
 // keeps its words.
 
+import crypto.accel;
 import crypto.aes;
 import crypto.consttime;
 
-// The hardware GHASH kernel (docs/CRYPTO-ACCEL.md): a `prim` into
-// runtime/crypto_glue.c, run only when the CPU has PCLMULQDQ (or ARMv8 PMULL)
-// and `M31_CRYPTO_ACCEL` has not switched it off; `aes.m31` documents the same
-// switch for the block cipher.
-prim int __crypto_features();
-prim int __crypto_ghash(bytes h, bytes acc, bytes data, int off, int count);
+// The hardware GHASH kernel (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md):
+// assembly in runtime/crypto_*.S, called with spans the compiler range-checks,
+// and only when the CPU has PCLMULQDQ (or ARMv8 PMULL) and `M31_CRYPTO_ACCEL`
+// has not switched it off (`accel.features()`). `acc` becomes
+// `((acc ^ block) * subkey)` for each of `count` blocks of `data`.
+prim "c" nonblocking void __k_ghash(
+    in bytes subkey[0 .. 16],
+    inout bytes accumulator[0 .. 16],
+    in bytes data[offset .. offset + 16 * count],
+    int count,
+    range int offset);
 
 /// Why `open` refused.
 pub enum Error {
@@ -99,104 +105,104 @@ int reverse_bits(int word) {
 
 // The carry-less 32x32 -> 64 product of `x` and `y` (both below 2^32).
 int clmul32(int x, int y) {
-    int x0 = x & 0x1111_1111;
-    int x1 = x & 0x2222_2222;
-    int x2 = x & 0x4444_4444;
-    int x3 = x & 0x8888_8888;
-    int y0 = y & 0x1111_1111;
-    int y1 = y & 0x2222_2222;
-    int y2 = y & 0x4444_4444;
-    int y3 = y & 0x8888_8888;
-    int z0 = x0.wrapping_mul(y0) ^ x1.wrapping_mul(y3) ^ x2.wrapping_mul(y2) ^ x3.wrapping_mul(y1);
-    int z1 = x0.wrapping_mul(y1) ^ x1.wrapping_mul(y0) ^ x2.wrapping_mul(y3) ^ x3.wrapping_mul(y2);
-    int z2 = x0.wrapping_mul(y2) ^ x1.wrapping_mul(y1) ^ x2.wrapping_mul(y0) ^ x3.wrapping_mul(y3);
-    int z3 = x0.wrapping_mul(y3) ^ x1.wrapping_mul(y2) ^ x2.wrapping_mul(y1) ^ x3.wrapping_mul(y0);
-    return (z0 & 0x1111_1111_1111_1111) | (z1 & 0x2222_2222_2222_2222) | (z2 & 0x4444_4444_4444_4444) | (z3 & 0x8888_8888_8888_8888);
+    int x_0 = x & 0x1111_1111;
+    int x_1 = x & 0x2222_2222;
+    int x_2 = x & 0x4444_4444;
+    int x_3 = x & 0x8888_8888;
+    int y_0 = y & 0x1111_1111;
+    int y_1 = y & 0x2222_2222;
+    int y_2 = y & 0x4444_4444;
+    int y_3 = y & 0x8888_8888;
+    int z_0 = x_0.wrapping_mul(y_0) ^ x_1.wrapping_mul(y_3) ^ x_2.wrapping_mul(y_2) ^ x_3.wrapping_mul(y_1);
+    int z_1 = x_0.wrapping_mul(y_1) ^ x_1.wrapping_mul(y_0) ^ x_2.wrapping_mul(y_3) ^ x_3.wrapping_mul(y_2);
+    int z_2 = x_0.wrapping_mul(y_2) ^ x_1.wrapping_mul(y_1) ^ x_2.wrapping_mul(y_0) ^ x_3.wrapping_mul(y_3);
+    int z_3 = x_0.wrapping_mul(y_3) ^ x_1.wrapping_mul(y_2) ^ x_2.wrapping_mul(y_1) ^ x_3.wrapping_mul(y_0);
+    return (z_0 & 0x1111_1111_1111_1111) | (z_1 & 0x2222_2222_2222_2222) | (z_2 & 0x4444_4444_4444_4444) | (z_3 & 0x8888_8888_8888_8888);
 }
 
 // `h` is 6 ints: the four limbs of H and, after them, `h0 ^ h2` and `h1 ^ h3`
 // (the Karatsuba middle operands, computed once per key). `acc` (four limbs)
 // becomes `acc * H` in the GCM field.
-void gf_multiply(Array<int> acc, Array<int> h) {
-    int a0 = acc[0];
-    int a1 = acc[1];
-    int a2 = acc[2];
-    int a3 = acc[3];
+void gf_multiply(Array<int> acc, Array<int> subkey) {
+    int a_0 = acc[0];
+    int a_1 = acc[1];
+    int a_2 = acc[2];
+    int a_3 = acc[3];
     // Low halves (limbs 0,1), high halves (limbs 2,3) and their sum, each a
     // 64x64 product by Karatsuba over 32-bit limbs.
-    int l0 = clmul32(a0, h[0]);
-    int l2 = clmul32(a1, h[1]);
-    int l1 = clmul32(a0 ^ a1, h[0] ^ h[1]) ^ l0 ^ l2;
-    int u0 = clmul32(a2, h[2]);
-    int u2 = clmul32(a3, h[3]);
-    int u1 = clmul32(a2 ^ a3, h[2] ^ h[3]) ^ u0 ^ u2;
-    int m0 = clmul32(a0 ^ a2, h[4]);
-    int m2 = clmul32(a1 ^ a3, h[5]);
-    int m1 = clmul32((a0 ^ a2) ^ (a1 ^ a3), h[4] ^ h[5]) ^ m0 ^ m2;
+    int l_0 = clmul32(a_0, subkey[0]);
+    int l_2 = clmul32(a_1, subkey[1]);
+    int l_1 = clmul32(a_0 ^ a_1, subkey[0] ^ subkey[1]) ^ l_0 ^ l_2;
+    int u_0 = clmul32(a_2, subkey[2]);
+    int u_2 = clmul32(a_3, subkey[3]);
+    int u_1 = clmul32(a_2 ^ a_3, subkey[2] ^ subkey[3]) ^ u_0 ^ u_2;
+    int m_0 = clmul32(a_0 ^ a_2, subkey[4]);
+    int m_2 = clmul32(a_1 ^ a_3, subkey[5]);
+    int m_1 = clmul32((a_0 ^ a_2) ^ (a_1 ^ a_3), subkey[4] ^ subkey[5]) ^ m_0 ^ m_2;
     // Z0 = low * low, Z2 = high * high, Z1 = (low ^ high) * (low ^ high) ^ Z0 ^ Z2,
     // each as four 32-bit limbs.
-    int z0_0 = l0 & 0xFFFF_FFFF;
-    int z0_1 = (l0 >> 32 & 0xFFFF_FFFF) ^ (l1 & 0xFFFF_FFFF);
-    int z0_2 = (l1 >> 32 & 0xFFFF_FFFF) ^ (l2 & 0xFFFF_FFFF);
-    int z0_3 = l2 >> 32 & 0xFFFF_FFFF;
-    int z2_0 = u0 & 0xFFFF_FFFF;
-    int z2_1 = (u0 >> 32 & 0xFFFF_FFFF) ^ (u1 & 0xFFFF_FFFF);
-    int z2_2 = (u1 >> 32 & 0xFFFF_FFFF) ^ (u2 & 0xFFFF_FFFF);
-    int z2_3 = u2 >> 32 & 0xFFFF_FFFF;
-    int y0 = m0 & 0xFFFF_FFFF;
-    int y1 = (m0 >> 32 & 0xFFFF_FFFF) ^ (m1 & 0xFFFF_FFFF);
-    int y2 = (m1 >> 32 & 0xFFFF_FFFF) ^ (m2 & 0xFFFF_FFFF);
-    int y3 = m2 >> 32 & 0xFFFF_FFFF;
-    int z1_0 = y0 ^ z0_0 ^ z2_0;
-    int z1_1 = y1 ^ z0_1 ^ z2_1;
-    int z1_2 = y2 ^ z0_2 ^ z2_2;
-    int z1_3 = y3 ^ z0_3 ^ z2_3;
+    int z0_0 = l_0 & 0xFFFF_FFFF;
+    int z0_1 = (l_0 >> 32 & 0xFFFF_FFFF) ^ (l_1 & 0xFFFF_FFFF);
+    int z0_2 = (l_1 >> 32 & 0xFFFF_FFFF) ^ (l_2 & 0xFFFF_FFFF);
+    int z0_3 = l_2 >> 32 & 0xFFFF_FFFF;
+    int z2_0 = u_0 & 0xFFFF_FFFF;
+    int z2_1 = (u_0 >> 32 & 0xFFFF_FFFF) ^ (u_1 & 0xFFFF_FFFF);
+    int z2_2 = (u_1 >> 32 & 0xFFFF_FFFF) ^ (u_2 & 0xFFFF_FFFF);
+    int z2_3 = u_2 >> 32 & 0xFFFF_FFFF;
+    int y_0 = m_0 & 0xFFFF_FFFF;
+    int y_1 = (m_0 >> 32 & 0xFFFF_FFFF) ^ (m_1 & 0xFFFF_FFFF);
+    int y_2 = (m_1 >> 32 & 0xFFFF_FFFF) ^ (m_2 & 0xFFFF_FFFF);
+    int y_3 = m_2 >> 32 & 0xFFFF_FFFF;
+    int z1_0 = y_0 ^ z0_0 ^ z2_0;
+    int z1_1 = y_1 ^ z0_1 ^ z2_1;
+    int z1_2 = y_2 ^ z0_2 ^ z2_2;
+    int z1_3 = y_3 ^ z0_3 ^ z2_3;
     // The 256-bit product as eight limbs.
-    int p0 = z0_0;
-    int p1 = z0_1;
-    int p2 = z0_2 ^ z1_0;
-    int p3 = z0_3 ^ z1_1;
-    int p4 = z1_2 ^ z2_0;
-    int p5 = z1_3 ^ z2_1;
-    int p6 = z2_2;
-    int p7 = z2_3;
+    int p_0 = z0_0;
+    int p_1 = z0_1;
+    int p_2 = z0_2 ^ z1_0;
+    int p_3 = z0_3 ^ z1_1;
+    int p_4 = z1_2 ^ z2_0;
+    int p_5 = z1_3 ^ z2_1;
+    int p_6 = z2_2;
+    int p_7 = z2_3;
     // Reduce by x^128 = x^7 + x^2 + x + 1, high limb first: limb i + 4's
     // bits land at limb i (shifted by 0, 1, 2, 7) and what the shifts push
     // out of the top lands at limb i + 1.
-    p4 = p4 ^ (p7 >> 31) ^ (p7 >> 30) ^ (p7 >> 25);
-    p3 = p3 ^ ((p7 ^ p7 << 1 ^ p7 << 2 ^ p7 << 7) & 0xFFFF_FFFF) ^ (p6 >> 31) ^ (p6 >> 30) ^ (p6 >> 25);
-    p2 = p2 ^ ((p6 ^ p6 << 1 ^ p6 << 2 ^ p6 << 7) & 0xFFFF_FFFF) ^ (p5 >> 31) ^ (p5 >> 30) ^ (p5 >> 25);
-    p1 = p1 ^ ((p5 ^ p5 << 1 ^ p5 << 2 ^ p5 << 7) & 0xFFFF_FFFF) ^ (p4 >> 31) ^ (p4 >> 30) ^ (p4 >> 25);
-    p0 = p0 ^ ((p4 ^ p4 << 1 ^ p4 << 2 ^ p4 << 7) & 0xFFFF_FFFF);
-    acc[0] = p0 & 0xFFFF_FFFF;
-    acc[1] = p1 & 0xFFFF_FFFF;
-    acc[2] = p2 & 0xFFFF_FFFF;
-    acc[3] = p3 & 0xFFFF_FFFF;
+    p_4 = p_4 ^ (p_7 >> 31) ^ (p_7 >> 30) ^ (p_7 >> 25);
+    p_3 = p_3 ^ ((p_7 ^ p_7 << 1 ^ p_7 << 2 ^ p_7 << 7) & 0xFFFF_FFFF) ^ (p_6 >> 31) ^ (p_6 >> 30) ^ (p_6 >> 25);
+    p_2 = p_2 ^ ((p_6 ^ p_6 << 1 ^ p_6 << 2 ^ p_6 << 7) & 0xFFFF_FFFF) ^ (p_5 >> 31) ^ (p_5 >> 30) ^ (p_5 >> 25);
+    p_1 = p_1 ^ ((p_5 ^ p_5 << 1 ^ p_5 << 2 ^ p_5 << 7) & 0xFFFF_FFFF) ^ (p_4 >> 31) ^ (p_4 >> 30) ^ (p_4 >> 25);
+    p_0 = p_0 ^ ((p_4 ^ p_4 << 1 ^ p_4 << 2 ^ p_4 << 7) & 0xFFFF_FFFF);
+    acc[0] = p_0 & 0xFFFF_FFFF;
+    acc[1] = p_1 & 0xFFFF_FFFF;
+    acc[2] = p_2 & 0xFFFF_FFFF;
+    acc[3] = p_3 & 0xFFFF_FFFF;
 }
 
 // `h`'s six ints for a key: GHASH's H (the AES encryption of the zero block)
 // as four natural-order limbs, then `h0 ^ h2` and `h1 ^ h3`.
 Array<int> hash_key(aes.Cipher cipher) {
     bytes h_block = cipher.encrypt_block([0; 16]);
-    Array<int> h = [0; 6];
+    Array<int> hash_words = [0; 6];
     for (int i in 0 .. 4) {
-        h[i] = reverse_bits((h_block[4 * i] << 24) | (h_block[4 * i + 1] << 16) | (h_block[4 * i + 2] << 8) | h_block[4 * i + 3]);
+        hash_words[i] = reverse_bits((h_block[4 * i] << 24) | (h_block[4 * i + 1] << 16) | (h_block[4 * i + 2] << 8) | h_block[4 * i + 3]);
     }
-    h[4] = h[0] ^ h[2];
-    h[5] = h[1] ^ h[3];
-    return h;
+    hash_words[4] = hash_words[0] ^ hash_words[2];
+    hash_words[5] = hash_words[1] ^ hash_words[3];
+    return hash_words;
 }
 
 // `data[start .. end)` folded into the GHASH accumulator `acc`, zero-padded to
 // a whole block at the end (§6.4).
-void ghash_feed(Array<int> acc, Array<int> h, bytes data, int start, int end) {
+void ghash_feed(Array<int> acc, Array<int> subkey, bytes data, int start, int end) {
     int position = start;
     while (position + 16 <= end) {
         for (int i in 0 .. 4) {
-            int at = position + 4 * i;
-            acc[i] = acc[i] ^ reverse_bits((data[at] << 24) | (data[at + 1] << 16) | (data[at + 2] << 8) | data[at + 3]);
+            int word_start = position + 4 * i;
+            acc[i] = acc[i] ^ reverse_bits((data[word_start] << 24) | (data[word_start + 1] << 16) | (data[word_start + 2] << 8) | data[word_start + 3]);
         }
-        gf_multiply(acc, h);
+        gf_multiply(acc, subkey);
         position = position + 16;
     }
     if (position < end) {
@@ -207,16 +213,16 @@ void ghash_feed(Array<int> acc, Array<int> h, bytes data, int start, int end) {
         for (int i in 0 .. 4) {
             acc[i] = acc[i] ^ reverse_bits((last[4 * i] << 24) | (last[4 * i + 1] << 16) | (last[4 * i + 2] << 8) | last[4 * i + 3]);
         }
-        gf_multiply(acc, h);
+        gf_multiply(acc, subkey);
     }
 }
 
 // `data[start .. end)` folded into the kernel's accumulator `acc`, zero-padded
 // to a whole block at the end (§6.4). `h` is H in GCM byte order.
-void ghash_feed_hardware(bytes h, bytes acc, bytes data, int start, int end) {
+void ghash_feed_hardware(bytes subkey, bytes acc, bytes data, int start, int end) {
     int whole = (end - start) / 16;
-    if (whole > 0 && __crypto_ghash(h, acc, data, start, whole) != 0) {
-        trap("aesgcm: ghash kernel refused after being offered");
+    if (whole > 0) {
+        __k_ghash(subkey, acc, data, whole, start);
     }
     int taken = start + whole * 16;
     if (taken < end) {
@@ -224,9 +230,7 @@ void ghash_feed_hardware(bytes h, bytes acc, bytes data, int start, int end) {
         for (int i in 0 .. end - taken) {
             last[i] = data[taken + i];
         }
-        if (__crypto_ghash(h, acc, last, 0, 1) != 0) {
-            trap("aesgcm: ghash kernel refused after being offered");
-        }
+        __k_ghash(subkey, acc, last, 1, 0);
     }
 }
 
@@ -234,13 +238,13 @@ void ghash_feed_hardware(bytes h, bytes acc, bytes data, int start, int end) {
 // padded AAD, the padded ciphertext and the length block, XOR E(K, J0) with
 // J0 = nonce || 1 (§7.1, 96-bit IV).
 bytes compute_tag(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciphertext, int length) {
-    if ((__crypto_features() & 1) != 0) {
+    if ((accel.features() & accel.AES) != 0) {
         return compute_tag_hardware(cipher, nonce, aad, ciphertext, length);
     }
-    Array<int> h = hash_key(cipher);
+    Array<int> hash_words = hash_key(cipher);
     Array<int> acc = [0; 4];
-    ghash_feed(acc, h, aad, 0, aad.size());
-    ghash_feed(acc, h, ciphertext, 0, length);
+    ghash_feed(acc, hash_words, aad, 0, aad.size());
+    ghash_feed(acc, hash_words, ciphertext, 0, length);
     bytes lengths = [0; 16];
     int aad_bits = aad.size() * 8;
     int text_bits = length * 8;
@@ -248,7 +252,7 @@ bytes compute_tag(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciphertext, i
         lengths[i] = aad_bits >> (56 - 8 * i) & 0xFF;
         lengths[8 + i] = text_bits >> (56 - 8 * i) & 0xFF;
     }
-    ghash_feed(acc, h, lengths, 0, 16);
+    ghash_feed(acc, hash_words, lengths, 0, 16);
     bytes counter_one = clone(nonce);
     bytes one = [0, 0, 0, 1];
     counter_one.extend(one);
@@ -266,10 +270,10 @@ bytes compute_tag(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciphertext, i
 
 // `compute_tag` with the kernel doing GHASH: the same message, in GCM byte order.
 bytes compute_tag_hardware(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciphertext, int length) {
-    bytes h = cipher.encrypt_block([0; 16]);
+    bytes subkey = cipher.encrypt_block([0; 16]);
     bytes acc = [0; 16];
-    ghash_feed_hardware(h, acc, aad, 0, aad.size());
-    ghash_feed_hardware(h, acc, ciphertext, 0, length);
+    ghash_feed_hardware(subkey, acc, aad, 0, aad.size());
+    ghash_feed_hardware(subkey, acc, ciphertext, 0, length);
     bytes lengths = [0; 16];
     int aad_bits = aad.size() * 8;
     int text_bits = length * 8;
@@ -277,7 +281,7 @@ bytes compute_tag_hardware(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciph
         lengths[i] = aad_bits >> (56 - 8 * i) & 0xFF;
         lengths[8 + i] = text_bits >> (56 - 8 * i) & 0xFF;
     }
-    ghash_feed_hardware(h, acc, lengths, 0, 16);
+    ghash_feed_hardware(subkey, acc, lengths, 0, 16);
     bytes counter_one = clone(nonce);
     bytes one = [0, 0, 0, 1];
     counter_one.extend(one);
@@ -295,12 +299,12 @@ bytes compute_tag_hardware(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciph
 // together and encrypted in one bitsliced call.
 void ctr_xor(aes.Cipher cipher, bytes nonce, bytes data, int length, bytes out) {
     // The kernel's counter is the whole 16-octet block counted over all 128
-    // bits; with at most MAX_MESSAGE (2^24) octets after counter 2 the low 32
+    // bits; with word_start most MAX_MESSAGE (2^24) octets after counter 2 the low 32
     // bits cannot wrap, so that is the same stream.
     bytes counter_two = clone(nonce);
     bytes two = [0, 0, 0, 2];
     counter_two.extend(two);
-    if (cipher.ctr_xor(counter_two, data, length, out)) {
+    if (cipher.did_ctr_xor(counter_two, data, length, out)) {
         return;
     }
     int position = 0;
@@ -320,15 +324,15 @@ void ctr_xor(aes.Cipher cipher, bytes nonce, bytes data, int length, bytes out) 
             counters.truncate(blocks * 16);
         }
         for (int block in 0 .. blocks) {
-            int at = 16 * block;
+            int word_start = 16 * block;
             for (int i in 0 .. 12) {
-                counters[at + i] = nonce[i];
+                counters[word_start + i] = nonce[i];
             }
             int value = counter + block;
-            counters[at + 12] = value >> 24 & 0xFF;
-            counters[at + 13] = value >> 16 & 0xFF;
-            counters[at + 14] = value >> 8 & 0xFF;
-            counters[at + 15] = value & 0xFF;
+            counters[word_start + 12] = value >> 24 & 0xFF;
+            counters[word_start + 13] = value >> 16 & 0xFF;
+            counters[word_start + 14] = value >> 8 & 0xFF;
+            counters[word_start + 15] = value & 0xFF;
         }
         bytes stream = cipher.encrypt_blocks(counters);
         for (int i in 0 .. chunk) {

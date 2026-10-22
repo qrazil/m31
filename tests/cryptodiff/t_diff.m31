@@ -56,79 +56,79 @@ str read_input() {
     }
 }
 
-str run_case(str op, int a, int b, int seed) {
+str run_case(str operation, int first, int second, int seed) {
     bytes key = gen(32, seed + 1);
     bytes nonce = gen(12, seed + 2);
-    if (op == "sha1") {
-        return sha1digest.hex(gen(a, seed));
+    if (operation == "sha1") {
+        return sha1digest.hex(gen(first, seed));
     }
-    if (op == "sha256") {
-        return sha256.hex(gen(a, seed));
+    if (operation == "sha256") {
+        return sha256.hex(gen(first, seed));
     }
-    if (op == "sha384") {
-        return sha512.hex384(gen(a, seed));
+    if (operation == "sha384") {
+        return sha512.hex384(gen(first, seed));
     }
-    if (op == "sha512") {
-        return sha512.hex(gen(a, seed));
+    if (operation == "sha512") {
+        return sha512.hex(gen(first, seed));
     }
-    if (op == "sha1x" || op == "sha256x" || op == "sha512x") {
-        bytes data = gen(a, seed);
+    if (operation == "sha1x" || operation == "sha256x" || operation == "sha512x") {
+        bytes data = gen(first, seed);
         List<int> pieces = [3, 61, 7, 130];
-        int at = 0;
-        if (op == "sha1x") {
+        int done = 0;
+        if (operation == "sha1x") {
             sha1digest.Hasher hasher = sha1digest.Hasher();
             for (int piece in pieces) {
-                int end = at + piece;
+                int end = done + piece;
                 if (end > data.size()) {
                     end = data.size();
                 }
-                hasher.update(data.substr(at, end));
-                at = end;
+                hasher.update(data.substr(done, end));
+                done = end;
             }
-            hasher.update(data.substr(at, data.size()));
+            hasher.update(data.substr(done, data.size()));
             return hasher.digest().hex();
         }
-        if (op == "sha256x") {
+        if (operation == "sha256x") {
             sha256.Hasher hasher = sha256.Hasher();
             for (int piece in pieces) {
-                int end = at + piece;
+                int end = done + piece;
                 if (end > data.size()) {
                     end = data.size();
                 }
-                hasher.update(data.substr(at, end));
-                at = end;
+                hasher.update(data.substr(done, end));
+                done = end;
             }
-            hasher.update(data.substr(at, data.size()));
+            hasher.update(data.substr(done, data.size()));
             return hasher.digest().hex();
         }
         sha512.Hasher hasher = sha512.Hasher();
         for (int piece in pieces) {
-            int end = at + piece;
+            int end = done + piece;
             if (end > data.size()) {
                 end = data.size();
             }
-            hasher.update(data.substr(at, end));
-            at = end;
+            hasher.update(data.substr(done, end));
+            done = end;
         }
-        hasher.update(data.substr(at, data.size()));
+        hasher.update(data.substr(done, data.size()));
         return hasher.digest().hex();
     }
-    if (op == "hmac256") {
-        return hmac.sha256_hex(gen(a, seed + 3), gen(b, seed));
+    if (operation == "hmac256") {
+        return hmac.sha256_hex(gen(first, seed + 3), gen(second, seed));
     }
-    if (op == "hkdf256") {
-        bytes prk = hkdf.sha256_extract(gen(16, seed + 4), gen(a, seed));
-        return hkdf.sha256_expand(prk, gen(7, seed + 5), b).hex();
+    if (operation == "hkdf256") {
+        bytes prk = hkdf.sha256_extract(gen(16, seed + 4), gen(first, seed));
+        return hkdf.sha256_expand(prk, gen(7, seed + 5), second).hex();
     }
-    if (op == "chacha") {
-        return chacha20poly1305.encrypt(key, b, nonce, gen(a, seed)).hex();
+    if (operation == "chacha") {
+        return chacha20poly1305.encrypt(key, second, nonce, gen(first, seed)).hex();
     }
-    if (op == "poly") {
-        return chacha20poly1305.mac(key, gen(a, seed)).hex();
+    if (operation == "poly") {
+        return chacha20poly1305.mac(key, gen(first, seed)).hex();
     }
-    if (op == "ccp") {
-        bytes plain = gen(a, seed);
-        bytes aad = gen(b, seed + 6);
+    if (operation == "ccp") {
+        bytes plain = gen(first, seed);
+        bytes aad = gen(second, seed + 6);
         bytes sealed = chacha20poly1305.seal(key, nonce, plain, aad);
         match (chacha20poly1305.open(key, nonce, sealed, aad)) {
             case Ok(bytes opened): {
@@ -144,18 +144,18 @@ str run_case(str op, int a, int b, int seed) {
             bytes bad = clone(sealed);
             bad[bad.size() - 1] = bad[bad.size() - 1] ^ 1;
             if (chacha20poly1305.open(key, nonce, bad, aad).is_ok()) {
-                trap("ccp accepted a forged tag");
+                trap("ccp accepted first forged tag");
             }
         }
         return sealed.hex();
     }
-    if (op == "gcm" || op == "gcm128") {
+    if (operation == "gcm" || operation == "gcm128") {
         bytes gkey = key;
-        if (op == "gcm128") {
+        if (operation == "gcm128") {
             gkey = key.substr(0, 16);
         }
-        bytes plain = gen(a, seed);
-        bytes aad = gen(b, seed + 6);
+        bytes plain = gen(first, seed);
+        bytes aad = gen(second, seed + 6);
         bytes sealed = aesgcm.seal(gkey, nonce, plain, aad);
         match (aesgcm.open(gkey, nonce, sealed, aad)) {
             case Ok(bytes opened): {
@@ -170,17 +170,17 @@ str run_case(str op, int a, int b, int seed) {
         bytes bad = clone(sealed);
         bad[bad.size() - 1] = bad[bad.size() - 1] ^ 1;
         if (aesgcm.open(gkey, nonce, bad, aad).is_ok()) {
-            trap("gcm accepted a forged tag");
+            trap("gcm accepted first forged tag");
         }
         return sealed.hex();
     }
-    if (op == "aesblock") {
+    if (operation == "aesblock") {
         return aes.cipher(key).encrypt_block(gen(16, seed)).hex();
     }
-    if (op == "aesblock128") {
+    if (operation == "aesblock128") {
         return aes.cipher(key.substr(0, 16)).encrypt_block(gen(16, seed)).hex();
     }
-    trap("unknown op " + op);
+    trap("unknown operation " + operation);
 }
 
 for (str line in read_input().split("\n")) {

@@ -115,6 +115,21 @@ run "sys layer, every backend" bash runtime/tests/sys_test.sh
 # absent-kernel path. The compiler's half is the corpus (ffi programs).
 run "prim \"c\" kernels and symbols" bash runtime/tests/ffi_test.sh
 
+# The crypto kernels (docs/CRYPTO-ACCEL.md) against independent oracles --
+# `cryptography`/OpenSSL and hashlib -- called directly, and through the
+# library with the kernels on, off and partly off. Skipped, and said so, when
+# python3 or `cryptography` is missing.
+run "crypto kernels vs OpenSSL" bash -c '
+    if ! python3 -c "import cryptography" 2>/dev/null; then
+        echo "skipped (no python3 cryptography)"; exit 0
+    fi
+    case $(uname -m) in
+        x86_64|amd64) python3 runtime/tests/crypto_kernels_test.py x86_64 || exit 1 ;;
+    esac
+    bash tests/cryptodiff/test.sh || exit 1
+    M31_CRYPTO_ACCEL=off bash tests/cryptodiff/test.sh || exit 1
+    M31_CRYPTO_ACCEL=-aes,-chacha bash tests/cryptodiff/test.sh || exit 1'
+
 # Phase 1 of docs/concurrency-decision.md: the x86-64 context switch, the
 # slab stack allocator, the compiler-emitted probe (both sides: the runtime
 # half here, and the exact text src/back/emit_c/mod.rs emits), and the per-thread

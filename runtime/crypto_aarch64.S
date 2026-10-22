@@ -2,9 +2,11 @@
  * Poly1305, SHA-1 and SHA-256 with the SHA extensions, and scalar SHA-512.
  *
  * #included at the end of ctx_switch_aarch64.S (and so assembled as part of
- * it); runtime/crypto_glue.c is the C side that checks arguments and decides
- * whether the CPU may run each kernel (getauxval(AT_HWCAP) on Linux,
- * sysctlbyname("hw.optional.arm.FEAT_*") on macOS). AAPCS64: arguments in
+ * it). Each kernel is declared by a `prim "c"` in the lib/crypto modules
+ * (docs/ffi-decision.md), whose spans the compiler range-checks before the
+ * call; lib/crypto/accel.m31 decides whether the CPU may run each one
+ * (AT_HWCAP from /proc/self/auxv on Linux, a static assumption on Apple
+ * silicon). AAPCS64: arguments in
  * x0-x7, scratch in x9-x17 and v0-v7/v16-v31; callee-saved x19-x28 and d8-d15
  * are saved by the functions that use them. x18 (the platform register on
  * Apple) is never touched.

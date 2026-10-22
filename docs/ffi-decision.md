@@ -331,6 +331,19 @@ here, and what it would report on any Apple silicon is the constant above. The
 adapter is the first thing to add if a non-Apple arm64 macOS target ever
 exists, and the library has one place to put it.
 
+### Where the answer lives between calls
+
+`features()` is asked on every call of every primitive, so it must be cheap,
+and an m31 module may hold no mutable state
+(`docs/module-state-decision.md`). Asking `cpuid` each time is not an option
+(it traps to the hypervisor on a virtual machine: tens of microseconds). The
+answer therefore lives in **one word of the runtime**, in assembly
+(`rt_k_cache_load`/`rt_k_cache_store`, `runtime/accel_<arch>.S`): zero until
+stored, aligned 64 bits, and every writer stores the same value, so two threads
+that both find it empty race harmlessly. The m31 library keeps no state; the
+runtime keeps one word. This is the one piece of mutable global state the
+mechanism leaves, and it is not C. See "Open questions".
+
 ### The `M31_CRYPTO_ACCEL` switch
 
 Read in m31 with `os.env`, once, at the first query, and cached in the module.
@@ -379,6 +392,28 @@ is the glue again.
    before they are.
 2. **A `str` span** (a read-only `in str` for a kernel that hashes text).
    Nothing needs it; adding it is one more case in one function.
-3. **More than six arguments.** A kernel that wants more takes a state
+3. **A process-wide cache for library facts.** The feature word above is global mutable
+   state in assembly because a module cannot hold any. A language feature (a
+   once-initialised module constant, `const int FEATURES = once(detect());`,
+   evaluated at first use) would put it back in m31. Recommendation: do nothing
+   until a second library needs the same (this is the only one so far).
+4. **More than six arguments.** A kernel that wants more takes a state
    buffer by span instead, which is how the Poly1305 and SHA kernels already
    do it.
+
+## What still needs C
+
+**Nothing.** `runtime/crypto_glue.c` is deleted, `rt.c` and `rt.h` carry no
+crypto, and every piece the glue did has a C-free replacement: unpacking and
+range checks are emitted by the compiler (`src/back/emit_c/native.rs`); the
+feature probe is `cpuid` in assembly plus `accel.m31`; the `M31_CRYPTO_ACCEL`
+switch is `os.env` in `accel.m31`; the aarch64 Linux probe reads
+`/proc/self/auxv` through the file API; the macOS arm64 path is a documented
+static assumption. The emitted C (the compiler's output) naturally contains C;
+the runtime's hand-written C has gained one macro, `RT_HAVE_KERNELS`, in
+`runtime/rt.h`.
+
+What is **not tested here**, and is written so that CI will exercise it: macOS
+arm64 (the Mach-O spelling of `accel_aarch64.S` and `crypto_aarch64.S`, the
+static feature set), and the m31 library running on aarch64 Linux (the
+`/proc/self/auxv` read; only the kernels are run, under qemu-user).

@@ -163,9 +163,6 @@ C_SYM(rt_ctx_trampoline):
  * own files but are assembled as part of this one, so every build script that
  * already links the context switch gets them with no new file to name. */
 #include "ffitest_x86_64.S"
+#include "accel_x86_64.S"
 
-/* The hardware crypto kernels (runtime/crypto_glue.c is their C side). They
- * live in their own file but are assembled as part of this one, so every
- * build script that already links the context switch gets them with no new
- * file to name. */
 #include "crypto_x86_64.S"

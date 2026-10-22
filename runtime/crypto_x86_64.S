@@ -2,8 +2,10 @@
  * SHA-NI SHA-256, and plain 64-bit SHA-512 and SHA-1.
  *
  * #included at the end of ctx_switch_x86_64.S (and so assembled as part of
- * it); runtime/crypto_glue.c is the C side that checks arguments and decides
- * whether the CPU may run each kernel. System V x86-64 ABI, AT&T syntax, like
+ * it). Each kernel is declared by a `prim "c"` in the lib/crypto modules
+ * (docs/ffi-decision.md), whose spans the compiler range-checks before the
+ * call; lib/crypto/accel.m31 decides whether the CPU may run each one (cpuid,
+ * through `rt_k_cpuid` below). System V x86-64 ABI, AT&T syntax, like
  * the context switch next to it. Every function is a leaf that touches only
  * the caller-saved registers plus whatever it pushes and pops itself, uses no
  * red zone and no stack beyond its own frame.

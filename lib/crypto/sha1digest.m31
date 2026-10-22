@@ -45,6 +45,8 @@
 // No SHA-256. Git's object names are SHA-1 today in every repository this
 // reads, and a second digest with no caller is a second thing to keep right.
 
+import crypto.accel;
+
 /// The offset basis of the five chaining words, as FIPS 180-4 §5.3.1 gives
 /// them. They are fields with defaults rather than module constants so that
 /// `Hasher()` is the whole of "start a hash".
@@ -121,7 +123,7 @@ pub bytes Hasher.digest() {
 // else the portable compression function below, block by block. Same result
 // either way (tests/cryptodiff runs both).
 void Hasher.run_blocks(bytes data, int offset, int count) {
-    if (count > 0 && (__crypto_features() & 32) != 0) {
+    if (count > 0 && (accel.features() & accel.SHA1) != 0) {
         bytes packed = [0; 20];
         for (int j in 0 .. 4) {
             packed[0 + j] = state0 >> (8 * j) & 0xFF;
@@ -138,14 +140,13 @@ void Hasher.run_blocks(bytes data, int offset, int count) {
         for (int j in 0 .. 4) {
             packed[16 + j] = state4 >> (8 * j) & 0xFF;
         }
-        if (__crypto_sha1(packed, data, offset, count) == 0) {
-            state0 = packed[0] | (packed[1] << 8) | (packed[2] << 16) | (packed[3] << 24);
-            state1 = packed[4] | (packed[5] << 8) | (packed[6] << 16) | (packed[7] << 24);
-            state2 = packed[8] | (packed[9] << 8) | (packed[10] << 16) | (packed[11] << 24);
-            state3 = packed[12] | (packed[13] << 8) | (packed[14] << 16) | (packed[15] << 24);
-            state4 = packed[16] | (packed[17] << 8) | (packed[18] << 16) | (packed[19] << 24);
-            return;
-        }
+        __k_sha1(packed, data, count, offset);
+        state0 = packed[0] | (packed[1] << 8) | (packed[2] << 16) | (packed[3] << 24);
+        state1 = packed[4] | (packed[5] << 8) | (packed[6] << 16) | (packed[7] << 24);
+        state2 = packed[8] | (packed[9] << 8) | (packed[10] << 16) | (packed[11] << 24);
+        state3 = packed[12] | (packed[13] << 8) | (packed[14] << 16) | (packed[15] << 24);
+        state4 = packed[16] | (packed[17] << 8) | (packed[18] << 16) | (packed[19] << 24);
+        return;
     }
     for (int index in 0 .. count) {
         block(data, offset + 64 * index);
@@ -214,11 +215,14 @@ void Hasher.block(bytes data, int offset) {
     state4 = state4 + state_e & 0xFFFF_FFFF;
 }
 
-// The hardware kernels (docs/CRYPTO-ACCEL.md): `prim`s into runtime/crypto_glue.c,
-// which runs one only when the CPU has the instructions and `M31_CRYPTO_ACCEL`
-// has not switched them off, and otherwise answers -1.
-prim int __crypto_features();
-prim int __crypto_sha1(bytes state, bytes data, int off, int n);
+// The hardware kernel (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
+// runtime/crypto_*.S, called with spans the compiler range-checks. Called only
+// when `accel.features()` has SHA1 set.
+prim "c" nonblocking void __k_sha1(
+    inout bytes state[0 .. 20],
+    in bytes data[offset .. offset + 64 * count],
+    int count,
+    range int offset);
 
 /// The digest of `data`, in one call.
 pub bytes sum(bytes data) {

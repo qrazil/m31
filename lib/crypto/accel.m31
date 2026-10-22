@@ -1,0 +1,226 @@
+// Which hardware kernels this process may call, decided in the language.
+//
+// The crypto modules each carry a portable implementation written in m31 and,
+// beside it, assembly kernels (runtime/crypto_*.S) reached through
+// `prim "c"` declarations (docs/ffi-decision.md). A kernel is called only
+// when `features()` says its bit is set; otherwise the m31 code does the work,
+// and produces the same bytes (tests/cryptodiff runs both).
+//
+//   if ((accel.features() & accel.AES) != 0) { ... kernel ... } else { ... }
+//
+// How the set is found:
+//
+//   x86-64          `cpuid`, through an assembly function that writes the four
+//                   registers into a `bytes`.
+//   aarch64 Linux   `AT_HWCAP` from /proc/self/auxv, read with the file API
+//                   (what `getauxval` returns). Without /proc only the
+//                   kernels that need no extension (NEON, integer unit) run.
+//   aarch64 macOS   A static assumption: every Apple arm64 CPU (M1 and later)
+//                   has AES, PMULL, SHA-1 and SHA-256, so none is asked.
+//                   `M31_CRYPTO_ACCEL=off` is the way out. (Asking would need
+//                   an assembly adapter for `sysctlbyname`, which cannot be
+//                   assembled or run on any machine this was written on.)
+//   anything else   no kernels: `__k_platform` answers -1 ("absent").
+//
+// `M31_CRYPTO_ACCEL` is the switch for tests and for anyone who wants the
+// portable code: `off` (or `0`) disables every kernel; otherwise a comma list
+// of `-aes`, `-sha256`, `-sha512`, `-sha1`, `-chacha`, `-poly`, `-fe` disables
+// just those.
+//
+// The answer is computed once per process and kept in one word of the
+// runtime, written by `__k_cache_store`: a module may not have mutable state
+// of its own (docs/module-state-decision.md), and `cpuid` traps to the
+// hypervisor on a virtual machine, so asking on every call is not an option.
+// Two threads that both find the word empty both compute and store the same
+// value, which is harmless.
+import io;
+import os;
+
+/// AES-NI and PCLMULQDQ, or ARMv8 AES and PMULL: AES, AES-GCM's GHASH.
+pub const int AES = 1;
+pub const int SHA256 = 2;
+pub const int CHACHA = 4;
+pub const int POLY = 8;
+pub const int SHA512 = 16;
+pub const int SHA1 = 32;
+/// GF(2^255 - 19) multiply, add and subtract on ten-limb elements.
+pub const int FIELD = 64;
+// Bit 7 of the stored word says "computed": 0 is "not yet".
+const int COMPUTED = 128;
+const int PLATFORM_X86_64 = 1;
+const int PLATFORM_AARCH64_LINUX = 2;
+const int PLATFORM_AARCH64_APPLE = 3;
+// What needs no CPU extension on an architecture that has the kernels: the
+// integer unit and SSE2 / NEON, present on every x86-64 and aarch64 CPU.
+const int ALWAYS = 4 | 8 | 16 | 64;
+// Linux's auxiliary vector (include/uapi/linux/auxvec.h) and the arm64 HWCAP
+// bits (arch/arm64/include/uapi/asm/hwcap.h).
+const int AT_HWCAP = 16;
+const int HWCAP_AES = 8;
+const int HWCAP_PMULL = 16;
+const int HWCAP_SHA1 = 32;
+const int HWCAP_SHA2 = 64;
+
+prim "c" nonblocking int __k_platform();
+prim "c" nonblocking void __k_cpuid(
+    int leaf,
+    int subleaf,
+    out bytes registers[0 .. 16]);
+prim "c" nonblocking int __k_cache_load();
+prim "c" nonblocking void __k_cache_store(
+    int value);
+
+/// The kernels this process may call, as a set of the bits above. Computed
+/// on the first call, then one word read.
+pub int features() {
+    int cached = __k_cache_load();
+    if (cached != 0) {
+        return cached & (COMPUTED - 1);
+    }
+    int found = restrict(detect(), os.env("M31_CRYPTO_ACCEL"));
+    __k_cache_store(found | COMPUTED);
+    return found;
+}
+
+// What the hardware offers, before the environment is consulted.
+int detect() {
+    int platform = __k_platform();
+    if (platform == PLATFORM_X86_64) {
+        return x86_features();
+    }
+    if (platform == PLATFORM_AARCH64_APPLE) {
+        return ALWAYS | AES | SHA256 | SHA1;
+    }
+    if (platform == PLATFORM_AARCH64_LINUX) {
+        return from_hwcap(hwcap_of_auxv(auxv()));
+    }
+    return 0;
+}
+
+// One 32-bit register of a cpuid answer (eax, ebx, ecx, edx are 0 to 3).
+int register_of(bytes registers, int index) {
+    int position = 4 * index;
+    return registers[position] | (registers[position + 1] << 8) | (registers[position + 2] << 16) | (registers[position + 3] << 24);
+}
+
+int x86_features() {
+    bytes registers = [0; 16];
+    __k_cpuid(0, 0, registers);
+    int max_leaf = register_of(registers, 0);
+    __k_cpuid(1, 0, registers);
+    int ecx = register_of(registers, 2);
+    bool has_pclmul = (ecx >> 1 & 1) == 1;
+    bool has_ssse3 = (ecx >> 9 & 1) == 1;
+    bool has_sse41 = (ecx >> 19 & 1) == 1;
+    bool has_aes = (ecx >> 25 & 1) == 1;
+    int found = ALWAYS;
+    if (has_aes && has_pclmul && has_ssse3 && has_sse41) {
+        found = found | AES;
+    }
+    if (max_leaf >= 7 && has_ssse3 && has_sse41) {
+        __k_cpuid(7, 0, registers);
+        if ((register_of(registers, 1) >> 29 & 1) == 1) {
+            found = found | SHA256 | SHA1;
+        }
+    }
+    return found;
+}
+
+// /proc/self/auxv, or nothing if it cannot be read (no /proc, a sandbox).
+bytes auxv() {
+    Result<bytes, io.Error> got = io.read_bytes("/proc/self/auxv");
+    match (got) {
+        case Ok(bytes data): {
+            return data;
+        }
+        case Err(io.Error failure): {
+            bytes none = [];
+            return none;
+        }
+    }
+}
+
+/// `AT_HWCAP` out of an auxiliary vector: pairs of little-endian 64-bit
+/// words, `(type, value)`, ended by type 0. 0 if there is none.
+pub int hwcap_of_auxv(bytes vector) {
+    int position = 0;
+    while (position + 16 <= vector.size()) {
+        int kind = word64(vector, position);
+        if (kind == 0) {
+            return 0;
+        }
+        if (kind == AT_HWCAP) {
+            return word64(vector, position + 8);
+        }
+        position = position + 16;
+    }
+    return 0;
+}
+
+int word64(bytes data, int position) {
+    int value = 0;
+    for (int index in 0 .. 8) {
+        value = value | (data[position + index] << (8 * index));
+    }
+    return value;
+}
+
+/// The kernel set an arm64 Linux CPU's `AT_HWCAP` allows.
+pub int from_hwcap(int hwcap) {
+    int found = ALWAYS;
+    if ((hwcap & HWCAP_AES) != 0 && (hwcap & HWCAP_PMULL) != 0) {
+        found = found | AES;
+    }
+    if ((hwcap & HWCAP_SHA2) != 0) {
+        found = found | SHA256;
+    }
+    if ((hwcap & HWCAP_SHA1) != 0) {
+        found = found | SHA1;
+    }
+    return found;
+}
+
+/// `detected` with the kernels `M31_CRYPTO_ACCEL` switches off removed.
+pub int restrict(int detected, Option<str> setting) {
+    match (setting) {
+        case None: {
+            return detected;
+        }
+        case Some(str text): {
+            if (text == "off" || text == "0") {
+                return 0;
+            }
+            int found = detected;
+            for (str name in text.split(",")) {
+                found = found & ~bit_named(name);
+            }
+            return found;
+        }
+    }
+}
+
+// The bit a `-name` entry switches off; 0 for anything else, which is ignored.
+int bit_named(str name) {
+    if (name == "-aes") {
+        return AES;
+    }
+    if (name == "-sha256") {
+        return SHA256;
+    }
+    if (name == "-sha512") {
+        return SHA512;
+    }
+    if (name == "-sha1") {
+        return SHA1;
+    }
+    if (name == "-chacha") {
+        return CHACHA;
+    }
+    if (name == "-poly") {
+        return POLY;
+    }
+    if (name == "-fe") {
+        return FIELD;
+    }
+    return 0;
+}

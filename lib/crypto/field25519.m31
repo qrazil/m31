@@ -54,15 +54,28 @@
 // under its own control -- never write a branch, a comparison or an index
 // that depends on a field element -- and no more than that.
 
-// The hardware field kernels (docs/CRYPTO-ACCEL.md): `prim`s into runtime/crypto_glue.c,
-// assembly that does `mul`, `add` and `sub` below instruction for instruction
-// (ref10's multiply and carry chain), so the limbs that come back are identical
-// to the m31 code's. They answer -1, and the m31 code runs, if
-// `M31_CRYPTO_ACCEL` has switched them off. Straight-line, no table, no
-// branch: the constant-time argument above carries over unchanged.
-prim int __crypto_fe_mul(Array<int> out, Array<int> left, Array<int> right);
-prim int __crypto_fe_add(Array<int> out, Array<int> left, Array<int> right);
-prim int __crypto_fe_sub(Array<int> out, Array<int> left, Array<int> right);
+import crypto.accel;
+
+// The hardware field kernels (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md):
+// assembly in runtime/crypto_*.S that does `mul`, `add` and `sub` below
+// instruction for instruction (ref10's multiply and carry chain), so the limbs
+// that come back are identical to the m31 code's. Each takes ten-limb elements
+// as `Array<int>` spans, checked by the compiler; `result` may be `left` or
+// `right`. They run unless `M31_CRYPTO_ACCEL` has switched them off
+// (`accel.features()`), and then the m31 code runs. Straight-line, no table,
+// no branch: the constant-time argument above carries over unchanged.
+prim "c" nonblocking void __k_fe_mul(
+    out Array<int> result[0 .. 10],
+    in Array<int> left[0 .. 10],
+    in Array<int> right[0 .. 10]);
+prim "c" nonblocking void __k_fe_add(
+    out Array<int> result[0 .. 10],
+    in Array<int> left[0 .. 10],
+    in Array<int> right[0 .. 10]);
+prim "c" nonblocking void __k_fe_sub(
+    out Array<int> result[0 .. 10],
+    in Array<int> left[0 .. 10],
+    in Array<int> right[0 .. 10]);
 
 // --- construction and encoding ----------------------------------------------
 
@@ -97,63 +110,63 @@ pub Array<int> small(int number) {
 /// octet for something that is not field data; masking it off is the
 /// caller's job, on the raw bytes, before this function ever sees them.
 pub Array<int> from_bytes(bytes encoded) {
-    int h0 = (encoded[0] | (encoded[1] << 8) | (encoded[2] << 16) | (encoded[3] << 24) | (encoded[4] << 32)) >> 0 & 0x3ffffff;
-    int h1 = (encoded[3] | (encoded[4] << 8) | (encoded[5] << 16) | (encoded[6] << 24) | (encoded[7] << 32)) >> 2 & 0x1ffffff;
-    int h2 = (encoded[6] | (encoded[7] << 8) | (encoded[8] << 16) | (encoded[9] << 24) | (encoded[10] << 32)) >> 3 & 0x3ffffff;
-    int h3 = (encoded[9] | (encoded[10] << 8) | (encoded[11] << 16) | (encoded[12] << 24) | (encoded[13] << 32)) >> 5 & 0x1ffffff;
-    int h4 = (encoded[12] | (encoded[13] << 8) | (encoded[14] << 16) | (encoded[15] << 24) | (encoded[16] << 32)) >> 6 & 0x3ffffff;
-    int h5 = (encoded[16] | (encoded[17] << 8) | (encoded[18] << 16) | (encoded[19] << 24) | (encoded[20] << 32)) >> 0 & 0x1ffffff;
-    int h6 = (encoded[19] | (encoded[20] << 8) | (encoded[21] << 16) | (encoded[22] << 24) | (encoded[23] << 32)) >> 1 & 0x3ffffff;
-    int h7 = (encoded[22] | (encoded[23] << 8) | (encoded[24] << 16) | (encoded[25] << 24) | (encoded[26] << 32)) >> 3 & 0x1ffffff;
-    int h8 = (encoded[25] | (encoded[26] << 8) | (encoded[27] << 16) | (encoded[28] << 24) | (encoded[29] << 32)) >> 4 & 0x3ffffff;
-    int h9 = (encoded[28] | (encoded[29] << 8) | (encoded[30] << 16) | (encoded[31] << 24)) >> 6 & 0x3ffffff;
-    int c0 = (h0 + 33554432) >> 26;
-    h1 = h1 + c0;
-    h0 = h0 - (c0 << 26);
-    int c1 = (h4 + 33554432) >> 26;
-    h5 = h5 + c1;
-    h4 = h4 - (c1 << 26);
-    int c2 = (h1 + 16777216) >> 25;
-    h2 = h2 + c2;
-    h1 = h1 - (c2 << 25);
-    int c3 = (h5 + 16777216) >> 25;
-    h6 = h6 + c3;
-    h5 = h5 - (c3 << 25);
-    int c4 = (h2 + 33554432) >> 26;
-    h3 = h3 + c4;
-    h2 = h2 - (c4 << 26);
-    int c5 = (h6 + 33554432) >> 26;
-    h7 = h7 + c5;
-    h6 = h6 - (c5 << 26);
-    int c6 = (h3 + 16777216) >> 25;
-    h4 = h4 + c6;
-    h3 = h3 - (c6 << 25);
-    int c7 = (h7 + 16777216) >> 25;
-    h8 = h8 + c7;
-    h7 = h7 - (c7 << 25);
-    int c8 = (h4 + 33554432) >> 26;
-    h5 = h5 + c8;
-    h4 = h4 - (c8 << 26);
-    int c9 = (h8 + 33554432) >> 26;
-    h9 = h9 + c9;
-    h8 = h8 - (c9 << 26);
-    int c10 = (h9 + 16777216) >> 25;
-    h0 = h0 + 19 * c10;
-    h9 = h9 - (c10 << 25);
-    int c11 = (h0 + 33554432) >> 26;
-    h1 = h1 + c11;
-    h0 = h0 - (c11 << 26);
+    int h_0 = (encoded[0] | (encoded[1] << 8) | (encoded[2] << 16) | (encoded[3] << 24) | (encoded[4] << 32)) >> 0 & 0x3ffffff;
+    int h_1 = (encoded[3] | (encoded[4] << 8) | (encoded[5] << 16) | (encoded[6] << 24) | (encoded[7] << 32)) >> 2 & 0x1ffffff;
+    int h_2 = (encoded[6] | (encoded[7] << 8) | (encoded[8] << 16) | (encoded[9] << 24) | (encoded[10] << 32)) >> 3 & 0x3ffffff;
+    int h_3 = (encoded[9] | (encoded[10] << 8) | (encoded[11] << 16) | (encoded[12] << 24) | (encoded[13] << 32)) >> 5 & 0x1ffffff;
+    int h_4 = (encoded[12] | (encoded[13] << 8) | (encoded[14] << 16) | (encoded[15] << 24) | (encoded[16] << 32)) >> 6 & 0x3ffffff;
+    int h_5 = (encoded[16] | (encoded[17] << 8) | (encoded[18] << 16) | (encoded[19] << 24) | (encoded[20] << 32)) >> 0 & 0x1ffffff;
+    int h_6 = (encoded[19] | (encoded[20] << 8) | (encoded[21] << 16) | (encoded[22] << 24) | (encoded[23] << 32)) >> 1 & 0x3ffffff;
+    int h_7 = (encoded[22] | (encoded[23] << 8) | (encoded[24] << 16) | (encoded[25] << 24) | (encoded[26] << 32)) >> 3 & 0x1ffffff;
+    int h_8 = (encoded[25] | (encoded[26] << 8) | (encoded[27] << 16) | (encoded[28] << 24) | (encoded[29] << 32)) >> 4 & 0x3ffffff;
+    int h_9 = (encoded[28] | (encoded[29] << 8) | (encoded[30] << 16) | (encoded[31] << 24)) >> 6 & 0x3ffffff;
+    int c_0 = (h_0 + 33554432) >> 26;
+    h_1 = h_1 + c_0;
+    h_0 = h_0 - (c_0 << 26);
+    int c_1 = (h_4 + 33554432) >> 26;
+    h_5 = h_5 + c_1;
+    h_4 = h_4 - (c_1 << 26);
+    int c_2 = (h_1 + 16777216) >> 25;
+    h_2 = h_2 + c_2;
+    h_1 = h_1 - (c_2 << 25);
+    int c_3 = (h_5 + 16777216) >> 25;
+    h_6 = h_6 + c_3;
+    h_5 = h_5 - (c_3 << 25);
+    int c_4 = (h_2 + 33554432) >> 26;
+    h_3 = h_3 + c_4;
+    h_2 = h_2 - (c_4 << 26);
+    int c_5 = (h_6 + 33554432) >> 26;
+    h_7 = h_7 + c_5;
+    h_6 = h_6 - (c_5 << 26);
+    int c_6 = (h_3 + 16777216) >> 25;
+    h_4 = h_4 + c_6;
+    h_3 = h_3 - (c_6 << 25);
+    int c_7 = (h_7 + 16777216) >> 25;
+    h_8 = h_8 + c_7;
+    h_7 = h_7 - (c_7 << 25);
+    int c_8 = (h_4 + 33554432) >> 26;
+    h_5 = h_5 + c_8;
+    h_4 = h_4 - (c_8 << 26);
+    int c_9 = (h_8 + 33554432) >> 26;
+    h_9 = h_9 + c_9;
+    h_8 = h_8 - (c_9 << 26);
+    int c10 = (h_9 + 16777216) >> 25;
+    h_0 = h_0 + 19 * c10;
+    h_9 = h_9 - (c10 << 25);
+    int c11 = (h_0 + 33554432) >> 26;
+    h_1 = h_1 + c11;
+    h_0 = h_0 - (c11 << 26);
     Array<int> out = [0; 10];
-    out[0] = h0;
-    out[1] = h1;
-    out[2] = h2;
-    out[3] = h3;
-    out[4] = h4;
-    out[5] = h5;
-    out[6] = h6;
-    out[7] = h7;
-    out[8] = h8;
-    out[9] = h9;
+    out[0] = h_0;
+    out[1] = h_1;
+    out[2] = h_2;
+    out[3] = h_3;
+    out[4] = h_4;
+    out[5] = h_5;
+    out[6] = h_6;
+    out[7] = h_7;
+    out[8] = h_8;
+    out[9] = h_9;
     return out;
 }
 
@@ -165,58 +178,58 @@ pub Array<int> from_bytes(bytes encoded) {
 /// This runs on secret data (an X25519 shared secret, an Ed25519 nonce
 /// point); its constant-time argument is the header's.
 pub bytes to_bytes(Array<int> element) {
-    int h0 = element[0];
-    int h1 = element[1];
-    int h2 = element[2];
-    int h3 = element[3];
-    int h4 = element[4];
-    int h5 = element[5];
-    int h6 = element[6];
-    int h7 = element[7];
-    int h8 = element[8];
-    int h9 = element[9];
-    int q = (19 * h9 + (1 << 24)) >> 25;
-    q = (h0 + q) >> 26;
-    q = (h1 + q) >> 25;
-    q = (h2 + q) >> 26;
-    q = (h3 + q) >> 25;
-    q = (h4 + q) >> 26;
-    q = (h5 + q) >> 25;
-    q = (h6 + q) >> 26;
-    q = (h7 + q) >> 25;
-    q = (h8 + q) >> 26;
-    q = (h9 + q) >> 25;
-    h0 = h0 + 19 * q;
-    int k0 = h0 >> 26;
-    h1 = h1 + k0;
-    h0 = h0 - (k0 << 26);
-    int k1 = h1 >> 25;
-    h2 = h2 + k1;
-    h1 = h1 - (k1 << 25);
-    int k2 = h2 >> 26;
-    h3 = h3 + k2;
-    h2 = h2 - (k2 << 26);
-    int k3 = h3 >> 25;
-    h4 = h4 + k3;
-    h3 = h3 - (k3 << 25);
-    int k4 = h4 >> 26;
-    h5 = h5 + k4;
-    h4 = h4 - (k4 << 26);
-    int k5 = h5 >> 25;
-    h6 = h6 + k5;
-    h5 = h5 - (k5 << 25);
-    int k6 = h6 >> 26;
-    h7 = h7 + k6;
-    h6 = h6 - (k6 << 26);
-    int k7 = h7 >> 25;
-    h8 = h8 + k7;
-    h7 = h7 - (k7 << 25);
-    int k8 = h8 >> 26;
-    h9 = h9 + k8;
-    h8 = h8 - (k8 << 26);
-    int k9 = h9 >> 25;
-    h9 = h9 - (k9 << 25);
-    Array<int> limbs = [h0, h1, h2, h3, h4, h5, h6, h7, h8, h9];
+    int h_0 = element[0];
+    int h_1 = element[1];
+    int h_2 = element[2];
+    int h_3 = element[3];
+    int h_4 = element[4];
+    int h_5 = element[5];
+    int h_6 = element[6];
+    int h_7 = element[7];
+    int h_8 = element[8];
+    int h_9 = element[9];
+    int quotient = (19 * h_9 + (1 << 24)) >> 25;
+    quotient = (h_0 + quotient) >> 26;
+    quotient = (h_1 + quotient) >> 25;
+    quotient = (h_2 + quotient) >> 26;
+    quotient = (h_3 + quotient) >> 25;
+    quotient = (h_4 + quotient) >> 26;
+    quotient = (h_5 + quotient) >> 25;
+    quotient = (h_6 + quotient) >> 26;
+    quotient = (h_7 + quotient) >> 25;
+    quotient = (h_8 + quotient) >> 26;
+    quotient = (h_9 + quotient) >> 25;
+    h_0 = h_0 + 19 * quotient;
+    int k_0 = h_0 >> 26;
+    h_1 = h_1 + k_0;
+    h_0 = h_0 - (k_0 << 26);
+    int k_1 = h_1 >> 25;
+    h_2 = h_2 + k_1;
+    h_1 = h_1 - (k_1 << 25);
+    int k_2 = h_2 >> 26;
+    h_3 = h_3 + k_2;
+    h_2 = h_2 - (k_2 << 26);
+    int k_3 = h_3 >> 25;
+    h_4 = h_4 + k_3;
+    h_3 = h_3 - (k_3 << 25);
+    int k_4 = h_4 >> 26;
+    h_5 = h_5 + k_4;
+    h_4 = h_4 - (k_4 << 26);
+    int k_5 = h_5 >> 25;
+    h_6 = h_6 + k_5;
+    h_5 = h_5 - (k_5 << 25);
+    int k_6 = h_6 >> 26;
+    h_7 = h_7 + k_6;
+    h_6 = h_6 - (k_6 << 26);
+    int k_7 = h_7 >> 25;
+    h_8 = h_8 + k_7;
+    h_7 = h_7 - (k_7 << 25);
+    int k_8 = h_8 >> 26;
+    h_9 = h_9 + k_8;
+    h_8 = h_8 - (k_8 << 26);
+    int k_9 = h_9 >> 25;
+    h_9 = h_9 - (k_9 << 25);
+    Array<int> limbs = [h_0, h_1, h_2, h_3, h_4, h_5, h_6, h_7, h_8, h_9];
     bytes out = [0; 32];
     int accumulator = 0;
     int bit_count = 0;
@@ -239,65 +252,66 @@ pub bytes to_bytes(Array<int> element) {
 
 /// `left + right`, carried.
 pub void add_into(Array<int> out, Array<int> left, Array<int> right) {
-    if (__crypto_fe_add(out, left, right) == 0) {
+    if ((accel.features() & accel.FIELD) != 0) {
+        __k_fe_add(out, left, right);
         return;
     }
-    int h0 = left[0] + right[0];
-    int h1 = left[1] + right[1];
-    int h2 = left[2] + right[2];
-    int h3 = left[3] + right[3];
-    int h4 = left[4] + right[4];
-    int h5 = left[5] + right[5];
-    int h6 = left[6] + right[6];
-    int h7 = left[7] + right[7];
-    int h8 = left[8] + right[8];
-    int h9 = left[9] + right[9];
-    int c0 = (h0 + 33554432) >> 26;
-    h1 = h1 + c0;
-    h0 = h0 - (c0 << 26);
-    int c1 = (h4 + 33554432) >> 26;
-    h5 = h5 + c1;
-    h4 = h4 - (c1 << 26);
-    int c2 = (h1 + 16777216) >> 25;
-    h2 = h2 + c2;
-    h1 = h1 - (c2 << 25);
-    int c3 = (h5 + 16777216) >> 25;
-    h6 = h6 + c3;
-    h5 = h5 - (c3 << 25);
-    int c4 = (h2 + 33554432) >> 26;
-    h3 = h3 + c4;
-    h2 = h2 - (c4 << 26);
-    int c5 = (h6 + 33554432) >> 26;
-    h7 = h7 + c5;
-    h6 = h6 - (c5 << 26);
-    int c6 = (h3 + 16777216) >> 25;
-    h4 = h4 + c6;
-    h3 = h3 - (c6 << 25);
-    int c7 = (h7 + 16777216) >> 25;
-    h8 = h8 + c7;
-    h7 = h7 - (c7 << 25);
-    int c8 = (h4 + 33554432) >> 26;
-    h5 = h5 + c8;
-    h4 = h4 - (c8 << 26);
-    int c9 = (h8 + 33554432) >> 26;
-    h9 = h9 + c9;
-    h8 = h8 - (c9 << 26);
-    int c10 = (h9 + 16777216) >> 25;
-    h0 = h0 + 19 * c10;
-    h9 = h9 - (c10 << 25);
-    int c11 = (h0 + 33554432) >> 26;
-    h1 = h1 + c11;
-    h0 = h0 - (c11 << 26);
-    out[0] = h0;
-    out[1] = h1;
-    out[2] = h2;
-    out[3] = h3;
-    out[4] = h4;
-    out[5] = h5;
-    out[6] = h6;
-    out[7] = h7;
-    out[8] = h8;
-    out[9] = h9;
+    int h_0 = left[0] + right[0];
+    int h_1 = left[1] + right[1];
+    int h_2 = left[2] + right[2];
+    int h_3 = left[3] + right[3];
+    int h_4 = left[4] + right[4];
+    int h_5 = left[5] + right[5];
+    int h_6 = left[6] + right[6];
+    int h_7 = left[7] + right[7];
+    int h_8 = left[8] + right[8];
+    int h_9 = left[9] + right[9];
+    int c_0 = (h_0 + 33554432) >> 26;
+    h_1 = h_1 + c_0;
+    h_0 = h_0 - (c_0 << 26);
+    int c_1 = (h_4 + 33554432) >> 26;
+    h_5 = h_5 + c_1;
+    h_4 = h_4 - (c_1 << 26);
+    int c_2 = (h_1 + 16777216) >> 25;
+    h_2 = h_2 + c_2;
+    h_1 = h_1 - (c_2 << 25);
+    int c_3 = (h_5 + 16777216) >> 25;
+    h_6 = h_6 + c_3;
+    h_5 = h_5 - (c_3 << 25);
+    int c_4 = (h_2 + 33554432) >> 26;
+    h_3 = h_3 + c_4;
+    h_2 = h_2 - (c_4 << 26);
+    int c_5 = (h_6 + 33554432) >> 26;
+    h_7 = h_7 + c_5;
+    h_6 = h_6 - (c_5 << 26);
+    int c_6 = (h_3 + 16777216) >> 25;
+    h_4 = h_4 + c_6;
+    h_3 = h_3 - (c_6 << 25);
+    int c_7 = (h_7 + 16777216) >> 25;
+    h_8 = h_8 + c_7;
+    h_7 = h_7 - (c_7 << 25);
+    int c_8 = (h_4 + 33554432) >> 26;
+    h_5 = h_5 + c_8;
+    h_4 = h_4 - (c_8 << 26);
+    int c_9 = (h_8 + 33554432) >> 26;
+    h_9 = h_9 + c_9;
+    h_8 = h_8 - (c_9 << 26);
+    int c10 = (h_9 + 16777216) >> 25;
+    h_0 = h_0 + 19 * c10;
+    h_9 = h_9 - (c10 << 25);
+    int c11 = (h_0 + 33554432) >> 26;
+    h_1 = h_1 + c11;
+    h_0 = h_0 - (c11 << 26);
+    out[0] = h_0;
+    out[1] = h_1;
+    out[2] = h_2;
+    out[3] = h_3;
+    out[4] = h_4;
+    out[5] = h_5;
+    out[6] = h_6;
+    out[7] = h_7;
+    out[8] = h_8;
+    out[9] = h_9;
 }
 
 pub Array<int> add(Array<int> left, Array<int> right) {
@@ -308,65 +322,66 @@ pub Array<int> add(Array<int> left, Array<int> right) {
 
 /// `left - right`, carried.
 pub void sub_into(Array<int> out, Array<int> left, Array<int> right) {
-    if (__crypto_fe_sub(out, left, right) == 0) {
+    if ((accel.features() & accel.FIELD) != 0) {
+        __k_fe_sub(out, left, right);
         return;
     }
-    int h0 = left[0] - right[0];
-    int h1 = left[1] - right[1];
-    int h2 = left[2] - right[2];
-    int h3 = left[3] - right[3];
-    int h4 = left[4] - right[4];
-    int h5 = left[5] - right[5];
-    int h6 = left[6] - right[6];
-    int h7 = left[7] - right[7];
-    int h8 = left[8] - right[8];
-    int h9 = left[9] - right[9];
-    int c0 = (h0 + 33554432) >> 26;
-    h1 = h1 + c0;
-    h0 = h0 - (c0 << 26);
-    int c1 = (h4 + 33554432) >> 26;
-    h5 = h5 + c1;
-    h4 = h4 - (c1 << 26);
-    int c2 = (h1 + 16777216) >> 25;
-    h2 = h2 + c2;
-    h1 = h1 - (c2 << 25);
-    int c3 = (h5 + 16777216) >> 25;
-    h6 = h6 + c3;
-    h5 = h5 - (c3 << 25);
-    int c4 = (h2 + 33554432) >> 26;
-    h3 = h3 + c4;
-    h2 = h2 - (c4 << 26);
-    int c5 = (h6 + 33554432) >> 26;
-    h7 = h7 + c5;
-    h6 = h6 - (c5 << 26);
-    int c6 = (h3 + 16777216) >> 25;
-    h4 = h4 + c6;
-    h3 = h3 - (c6 << 25);
-    int c7 = (h7 + 16777216) >> 25;
-    h8 = h8 + c7;
-    h7 = h7 - (c7 << 25);
-    int c8 = (h4 + 33554432) >> 26;
-    h5 = h5 + c8;
-    h4 = h4 - (c8 << 26);
-    int c9 = (h8 + 33554432) >> 26;
-    h9 = h9 + c9;
-    h8 = h8 - (c9 << 26);
-    int c10 = (h9 + 16777216) >> 25;
-    h0 = h0 + 19 * c10;
-    h9 = h9 - (c10 << 25);
-    int c11 = (h0 + 33554432) >> 26;
-    h1 = h1 + c11;
-    h0 = h0 - (c11 << 26);
-    out[0] = h0;
-    out[1] = h1;
-    out[2] = h2;
-    out[3] = h3;
-    out[4] = h4;
-    out[5] = h5;
-    out[6] = h6;
-    out[7] = h7;
-    out[8] = h8;
-    out[9] = h9;
+    int h_0 = left[0] - right[0];
+    int h_1 = left[1] - right[1];
+    int h_2 = left[2] - right[2];
+    int h_3 = left[3] - right[3];
+    int h_4 = left[4] - right[4];
+    int h_5 = left[5] - right[5];
+    int h_6 = left[6] - right[6];
+    int h_7 = left[7] - right[7];
+    int h_8 = left[8] - right[8];
+    int h_9 = left[9] - right[9];
+    int c_0 = (h_0 + 33554432) >> 26;
+    h_1 = h_1 + c_0;
+    h_0 = h_0 - (c_0 << 26);
+    int c_1 = (h_4 + 33554432) >> 26;
+    h_5 = h_5 + c_1;
+    h_4 = h_4 - (c_1 << 26);
+    int c_2 = (h_1 + 16777216) >> 25;
+    h_2 = h_2 + c_2;
+    h_1 = h_1 - (c_2 << 25);
+    int c_3 = (h_5 + 16777216) >> 25;
+    h_6 = h_6 + c_3;
+    h_5 = h_5 - (c_3 << 25);
+    int c_4 = (h_2 + 33554432) >> 26;
+    h_3 = h_3 + c_4;
+    h_2 = h_2 - (c_4 << 26);
+    int c_5 = (h_6 + 33554432) >> 26;
+    h_7 = h_7 + c_5;
+    h_6 = h_6 - (c_5 << 26);
+    int c_6 = (h_3 + 16777216) >> 25;
+    h_4 = h_4 + c_6;
+    h_3 = h_3 - (c_6 << 25);
+    int c_7 = (h_7 + 16777216) >> 25;
+    h_8 = h_8 + c_7;
+    h_7 = h_7 - (c_7 << 25);
+    int c_8 = (h_4 + 33554432) >> 26;
+    h_5 = h_5 + c_8;
+    h_4 = h_4 - (c_8 << 26);
+    int c_9 = (h_8 + 33554432) >> 26;
+    h_9 = h_9 + c_9;
+    h_8 = h_8 - (c_9 << 26);
+    int c10 = (h_9 + 16777216) >> 25;
+    h_0 = h_0 + 19 * c10;
+    h_9 = h_9 - (c10 << 25);
+    int c11 = (h_0 + 33554432) >> 26;
+    h_1 = h_1 + c11;
+    h_0 = h_0 - (c11 << 26);
+    out[0] = h_0;
+    out[1] = h_1;
+    out[2] = h_2;
+    out[3] = h_3;
+    out[4] = h_4;
+    out[5] = h_5;
+    out[6] = h_6;
+    out[7] = h_7;
+    out[8] = h_8;
+    out[9] = h_9;
 }
 
 pub Array<int> sub(Array<int> left, Array<int> right) {
@@ -387,99 +402,100 @@ pub Array<int> neg(Array<int> element) {
 /// product under 2^58, and a column of ten under 2^62 -- the overflow
 /// check cannot fire on any legal input.
 pub void mul_into(Array<int> out, Array<int> left, Array<int> right) {
-    if (__crypto_fe_mul(out, left, right) == 0) {
+    if ((accel.features() & accel.FIELD) != 0) {
+        __k_fe_mul(out, left, right);
         return;
     }
-    int f0 = left[0];
-    int f1 = left[1];
-    int f2 = left[2];
-    int f3 = left[3];
-    int f4 = left[4];
-    int f5 = left[5];
-    int f6 = left[6];
-    int f7 = left[7];
-    int f8 = left[8];
-    int f9 = left[9];
-    int g0 = right[0];
-    int g1 = right[1];
-    int g2 = right[2];
-    int g3 = right[3];
-    int g4 = right[4];
-    int g5 = right[5];
-    int g6 = right[6];
-    int g7 = right[7];
-    int g8 = right[8];
-    int g9 = right[9];
-    int f1_2 = 2 * f1;
-    int f3_2 = 2 * f3;
-    int f5_2 = 2 * f5;
-    int f7_2 = 2 * f7;
-    int f9_2 = 2 * f9;
-    int g1_19 = 19 * g1;
-    int g2_19 = 19 * g2;
-    int g3_19 = 19 * g3;
-    int g4_19 = 19 * g4;
-    int g5_19 = 19 * g5;
-    int g6_19 = 19 * g6;
-    int g7_19 = 19 * g7;
-    int g8_19 = 19 * g8;
-    int g9_19 = 19 * g9;
-    int h0 = f0 * g0 + f1_2 * g9_19 + f2 * g8_19 + f3_2 * g7_19 + f4 * g6_19 + f5_2 * g5_19 + f6 * g4_19 + f7_2 * g3_19 + f8 * g2_19 + f9_2 * g1_19;
-    int h1 = f0 * g1 + f1 * g0 + f2 * g9_19 + f3 * g8_19 + f4 * g7_19 + f5 * g6_19 + f6 * g5_19 + f7 * g4_19 + f8 * g3_19 + f9 * g2_19;
-    int h2 = f0 * g2 + f1_2 * g1 + f2 * g0 + f3_2 * g9_19 + f4 * g8_19 + f5_2 * g7_19 + f6 * g6_19 + f7_2 * g5_19 + f8 * g4_19 + f9_2 * g3_19;
-    int h3 = f0 * g3 + f1 * g2 + f2 * g1 + f3 * g0 + f4 * g9_19 + f5 * g8_19 + f6 * g7_19 + f7 * g6_19 + f8 * g5_19 + f9 * g4_19;
-    int h4 = f0 * g4 + f1_2 * g3 + f2 * g2 + f3_2 * g1 + f4 * g0 + f5_2 * g9_19 + f6 * g8_19 + f7_2 * g7_19 + f8 * g6_19 + f9_2 * g5_19;
-    int h5 = f0 * g5 + f1 * g4 + f2 * g3 + f3 * g2 + f4 * g1 + f5 * g0 + f6 * g9_19 + f7 * g8_19 + f8 * g7_19 + f9 * g6_19;
-    int h6 = f0 * g6 + f1_2 * g5 + f2 * g4 + f3_2 * g3 + f4 * g2 + f5_2 * g1 + f6 * g0 + f7_2 * g9_19 + f8 * g8_19 + f9_2 * g7_19;
-    int h7 = f0 * g7 + f1 * g6 + f2 * g5 + f3 * g4 + f4 * g3 + f5 * g2 + f6 * g1 + f7 * g0 + f8 * g9_19 + f9 * g8_19;
-    int h8 = f0 * g8 + f1_2 * g7 + f2 * g6 + f3_2 * g5 + f4 * g4 + f5_2 * g3 + f6 * g2 + f7_2 * g1 + f8 * g0 + f9_2 * g9_19;
-    int h9 = f0 * g9 + f1 * g8 + f2 * g7 + f3 * g6 + f4 * g5 + f5 * g4 + f6 * g3 + f7 * g2 + f8 * g1 + f9 * g0;
-    int c0 = (h0 + 33554432) >> 26;
-    h1 = h1 + c0;
-    h0 = h0 - (c0 << 26);
-    int c1 = (h4 + 33554432) >> 26;
-    h5 = h5 + c1;
-    h4 = h4 - (c1 << 26);
-    int c2 = (h1 + 16777216) >> 25;
-    h2 = h2 + c2;
-    h1 = h1 - (c2 << 25);
-    int c3 = (h5 + 16777216) >> 25;
-    h6 = h6 + c3;
-    h5 = h5 - (c3 << 25);
-    int c4 = (h2 + 33554432) >> 26;
-    h3 = h3 + c4;
-    h2 = h2 - (c4 << 26);
-    int c5 = (h6 + 33554432) >> 26;
-    h7 = h7 + c5;
-    h6 = h6 - (c5 << 26);
-    int c6 = (h3 + 16777216) >> 25;
-    h4 = h4 + c6;
-    h3 = h3 - (c6 << 25);
-    int c7 = (h7 + 16777216) >> 25;
-    h8 = h8 + c7;
-    h7 = h7 - (c7 << 25);
-    int c8 = (h4 + 33554432) >> 26;
-    h5 = h5 + c8;
-    h4 = h4 - (c8 << 26);
-    int c9 = (h8 + 33554432) >> 26;
-    h9 = h9 + c9;
-    h8 = h8 - (c9 << 26);
-    int c10 = (h9 + 16777216) >> 25;
-    h0 = h0 + 19 * c10;
-    h9 = h9 - (c10 << 25);
-    int c11 = (h0 + 33554432) >> 26;
-    h1 = h1 + c11;
-    h0 = h0 - (c11 << 26);
-    out[0] = h0;
-    out[1] = h1;
-    out[2] = h2;
-    out[3] = h3;
-    out[4] = h4;
-    out[5] = h5;
-    out[6] = h6;
-    out[7] = h7;
-    out[8] = h8;
-    out[9] = h9;
+    int f_0 = left[0];
+    int f_1 = left[1];
+    int f_2 = left[2];
+    int f_3 = left[3];
+    int f_4 = left[4];
+    int f_5 = left[5];
+    int f_6 = left[6];
+    int f_7 = left[7];
+    int f_8 = left[8];
+    int f_9 = left[9];
+    int g_0 = right[0];
+    int g_1 = right[1];
+    int g_2 = right[2];
+    int g_3 = right[3];
+    int g_4 = right[4];
+    int g_5 = right[5];
+    int g_6 = right[6];
+    int g_7 = right[7];
+    int g_8 = right[8];
+    int g_9 = right[9];
+    int f1_2 = 2 * f_1;
+    int f3_2 = 2 * f_3;
+    int f5_2 = 2 * f_5;
+    int f7_2 = 2 * f_7;
+    int f9_2 = 2 * f_9;
+    int g1_19 = 19 * g_1;
+    int g2_19 = 19 * g_2;
+    int g3_19 = 19 * g_3;
+    int g4_19 = 19 * g_4;
+    int g5_19 = 19 * g_5;
+    int g6_19 = 19 * g_6;
+    int g7_19 = 19 * g_7;
+    int g8_19 = 19 * g_8;
+    int g9_19 = 19 * g_9;
+    int h_0 = f_0 * g_0 + f1_2 * g9_19 + f_2 * g8_19 + f3_2 * g7_19 + f_4 * g6_19 + f5_2 * g5_19 + f_6 * g4_19 + f7_2 * g3_19 + f_8 * g2_19 + f9_2 * g1_19;
+    int h_1 = f_0 * g_1 + f_1 * g_0 + f_2 * g9_19 + f_3 * g8_19 + f_4 * g7_19 + f_5 * g6_19 + f_6 * g5_19 + f_7 * g4_19 + f_8 * g3_19 + f_9 * g2_19;
+    int h_2 = f_0 * g_2 + f1_2 * g_1 + f_2 * g_0 + f3_2 * g9_19 + f_4 * g8_19 + f5_2 * g7_19 + f_6 * g6_19 + f7_2 * g5_19 + f_8 * g4_19 + f9_2 * g3_19;
+    int h_3 = f_0 * g_3 + f_1 * g_2 + f_2 * g_1 + f_3 * g_0 + f_4 * g9_19 + f_5 * g8_19 + f_6 * g7_19 + f_7 * g6_19 + f_8 * g5_19 + f_9 * g4_19;
+    int h_4 = f_0 * g_4 + f1_2 * g_3 + f_2 * g_2 + f3_2 * g_1 + f_4 * g_0 + f5_2 * g9_19 + f_6 * g8_19 + f7_2 * g7_19 + f_8 * g6_19 + f9_2 * g5_19;
+    int h_5 = f_0 * g_5 + f_1 * g_4 + f_2 * g_3 + f_3 * g_2 + f_4 * g_1 + f_5 * g_0 + f_6 * g9_19 + f_7 * g8_19 + f_8 * g7_19 + f_9 * g6_19;
+    int h_6 = f_0 * g_6 + f1_2 * g_5 + f_2 * g_4 + f3_2 * g_3 + f_4 * g_2 + f5_2 * g_1 + f_6 * g_0 + f7_2 * g9_19 + f_8 * g8_19 + f9_2 * g7_19;
+    int h_7 = f_0 * g_7 + f_1 * g_6 + f_2 * g_5 + f_3 * g_4 + f_4 * g_3 + f_5 * g_2 + f_6 * g_1 + f_7 * g_0 + f_8 * g9_19 + f_9 * g8_19;
+    int h_8 = f_0 * g_8 + f1_2 * g_7 + f_2 * g_6 + f3_2 * g_5 + f_4 * g_4 + f5_2 * g_3 + f_6 * g_2 + f7_2 * g_1 + f_8 * g_0 + f9_2 * g9_19;
+    int h_9 = f_0 * g_9 + f_1 * g_8 + f_2 * g_7 + f_3 * g_6 + f_4 * g_5 + f_5 * g_4 + f_6 * g_3 + f_7 * g_2 + f_8 * g_1 + f_9 * g_0;
+    int c_0 = (h_0 + 33554432) >> 26;
+    h_1 = h_1 + c_0;
+    h_0 = h_0 - (c_0 << 26);
+    int c_1 = (h_4 + 33554432) >> 26;
+    h_5 = h_5 + c_1;
+    h_4 = h_4 - (c_1 << 26);
+    int c_2 = (h_1 + 16777216) >> 25;
+    h_2 = h_2 + c_2;
+    h_1 = h_1 - (c_2 << 25);
+    int c_3 = (h_5 + 16777216) >> 25;
+    h_6 = h_6 + c_3;
+    h_5 = h_5 - (c_3 << 25);
+    int c_4 = (h_2 + 33554432) >> 26;
+    h_3 = h_3 + c_4;
+    h_2 = h_2 - (c_4 << 26);
+    int c_5 = (h_6 + 33554432) >> 26;
+    h_7 = h_7 + c_5;
+    h_6 = h_6 - (c_5 << 26);
+    int c_6 = (h_3 + 16777216) >> 25;
+    h_4 = h_4 + c_6;
+    h_3 = h_3 - (c_6 << 25);
+    int c_7 = (h_7 + 16777216) >> 25;
+    h_8 = h_8 + c_7;
+    h_7 = h_7 - (c_7 << 25);
+    int c_8 = (h_4 + 33554432) >> 26;
+    h_5 = h_5 + c_8;
+    h_4 = h_4 - (c_8 << 26);
+    int c_9 = (h_8 + 33554432) >> 26;
+    h_9 = h_9 + c_9;
+    h_8 = h_8 - (c_9 << 26);
+    int c10 = (h_9 + 16777216) >> 25;
+    h_0 = h_0 + 19 * c10;
+    h_9 = h_9 - (c10 << 25);
+    int c11 = (h_0 + 33554432) >> 26;
+    h_1 = h_1 + c11;
+    h_0 = h_0 - (c11 << 26);
+    out[0] = h_0;
+    out[1] = h_1;
+    out[2] = h_2;
+    out[3] = h_3;
+    out[4] = h_4;
+    out[5] = h_5;
+    out[6] = h_6;
+    out[7] = h_7;
+    out[8] = h_8;
+    out[9] = h_9;
 }
 
 pub Array<int> mul(Array<int> left, Array<int> right) {
@@ -572,12 +588,12 @@ Array<int> square_times(Array<int> element, int count) {
 // `element^(2^250 - 1)`, the stretch the two exponents below share, and
 // `element^11` on the side, in `Array<Array<int>>`'s two slots.
 Array<Array<int>> power_chain(Array<int> element) {
-    Array<int> z2 = square(element);
-    Array<int> z8 = square_times(z2, 2);
-    Array<int> z9 = mul(z8, element);
-    Array<int> z11 = mul(z9, z2);
+    Array<int> z_2 = square(element);
+    Array<int> z_8 = square_times(z_2, 2);
+    Array<int> z_9 = mul(z_8, element);
+    Array<int> z11 = mul(z_9, z_2);
     Array<int> z22 = square(z11);
-    Array<int> z_5_0 = mul(z22, z9);
+    Array<int> z_5_0 = mul(z22, z_9);
     Array<int> z_10_0 = mul(square_times(z_5_0, 5), z_5_0);
     Array<int> z_20_0 = mul(square_times(z_10_0, 10), z_10_0);
     Array<int> z_40_0 = mul(square_times(z_20_0, 20), z_20_0);

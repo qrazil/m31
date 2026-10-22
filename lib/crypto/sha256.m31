@@ -35,6 +35,8 @@
 // avoid a `~` that would otherwise need masking back into range, and both
 // agree with the standard's formula on every 32-bit input.
 
+import crypto.accel;
+
 /// The eight initial hash words, FIPS 180-4 §5.3.3: the fractional part of
 /// the square root of each of the first eight primes, in 32 bits. Fields
 /// with defaults rather than module constants so that `Hasher()` is the
@@ -119,7 +121,7 @@ pub bytes Hasher.digest() {
 // else the portable compression function below, block by block. Same result
 // either way (tests/cryptodiff runs both).
 void Hasher.run_blocks(bytes data, int offset, int count) {
-    if (count > 0 && (__crypto_features() & 2) != 0) {
+    if (count > 0 && (accel.features() & accel.SHA256) != 0) {
         bytes packed = [0; 32];
         for (int j in 0 .. 4) {
             packed[0 + j] = state0 >> (8 * j) & 0xFF;
@@ -145,17 +147,16 @@ void Hasher.run_blocks(bytes data, int offset, int count) {
         for (int j in 0 .. 4) {
             packed[28 + j] = state7 >> (8 * j) & 0xFF;
         }
-        if (__crypto_sha256(packed, data, offset, count) == 0) {
-            state0 = packed[0] | (packed[1] << 8) | (packed[2] << 16) | (packed[3] << 24);
-            state1 = packed[4] | (packed[5] << 8) | (packed[6] << 16) | (packed[7] << 24);
-            state2 = packed[8] | (packed[9] << 8) | (packed[10] << 16) | (packed[11] << 24);
-            state3 = packed[12] | (packed[13] << 8) | (packed[14] << 16) | (packed[15] << 24);
-            state4 = packed[16] | (packed[17] << 8) | (packed[18] << 16) | (packed[19] << 24);
-            state5 = packed[20] | (packed[21] << 8) | (packed[22] << 16) | (packed[23] << 24);
-            state6 = packed[24] | (packed[25] << 8) | (packed[26] << 16) | (packed[27] << 24);
-            state7 = packed[28] | (packed[29] << 8) | (packed[30] << 16) | (packed[31] << 24);
-            return;
-        }
+        __k_sha256(packed, data, count, offset);
+        state0 = packed[0] | (packed[1] << 8) | (packed[2] << 16) | (packed[3] << 24);
+        state1 = packed[4] | (packed[5] << 8) | (packed[6] << 16) | (packed[7] << 24);
+        state2 = packed[8] | (packed[9] << 8) | (packed[10] << 16) | (packed[11] << 24);
+        state3 = packed[12] | (packed[13] << 8) | (packed[14] << 16) | (packed[15] << 24);
+        state4 = packed[16] | (packed[17] << 8) | (packed[18] << 16) | (packed[19] << 24);
+        state5 = packed[20] | (packed[21] << 8) | (packed[22] << 16) | (packed[23] << 24);
+        state6 = packed[24] | (packed[25] << 8) | (packed[26] << 16) | (packed[27] << 24);
+        state7 = packed[28] | (packed[29] << 8) | (packed[30] << 16) | (packed[31] << 24);
+        return;
     }
     for (int index in 0 .. count) {
         block(data, offset + 64 * index);
@@ -222,11 +223,14 @@ void Hasher.block(bytes data, int offset) {
     state7 = state7 + state_h & 0xFFFF_FFFF;
 }
 
-// The hardware kernels (docs/CRYPTO-ACCEL.md): `prim`s into runtime/crypto_glue.c,
-// which runs one only when the CPU has the instructions and `M31_CRYPTO_ACCEL`
-// has not switched them off, and otherwise answers -1.
-prim int __crypto_features();
-prim int __crypto_sha256(bytes state, bytes data, int off, int n);
+// The hardware kernel (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
+// runtime/crypto_*.S, called with spans the compiler range-checks. Called only
+// when `accel.features()` has SHA256 set.
+prim "c" nonblocking void __k_sha256(
+    inout bytes state[0 .. 32],
+    in bytes data[offset .. offset + 64 * count],
+    int count,
+    range int offset);
 
 /// The 64 round constants, FIPS 180-4 §4.2.2: the fractional part of the
 /// cube root of each of the first 64 primes, in 32 bits.

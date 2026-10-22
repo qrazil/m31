@@ -47,6 +47,8 @@
 // first 80 primes. They were generated, not copied by hand, and checked
 // against the values every published implementation uses.
 
+import crypto.accel;
+
 // FIPS 180-4 §5.3.5, the initial chaining values.
 const Array<int> H512 = [
     0x6a09_e667_f3bc_c908, 0xbb67_ae85_84ca_a73b, 0x3c6e_f372_fe94_f82b, 0xa54f_f53a_5f1d_36f1,
@@ -114,13 +116,14 @@ pub void Hasher.update(bytes data) {
             offset = offset + 1;
         }
         if (tail.size() == 128) {
-            block(tail, 0);
+            run_blocks(tail, 0, 1);
             tail.clear();
         }
     }
-    while (data_length - offset >= 128) {
-        block(data, offset);
-        offset = offset + 128;
+    int whole = (data_length - offset) / 128;
+    if (whole > 0) {
+        run_blocks(data, offset, whole);
+        offset = offset + 128 * whole;
     }
     while (offset < data_length) {
         tail.push(data[offset]);
@@ -146,12 +149,7 @@ pub bytes Hasher.digest() {
         tail.push(bits >> shift & 0xFF);
         shift = shift - 8;
     }
-    int offset = 0;
-    int tail_length = tail.size();
-    while (offset < tail_length) {
-        block(tail, offset);
-        offset = offset + 128;
-    }
+    run_blocks(tail, 0, tail.size() / 128);
     tail.clear();
     bytes out = [];
     for (int word in state) {
@@ -176,6 +174,32 @@ void Hasher.restart() {
         }
     }
     total = 0;
+}
+
+// `count` whole blocks of `data` from `offset`: the kernel if there is one,
+// else the portable compression function below, block by block. Same result
+// either way (tests/cryptodiff runs both).
+void Hasher.run_blocks(bytes data, int offset, int count) {
+    if (count > 0 && (accel.features() & accel.SHA512) != 0) {
+        bytes packed = [0; 64];
+        for (int index in 0 .. 8) {
+            for (int octet in 0 .. 8) {
+                packed[8 * index + octet] = state[index] >> (8 * octet) & 0xFF;
+            }
+        }
+        __k_sha512(packed, data, count, offset);
+        for (int index in 0 .. 8) {
+            int value = 0;
+            for (int octet in 0 .. 8) {
+                value = value | (packed[8 * index + octet] << (8 * octet));
+            }
+            state[index] = value;
+        }
+        return;
+    }
+    for (int index in 0 .. count) {
+        block(data, offset + 128 * index);
+    }
 }
 
 // One 128-octet block, read from `data` starting at `offset`.
@@ -227,6 +251,15 @@ void Hasher.block(bytes data, int offset) {
     state[6] = state[6].wrapping_add(working_g);
     state[7] = state[7].wrapping_add(working_h);
 }
+
+// The hardware kernel (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
+// runtime/crypto_*.S, called with spans the compiler range-checks. Called only
+// when `accel.features()` has SHA512 set.
+prim "c" nonblocking void __k_sha512(
+    inout bytes state[0 .. 64],
+    in bytes data[offset .. offset + 128 * count],
+    int count,
+    range int offset);
 
 /// The digest of `data`, in one call.
 pub bytes sum(bytes data) {

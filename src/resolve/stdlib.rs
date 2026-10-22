@@ -67,6 +67,7 @@ const MODULES: &[(&str, &str)] = &[
         "crypto.sha1digest",
         include_str!("../../lib/crypto/sha1digest.m31"),
     ),
+    ("crypto.accel", include_str!("../../lib/crypto/accel.m31")),
     ("crypto.sha256", include_str!("../../lib/crypto/sha256.m31")),
     (
         "crypto.chacha20poly1305",

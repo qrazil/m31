@@ -29,6 +29,27 @@ change landed on master.
   natively and under qemu-aarch64, declared symbols defined on every
   architecture, the absent path, the spawn warning).
 
+### Changed
+
+- **Crypto acceleration: assembly kernels, no C** (docs/CRYPTO-ACCEL.md,
+  docs/CRYPTO-PERF.md). AES-NI/PCLMUL and ARMv8 AES/PMULL AES and GHASH, SSE2
+  and NEON ChaCha20, `mulq`/`umulh` Poly1305, SHA-NI and ARMv8 SHA-1/SHA-256,
+  scalar SHA-512 and the GF(2^255-19) multiply/add/subtract, plus the m31-side
+  restructuring that makes the portable path faster too (SHA-512 0.86 -> 286
+  MiB/s, AES-GCM 0.59 -> about 900 MiB/s, ChaCha20-Poly1305 9.6 -> 556,
+  X25519 5.7 -> 0.3 ms). The kernels are called through `prim "c"`
+  declarations in `lib/crypto/`, so `runtime/crypto_glue.c` does not exist: the
+  compiler emits the range checks. CPU detection is the new `crypto.accel`
+  module (`cpuid` through an assembly function on x86-64, `AT_HWCAP` from
+  `/proc/self/auxv` on aarch64 Linux, a static assumption on Apple silicon),
+  and `M31_CRYPTO_ACCEL` (`off`, or `-aes,-sha256,-sha512,-sha1,-chacha,-poly,-fe`)
+  is read in m31. `aes.Cipher.ctr_xor` and `ctr_xor_at` are now `did_ctr_xor`
+  and `did_ctr_xor_at` (the naming lint wants a prefix on a function that
+  returns `bool`). New tests: `tests/cryptodiff` (about a thousand edge-size
+  cases against hashlib and OpenSSL, kernels on and off),
+  `runtime/tests/crypto_kernels_test.py`, corpus `core/1369`. New benchmark:
+  `bench/crypto`.
+
 ## 0.11.0 (2026-10-21)
 
 ### Added

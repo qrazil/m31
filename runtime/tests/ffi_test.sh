@@ -39,7 +39,7 @@ if [ "$(uname -s)" = Linux ]; then
         for opt in -O0 -O2; do
             l="kernels $arch $cc $opt"
             if ! "$cc" "$opt" "${FREE[@]}" -o "$WORK/k" runtime/tests/ffitest_kernels_test.c \
-                 "runtime/ffitest_$arch.S" 2>"$WORK/k.err" || [ -s "$WORK/k.err" ]; then
+                 "runtime/ffitest_$arch.S" "runtime/accel_$arch.S" "runtime/crypto_$arch.S" 2>"$WORK/k.err" || [ -s "$WORK/k.err" ]; then
                 bad "$l" "did not build" "$(head -3 "$WORK/k.err")"
             elif [ "$("$WORK/k" 2>&1)" != ok ]; then
                 bad "$l" "$("$WORK/k" 2>&1 | head -3)"
@@ -74,7 +74,8 @@ if [ "$(uname -s)" = Linux ]; then
             continue
         fi
         if ! clang --target="$target-linux-gnu" -O2 "${FREE[@]}" --ld-path="$lld" -o "$WORK/kx" \
-             runtime/tests/ffitest_kernels_test.c "runtime/ffitest_$target.S" 2>"$WORK/kx.err" \
+             runtime/tests/ffitest_kernels_test.c "runtime/ffitest_$target.S" "runtime/accel_$target.S" \
+             "runtime/crypto_$target.S" 2>"$WORK/kx.err" \
              || [ -s "$WORK/kx.err" ]; then
             bad "$l" "did not build" "$(head -3 "$WORK/kx.err")"
         elif [ "$("$qemu" "$WORK/kx" 2>&1)" != ok ]; then

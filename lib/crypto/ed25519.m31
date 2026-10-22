@@ -140,25 +140,25 @@ Array<int> two_d() {
 // inputs contribute is read into the scratch elements first). Same law, same
 // values; `2*Z1*Z2` is a doubling by addition and `T1*2d*T2` is `T1*T2*2d`,
 // which are equal mod p to what the allocating form computes.
-void point_add_into(Point out, Point first_point, Point second_point, Array<Array<int>> s, Array<int> twice_d) {
-    field25519.sub_into(s[0], first_point.y_coordinate, first_point.x_coordinate);
-    field25519.sub_into(s[1], second_point.y_coordinate, second_point.x_coordinate);
-    field25519.mul_into(s[2], s[0], s[1]);  // RFC 8032 §5.1.4: A
-    field25519.add_into(s[0], first_point.y_coordinate, first_point.x_coordinate);
-    field25519.add_into(s[1], second_point.y_coordinate, second_point.x_coordinate);
-    field25519.mul_into(s[3], s[0], s[1]);  // RFC 8032 §5.1.4: B
-    field25519.mul_into(s[0], first_point.t_coordinate, second_point.t_coordinate);
-    field25519.mul_into(s[4], s[0], twice_d);  // RFC 8032 §5.1.4: C
-    field25519.mul_into(s[0], first_point.z_coordinate, second_point.z_coordinate);
-    field25519.add_into(s[5], s[0], s[0]);  // RFC 8032 §5.1.4: D
-    field25519.sub_into(s[6], s[3], s[2]);  // RFC 8032 §5.1.4: E
-    field25519.sub_into(s[7], s[5], s[4]);  // RFC 8032 §5.1.4: F
-    field25519.add_into(s[8], s[5], s[4]);  // RFC 8032 §5.1.4: G
-    field25519.add_into(s[9], s[3], s[2]);  // RFC 8032 §5.1.4: H
-    field25519.mul_into(out.x_coordinate, s[6], s[7]);
-    field25519.mul_into(out.y_coordinate, s[8], s[9]);
-    field25519.mul_into(out.t_coordinate, s[6], s[9]);
-    field25519.mul_into(out.z_coordinate, s[7], s[8]);
+void point_add_into(Point out, Point first_point, Point second_point, Array<Array<int>> scratch, Array<int> twice_d) {
+    field25519.sub_into(scratch[0], first_point.y_coordinate, first_point.x_coordinate);
+    field25519.sub_into(scratch[1], second_point.y_coordinate, second_point.x_coordinate);
+    field25519.mul_into(scratch[2], scratch[0], scratch[1]);  // RFC 8032 §5.1.4: A
+    field25519.add_into(scratch[0], first_point.y_coordinate, first_point.x_coordinate);
+    field25519.add_into(scratch[1], second_point.y_coordinate, second_point.x_coordinate);
+    field25519.mul_into(scratch[3], scratch[0], scratch[1]);  // RFC 8032 §5.1.4: B
+    field25519.mul_into(scratch[0], first_point.t_coordinate, second_point.t_coordinate);
+    field25519.mul_into(scratch[4], scratch[0], twice_d);  // RFC 8032 §5.1.4: C
+    field25519.mul_into(scratch[0], first_point.z_coordinate, second_point.z_coordinate);
+    field25519.add_into(scratch[5], scratch[0], scratch[0]);  // RFC 8032 §5.1.4: D
+    field25519.sub_into(scratch[6], scratch[3], scratch[2]);  // RFC 8032 §5.1.4: E
+    field25519.sub_into(scratch[7], scratch[5], scratch[4]);  // RFC 8032 §5.1.4: F
+    field25519.add_into(scratch[8], scratch[5], scratch[4]);  // RFC 8032 §5.1.4: G
+    field25519.add_into(scratch[9], scratch[3], scratch[2]);  // RFC 8032 §5.1.4: H
+    field25519.mul_into(out.x_coordinate, scratch[6], scratch[7]);
+    field25519.mul_into(out.y_coordinate, scratch[8], scratch[9]);
+    field25519.mul_into(out.t_coordinate, scratch[6], scratch[9]);
+    field25519.mul_into(out.z_coordinate, scratch[7], scratch[8]);
 }
 
 // `point_if_one` if `cond` is 1, `point_if_zero` if `cond` is 0, written into
