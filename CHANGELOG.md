@@ -3,6 +3,18 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased
+
+### Added
+
+- **Design: `prim "c"`, a compiler-checked call of an assembly or C-ABI
+  function from library code** (docs/ffi-decision.md). A span parameter
+  (`in`, `out`, `inout` `bytes` or `Array<int>` with its `[LO .. HI]` range
+  written at the parameter) is turned into a pointer by compiler-emitted code
+  after a range check against the object's size; no raw pointer exists in m31
+  source; a `nonblocking` marker skips the blocking-FFI wrap and its warning.
+  It replaces the hand-written C glue the crypto acceleration needed.
+
 ## 0.11.0 (2026-10-21)
 
 ### Added
