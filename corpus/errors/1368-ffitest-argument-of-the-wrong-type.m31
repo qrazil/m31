@@ -1,0 +1,7 @@
+// A span parameter is an ordinary `bytes` or `Array<int>` parameter to the
+// caller, checked like any other (docs/ffi-decision.md). Here an `Array<int>`
+// goes where a `bytes` span is declared.
+import ffitest;
+bytes a = [1, 2, 3, 4];
+Array<int> xs = [0; 4];
+ffitest.xor(xs, a, a, 0, 4);

@@ -235,3 +235,8 @@ C_SYM(rt_ctx_trampoline):
 #if !defined(__APPLE__)
     .section .note.GNU-stack,"",%progbits
 #endif
+
+/* Assembly kernels for `prim "c"` (docs/ffi-decision.md). They live in their
+ * own files but are assembled as part of this one, so every build script that
+ * already links the context switch gets them with no new file to name. */
+#include "ffitest_aarch64.S"

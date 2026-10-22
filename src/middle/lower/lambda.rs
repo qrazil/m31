@@ -214,6 +214,7 @@ impl Lowerer {
             ret,
             is_static: false,
             is_prim: false,
+            native: None,
             recv: Some(tname.clone()),
             name: mname,
             tparams: Vec::new(),
@@ -230,6 +231,7 @@ impl Lowerer {
                 module,
                 is_pub: true,
                 is_prim: false,
+                native: None,
             },
         );
         self.synth_funcs.push(f);
@@ -772,6 +774,7 @@ impl Lowerer {
             ret: m.ret,
             is_static: false,
             is_prim: false,
+            native: None,
             recv: Some(tname.clone()),
             name: m.name.clone(),
             tparams: Vec::new(),
@@ -801,6 +804,7 @@ impl Lowerer {
                 module: self.cur_module.clone(),
                 is_pub: true,
                 is_prim: false,
+                native: None,
             },
         );
         self.lambda_targets

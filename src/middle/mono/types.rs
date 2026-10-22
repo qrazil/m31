@@ -275,6 +275,7 @@ impl Mono {
                 ret: self.subst_ty(m.ret, sub, m.span)?,
                 is_static: m.is_static,
                 is_prim: m.is_prim,
+                native: m.native.clone(),
                 recv: m.recv.clone(),
                 name: m.name.clone(),
                 tparams: Vec::new(),

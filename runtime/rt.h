@@ -19,6 +19,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Whether this target's runtime links assembly kernels for `prim "c"`
+ * declarations (docs/ffi-decision.md). The architectures listed here are
+ * exactly those whose runtime/ctx_switch_<arch>.S #includes kernel files
+ * (runtime/arch.sh selects it); a target not listed gets no call at all from
+ * the emitted code: an `int` kernel answers -1 ("absent"), a `void` one traps,
+ * and the library, which asks first, runs its m31 code. Defined before the
+ * include so a test can force the absent path with -DRT_HAVE_KERNELS=0. */
+#ifndef RT_HAVE_KERNELS
+#if defined(__x86_64__) || defined(__amd64__) || defined(__aarch64__)
+#define RT_HAVE_KERNELS 1
+#else
+#define RT_HAVE_KERNELS 0
+#endif
+#endif
+
 #define RC_IMMORTAL (-1)
 
 /* A frozen object: bound to a `const`, so nothing may change it again

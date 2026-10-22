@@ -15,6 +15,10 @@ cd "$(dirname "$0")/.."
 . ./config.sh
 . ./runtime/arch.sh
 
+# The compiler's own test kernels (runtime/tests/ffitest.m31, imported as
+# `ffitest`) exist only when this is set -- docs/ffi-decision.md, "Testing".
+export M31C_FFITEST=1
+
 LANGC=${LANGC:-./target/debug/$LANG_BIN}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT

@@ -147,6 +147,26 @@ const MODULES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Modules that exist only for the compiler's own tests, and only when the
+/// environment variable `M31C_FFITEST` is set (`scripts/run.sh` and
+/// `scripts/sanitize.sh` set it). They live in `runtime/tests/`, not in
+/// `lib/`: they are not part of the standard library a program sees, and
+/// without the variable `import ffitest;` is the ordinary "no such module".
+/// See docs/ffi-decision.md, "Testing".
+const TEST_MODULES: &[(&str, &str)] =
+    &[("ffitest", include_str!("../../runtime/tests/ffitest.m31"))];
+
+/// Every module an `import` can name in this run.
+fn table() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    let tests: &'static [(&'static str, &'static str)] =
+        if std::env::var_os("M31C_FFITEST").is_some() {
+            TEST_MODULES
+        } else {
+            &[]
+        };
+    MODULES.iter().chain(tests.iter())
+}
+
 /// The last segment of an import path: the module's name.
 fn name_of(path: &str) -> &str {
     path.rsplit('.').next().unwrap_or(path)
@@ -155,25 +175,20 @@ fn name_of(path: &str) -> &str {
 /// The source of the embedded module an `import` of exactly this path names
 /// (`crypto.sha256`, or `io` for a module outside every group), or `None`.
 pub fn by_path(path: &str) -> Option<&'static str> {
-    MODULES.iter().find(|(p, _)| *p == path).map(|(_, s)| *s)
+    table().find(|(p, _)| *p == path).map(|(_, s)| *s)
 }
 
 /// The path an import must spell for the embedded module of this name
 /// (`sha256` -> `crypto.sha256`), or `None` if the name is not one.
 pub fn path_of(name: &str) -> Option<&'static str> {
-    MODULES
-        .iter()
-        .find(|(p, _)| name_of(p) == name)
-        .map(|(p, _)| *p)
+    table().find(|(p, _)| name_of(p) == name).map(|(p, _)| *p)
 }
 
 /// Is this the name of a group -- a directory of `lib/` -- rather than of a
 /// module? `import crypto;` names nothing, while `import crypto.sha256;`
 /// reaches into one.
 pub fn is_group(name: &str) -> bool {
-    MODULES
-        .iter()
-        .any(|(p, _)| p.split_once('.').is_some_and(|(group, _)| group == name))
+    table().any(|(p, _)| p.split_once('.').is_some_and(|(group, _)| group == name))
 }
 
 /// The source of an embedded module a program may import, by NAME -- the

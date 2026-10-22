@@ -1,0 +1,6 @@
+// `prim "c"` (docs/ffi-decision.md): a span outside its buffer traps before the callee runs.
+import ffitest;
+
+bytes a = [1, 2, 3, 4];
+bytes d = [0; 4];
+ffitest.xor(d, a, a, -1, 2);

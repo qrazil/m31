@@ -1,0 +1,5 @@
+// `prim "c"` (docs/ffi-decision.md): a span outside its buffer traps before the callee runs.
+import ffitest;
+
+Array<int> xs = [1, 2, 3, 4];
+print(ffitest.sum(xs, 4611686018427387904, 4611686018427387904));

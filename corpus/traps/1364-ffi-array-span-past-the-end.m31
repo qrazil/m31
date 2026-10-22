@@ -1,0 +1,5 @@
+// `prim "c"` (docs/ffi-decision.md): a span outside its buffer traps before the callee runs.
+import ffitest;
+
+Array<int> xs = [1, 2, 3];
+ffitest.double_all(xs, 4);

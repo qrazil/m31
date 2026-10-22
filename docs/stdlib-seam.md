@@ -141,6 +141,17 @@ program cannot tell `prim` exists except by reading `lib/`.
 `__`-prefixed names are reserved outright — a program may not declare one
 either. C reserves them for the same reason and it costs nobody anything.
 
+### Assembly and C-ABI functions: `prim "c"`
+
+Added 2026-10-21 (`docs/ffi-decision.md`). A `prim` followed by a string, the
+calling convention, declares a callee that takes machine integers and
+pointers rather than objects: `prim "c" nonblocking void __k_xor(out bytes
+dst[o .. o + n], ...)`. The compiler turns each span into a pointer after a
+range check against the object's size, so no hand-written C unpacker is needed
+in front of an assembly kernel. Everything in this section still holds for it:
+library code only, no generics, no methods, `__` names, borrowed arguments.
+It is not the real FFI below, and it does not grow into one.
+
 ### When a real FFI arrives
 
 It replaces `prim` rather than joining it. Nothing here is designed to grow

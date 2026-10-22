@@ -109,6 +109,12 @@ run "runtime compiles clean" bash -c '
 # same situation, which no corpus program asks directly.
 run "sys layer, every backend" bash runtime/tests/sys_test.sh
 
+# `prim "c"` (docs/ffi-decision.md): the test kernels' callee half on every
+# architecture this machine can run (natively, and under qemu-user), the rule
+# that every declared kernel exists in each architecture's assembly, and the
+# absent-kernel path. The compiler's half is the corpus (ffi programs).
+run "prim \"c\" kernels and symbols" bash runtime/tests/ffi_test.sh
+
 # Phase 1 of docs/concurrency-decision.md: the x86-64 context switch, the
 # slab stack allocator, the compiler-emitted probe (both sides: the runtime
 # half here, and the exact text src/back/emit_c/mod.rs emits), and the per-thread
@@ -328,7 +334,7 @@ run "stdlib source is formatted" ./target/debug/"$LANG_BIN" -fmt --check --recur
 # Every source tree that ships or documents the language must be clean.
 # corpus/ is exempt on purpose: its programs are compiler test inputs, many
 # of them written to be wrong.
-run "naming lint" ./target/debug/"$LANG_BIN" -lint lib tests examples runtime bench
+run "naming lint" env M31C_FFITEST=1 ./target/debug/"$LANG_BIN" -lint lib tests examples runtime bench
 
 # `fmt -r <dir>` is how each repository checks its own tree: every source file
 # under the directory, nested ones included, and never the derived or foreign

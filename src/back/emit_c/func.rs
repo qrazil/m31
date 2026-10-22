@@ -91,17 +91,20 @@ pub(super) fn emit_spawn_trampolines(o: &mut String, m: &Module) {
 
 pub(super) fn emit_functions(o: &mut String, m: &Module) {
     for f in &m.funcs {
-        emit_func(o, f, &m.types, &m.prim_targets);
+        emit_func(
+            o,
+            f,
+            &m.types,
+            &Ffi {
+                prim_targets: &m.prim_targets,
+                natives: &m.natives,
+            },
+        );
         o.push('\n');
     }
 }
 
-pub(super) fn emit_func(
-    o: &mut String,
-    f: &crate::middle::ir::Func,
-    types: &[TypeDef],
-    prim_targets: &std::collections::HashSet<String>,
-) {
+pub(super) fn emit_func(o: &mut String, f: &crate::middle::ir::Func, types: &[TypeDef], ffi: &Ffi) {
     // Blocks are emitted in order and control falls into the first one, so
     // the entry block must be first or the function starts in the wrong place.
     assert_eq!(
@@ -279,7 +282,7 @@ pub(super) fn emit_func(
             writeln!(o, "    /* {} (unreachable) */", b.id).unwrap();
         }
         for i in &b.insts {
-            emit_inst(o, f, types, i, prim_targets);
+            emit_inst(o, f, types, i, ffi);
         }
         emit_term(o, f, &b.term);
     }

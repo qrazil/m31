@@ -668,6 +668,10 @@ impl Fmt {
         let vis = if f.is_pub { "pub " } else { "" };
         let kw = if f.is_static { "static " } else { "" };
         // A `prim` has no body: signature, semicolon, done.
+        if let Some(n) = &f.native {
+            self.native_prim(f, n, &name);
+            return;
+        }
         if f.is_prim {
             self.line(&format!(
                 "prim {} {name}({});",
@@ -685,6 +689,45 @@ impl Fmt {
         self.block(&f.body, self.body_close(f.span));
         self.depth -= 1;
         self.line("}");
+    }
+
+    /// `prim "c"`: one parameter per line, because a span carries its bounds
+    /// and the declaration is the contract (docs/ffi-decision.md).
+    fn native_prim(&mut self, f: &Func, n: &NativeDecl, name: &str) {
+        let nb = if n.nonblocking { " nonblocking" } else { "" };
+        let mut lines = Vec::new();
+        for (p, np) in f.params.iter().zip(&n.params) {
+            let ty = self.ty(p.ty);
+            lines.push(match np {
+                NativeParam::Scalar { allowed } if allowed.is_empty() => {
+                    format!("{ty} {}", p.name)
+                }
+                NativeParam::Scalar { allowed } => {
+                    let vals: Vec<String> = allowed.iter().map(|v| v.to_string()).collect();
+                    format!("{ty} {} in {}", p.name, vals.join(" | "))
+                }
+                NativeParam::Range => format!("range {ty} {}", p.name),
+                NativeParam::Span { mode, lo, hi } => format!(
+                    "{} {ty} {}[{} .. {}]",
+                    mode.word(),
+                    p.name,
+                    span_expr(lo, &f.params, 0),
+                    span_expr(hi, &f.params, 0)
+                ),
+            });
+        }
+        let ret = self.ty(f.ret);
+        if lines.is_empty() {
+            self.line(&format!("prim \"c\"{nb} {ret} {name}();"));
+            return;
+        }
+        self.line(&format!("prim \"c\"{nb} {ret} {name}("));
+        self.depth += 1;
+        let last = lines.len() - 1;
+        for (i, l) in lines.iter().enumerate() {
+            self.line(&format!("{l}{}", if i == last { ");" } else { "," }));
+        }
+        self.depth -= 1;
     }
 
     fn params(&self, ps: &[Param]) -> String {
@@ -1181,5 +1224,23 @@ fn fmt_float(x: f64) -> String {
     match s.split_once('e') {
         Some((m, e)) if !m.contains('.') => format!("{m}.0e{e}"),
         _ => s,
+    }
+}
+
+/// A span bound, parenthesised only where `*` meets a `+` (precedence 1 for
+/// `+`, 2 for `*`).
+fn span_expr(e: &SpanExpr, params: &[Param], outer: u8) -> String {
+    match e {
+        SpanExpr::Lit(n) => n.to_string(),
+        SpanExpr::Param(i) => params[*i].name.clone(),
+        SpanExpr::Add(a, b) => {
+            let t = format!("{} + {}", span_expr(a, params, 1), span_expr(b, params, 2));
+            if outer > 1 {
+                format!("({t})")
+            } else {
+                t
+            }
+        }
+        SpanExpr::Mul(a, b) => format!("{} * {}", span_expr(a, params, 2), span_expr(b, params, 3)),
     }
 }

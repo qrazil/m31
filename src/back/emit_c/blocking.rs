@@ -22,13 +22,13 @@ use crate::middle::ir::{Inst, Module};
 ///     the real thing, not the real thing; once a future phase routes
 ///     `spawn` through the green-thread scheduler, this same check becomes
 ///     exact rather than approximate, with no change needed here.
-///   - **"unannotated"** is, honestly, vacuous today: there is no syntax
-///     yet for a `prim` declaration to say "I am known never to block" (see
-///     docs/stdlib-seam.md) -- the language has exactly one kind of `prim`,
-///     and this phase did not add an annotation to narrow that, judging the
-///     grammar change out of scope for the time available. So every `prim`
-///     call reachable from a spawned function's call graph is, trivially,
-///     "unannotated", and gets flagged.
+///   - **"unannotated"** means a call that is not marked `nonblocking`.
+///     A `prim "c"` may carry that marker (docs/ffi-decision.md): the
+///     author's promise that the callee makes no system call and waits
+///     for nothing, and the lowering takes such a callee out of
+///     `prim_targets`, so it is neither wrapped nor warned about. Every
+///     other `prim` -- the ordinary runtime ones, which have no way to
+///     say it -- stays "unannotated" and is flagged.
 ///   - **Reachability only follows `Inst::Call` edges** (direct calls,
 ///     resolved after monomorphisation) -- it does NOT follow
 ///     `Inst::CallIface` (interface/virtual dispatch), whose concrete
@@ -73,10 +73,10 @@ pub(super) fn warn_unannotated_foreign_calls_from_spawn(m: &Module) {
                 eprintln!(
                     "warning: `{root}` is spawned and may reach the foreign \
                      call `{name}` -- every FFI call site is already wrapped \
-                     in enter_blocking/exit_blocking automatically, but \
-                     there is no `prim` annotation yet to mark one as \
-                     non-blocking, so every foreign call reachable from a \
-                     spawned function is flagged for awareness \
+                     in enter_blocking/exit_blocking automatically; only a \
+                     `prim \"c\"` declared `nonblocking` is exempt, so every \
+                     other foreign call reachable from a spawned function \
+                     is flagged for awareness \
                      (docs/concurrency-decision.md, \"Blocking FFI\"; this \
                      check does not see through interface/virtual calls --\
                      see src/back/emit_c/blocking.rs's own comment on this function for \

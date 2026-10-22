@@ -1,0 +1,4 @@
+// `prim "c"` is the standard library's way to call assembly, not a foreign
+// function interface: a program may not write one (docs/ffi-decision.md).
+prim "c" int __k_rdtsc();
+print(__k_rdtsc());

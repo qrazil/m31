@@ -7,13 +7,27 @@ change landed on master.
 
 ### Added
 
-- **Design: `prim "c"`, a compiler-checked call of an assembly or C-ABI
-  function from library code** (docs/ffi-decision.md). A span parameter
-  (`in`, `out`, `inout` `bytes` or `Array<int>` with its `[LO .. HI]` range
-  written at the parameter) is turned into a pointer by compiler-emitted code
-  after a range check against the object's size; no raw pointer exists in m31
-  source; a `nonblocking` marker skips the blocking-FFI wrap and its warning.
-  It replaces the hand-written C glue the crypto acceleration needed.
+- **`prim "c"`: a compiler-checked call of an assembly or C-ABI function from
+  library code** (docs/ffi-decision.md). `prim "c" nonblocking void
+  __k_xor(out bytes dst[o .. o + n], in bytes a[o .. o + n], int n, range int o);`
+  declares a callee `rt_k_xor` that takes integers and pointers. Each span
+  parameter (`in`, `out`, `inout`; `bytes` or `Array<int>`; its range written
+  at the parameter, over `+`, `*` and the declaration's `int` parameters) is
+  turned into a pointer by compiler-emitted code after an overflow-checked
+  range check against the object's size, an `out`/`inout` span's object is
+  checked mutable, and `int n in A | B` restricts a scalar; a failure traps
+  naming the callee and the parameter. No raw pointer exists in m31 source.
+  `nonblocking` skips the blocking-FFI wrap and the spawn warning for that
+  callee. A target without kernels (`RT_HAVE_KERNELS` 0) gets no call: an `int`
+  callee answers -1, a `void` one traps. Still library-only and still refused
+  elsewhere with the `prim` diagnostic; no new keyword. The assembly stays in
+  `runtime/*.S` files `#include`d by `ctx_switch_<arch>.S`, so no build script
+  changed. Test kernels in `runtime/ffitest_{x86_64,aarch64}.S`, imported as
+  `ffitest` only under `M31C_FFITEST` (set by `scripts/run.sh` and
+  `scripts/sanitize.sh`); corpus `core/1360`, traps `1360`-`1366`, errors
+  `1367` and `1368`, and the new `runtime/tests/ffi_test.sh` gate (kernels
+  natively and under qemu-aarch64, declared symbols defined on every
+  architecture, the absent path, the spawn warning).
 
 ## 0.11.0 (2026-10-21)
 

@@ -10,6 +10,7 @@
 mod blocking;
 mod func;
 mod inst;
+mod native;
 mod statics;
 mod types;
 
@@ -29,6 +30,8 @@ pub fn emit(m: &Module) -> String {
     types::emit_type_support(&mut o, m);
     statics::emit_immortals(&mut o, m);
     statics::emit_statics(&mut o, m);
+
+    native::emit_native_decls(&mut o, m);
 
     func::check_unique_c_names(m);
     func::emit_prototypes(&mut o, m);
@@ -56,6 +59,14 @@ pub fn emit(m: &Module) -> String {
     )
     .unwrap();
     o
+}
+
+/// What `emit_inst` needs to know about calls that leave the generated code:
+/// which callees are blocking `prim`s (wrapped) and which are `prim "c"`
+/// (turned into the checked call).
+pub(super) struct Ffi<'a> {
+    pub prim_targets: &'a std::collections::HashSet<String>,
+    pub natives: &'a std::collections::BTreeMap<String, crate::middle::ir::NativeSig>,
 }
 
 fn c_name(name: &str) -> String {

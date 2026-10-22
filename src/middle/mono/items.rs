@@ -166,6 +166,7 @@ impl Mono {
             ret,
             is_static: f.is_static,
             is_prim: f.is_prim,
+            native: f.native.clone(),
             recv: f.recv.clone(),
             name: f.name.clone(),
             tparams: Vec::new(),

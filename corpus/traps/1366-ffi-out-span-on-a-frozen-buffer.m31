@@ -1,0 +1,5 @@
+// `prim "c"` (docs/ffi-decision.md): a span outside its buffer traps before the callee runs.
+import ffitest;
+
+const bytes K = [0; 4];
+ffitest.fill(K, 4, 1);

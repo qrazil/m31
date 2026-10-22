@@ -111,8 +111,11 @@ const MAX_DEPTH: usize = 256;
 
 mod decl;
 mod expr;
+mod native;
 mod stmt;
 mod types;
+
+use native::RawNative;
 
 impl Parser {
     /// A parser that continues an existing type arena.

@@ -430,6 +430,66 @@ pub struct Args {
     pub named: Vec<(String, Expr)>,
 }
 
+/// What a `prim "c"` declaration says beyond an ordinary signature
+/// (docs/ffi-decision.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeDecl {
+    /// `nonblocking`: the author's promise that the callee makes no system
+    /// call and waits for nothing, so the call is not wrapped in
+    /// `rt_enter_blocking` and a spawned function reaching it is not warned.
+    pub nonblocking: bool,
+    /// Aligned with `Func::params`.
+    pub params: Vec<NativeParam>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeParam {
+    /// An `int` the callee receives; `allowed` is empty for any value, else
+    /// the literals the value must be one of (`int rounds in 10 | 14`).
+    Scalar { allowed: Vec<i64> },
+    /// An `int` the callee does not receive: it only appears in span bounds.
+    Range,
+    /// A `bytes` or `Array<int>` the callee receives as a pointer to element
+    /// `lo`, after `0 <= lo <= hi <= size` has been checked.
+    Span {
+        mode: SpanMode,
+        lo: SpanExpr,
+        hi: SpanExpr,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanMode {
+    In,
+    Out,
+    InOut,
+}
+
+impl SpanMode {
+    pub fn word(self) -> &'static str {
+        match self {
+            SpanMode::In => "in",
+            SpanMode::Out => "out",
+            SpanMode::InOut => "inout",
+        }
+    }
+    /// Whether the callee may write through the pointer.
+    pub fn writes(self) -> bool {
+        self != SpanMode::In
+    }
+}
+
+/// A span bound: integer literals, `int` parameters of the same declaration
+/// (by index into `Func::params`), `+` and `*`. No subtraction, so a length
+/// cannot be made to wrap by a difference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpanExpr {
+    Lit(i64),
+    Param(usize),
+    Add(Box<SpanExpr>, Box<SpanExpr>),
+    Mul(Box<SpanExpr>, Box<SpanExpr>),
+}
+
 #[derive(Debug, Clone)]
 pub struct Func {
     /// The module that declared this -- see `TypeDecl::module`.
@@ -450,6 +510,11 @@ pub struct Func {
     /// `rt_open`). Only source the compiler ships may declare one --
     /// see docs/stdlib-seam.md. `body` is empty and never read.
     pub is_prim: bool,
+    /// A `prim "c"`: the callee is an assembly or C-ABI function taking
+    /// machine integers and pointers, and the compiler emits the checked call
+    /// (docs/ffi-decision.md). `Some` only when `is_prim`; one entry in
+    /// `native.params` per entry of `params`.
+    pub native: Option<Box<NativeDecl>>,
     /// For a method, the receiver type's name: `int Rect.area()` has
     /// `recv = Some("Rect")`. Methods are declared outside the type body so
     /// they can be added to any type, and so a type declaration stays a list

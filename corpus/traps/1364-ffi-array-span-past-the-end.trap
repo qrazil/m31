@@ -1,0 +1,1 @@
+trap: prim ffitest_double: span `items` is outside its buffer

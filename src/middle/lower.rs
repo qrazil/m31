@@ -26,6 +26,7 @@ mod decl;
 mod expr;
 mod hold;
 mod lambda;
+mod native;
 mod privacy;
 mod refcount;
 mod scope;
@@ -84,6 +85,9 @@ struct Sig {
     /// The seam to C: no body to lower, and the call goes to a runtime
     /// symbol found by one name transform. See docs/stdlib-seam.md.
     is_prim: bool,
+    /// For a `prim "c"`: what the call site checks and the emitter lowers
+    /// (docs/ffi-decision.md).
+    native: Option<Box<crate::front::ast::NativeDecl>>,
 }
 
 /// One entry per enclosing `while`, so `break` and `continue` know where to
@@ -895,6 +899,7 @@ impl Lowerer {
                 module: String::new(),
                 is_pub: true,
                 is_prim: false,
+                native: None,
             },
         );
     }
@@ -1173,6 +1178,7 @@ impl Lowerer {
                     module: f.module.clone(),
                     is_pub: f.is_pub,
                     is_prim: f.is_prim,
+                    native: f.native.clone(),
                 },
             );
         }
@@ -1194,6 +1200,7 @@ impl Lowerer {
                     module: f.module.clone(),
                     is_pub: f.is_pub,
                     is_prim: f.is_prim,
+                    native: f.native.clone(),
                 },
             );
         }
@@ -1214,6 +1221,7 @@ impl Lowerer {
             ret: Ty::Void,
             is_static: false,
             is_prim: false,
+            native: None,
             recv: None,
             name: ENTRY.to_string(),
             tparams: Vec::new(),
@@ -1332,6 +1340,16 @@ impl Lowerer {
             })
             .collect();
 
+        let natives = self.native_sigs();
+        // A `prim "c"` that may block is wrapped and warned about like any
+        // other `prim`; a `nonblocking` one is neither.
+        let mut prim_targets = prim_targets;
+        for (sym, n) in &natives {
+            if n.nonblocking {
+                prim_targets.remove(sym);
+            }
+        }
+
         Ok(ir::Module {
             funcs,
             strings: self.strings,
@@ -1339,6 +1357,7 @@ impl Lowerer {
             types: self.typedefs,
             iface_slots: self.iface_slots,
             prim_targets,
+            natives,
         })
     }
 

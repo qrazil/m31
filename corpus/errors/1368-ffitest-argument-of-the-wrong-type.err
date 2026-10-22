@@ -1,0 +1,4 @@
+corpus/errors/1368-ffitest-argument-of-the-wrong-type.m31:7:13: type mismatch: expected bytes, found Array<int>
+  |
+7 | ffitest.xor(xs, a, a, 0, 4);
+  |             ^

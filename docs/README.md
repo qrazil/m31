@@ -14,6 +14,7 @@ the CHANGELOG cite them by name.
 | `ir-v0.md` | IR v0, the walking skeleton |
 | `sys-layer.md` | The sys layer: everything below the language |
 | `stdlib-seam.md` | Where the language stops and C begins |
+| `ffi-decision.md` | Calling assembly and C-ABI functions from library code: `prim "c"` and spans |
 | `concurrency.md` | Concurrency and refcounting, with evidence |
 | `roadmap.md` | Features and roadmap |
 

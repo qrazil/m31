@@ -2753,7 +2753,17 @@ sigparam    = [ "const" ] type IDENT ;               (* const: §4.2 *)
 func        = [ "static" ] type [ IDENT [ tparams ] "." ] IDENT [ tparams ]
               "(" [ params ] ")" block ;              (* static needs a receiver;
                                                          receiver tparams: §3.8 *)
-prim        = "prim" type IDENT "(" [ params ] ")" ";" ;  (* stdlib source only, §10.1 *)
+prim        = "prim" [ STRING [ "nonblocking" ] ] type IDENT "(" [ params ] ")" ";" ;
+                                                      (* stdlib source only, §10.1;
+                                                         with STRING ("c"), params
+                                                         are nparams (docs/ffi-decision.md) *)
+nparams     = nparam { "," nparam } ;
+nparam      = "int" IDENT [ "in" INT { "|" INT } ]
+            | "range" "int" IDENT
+            | ( "in" | "out" | "inout" ) ( "bytes" | "Array" "<" "int" ">" )
+              IDENT "[" bound ".." bound "]" ;
+bound       = term { "+" term } ;  term = factor { "*" factor } ;
+factor      = INT | IDENT | "(" bound ")" ;         (* IDENT: an int parameter *)
 tparams     = "<" IDENT { "," IDENT } ">" ;
 params      = param { "," param } ;
 param       = [ "const" ] type IDENT [ "=" expr ] ; (* const: a frozen
@@ -2844,4 +2854,6 @@ trailing commas later is additive and forbidding them later is not.
 
 `prim` and `__`-prefixed names are available only to modules the compiler
 ships in `lib/`. To any other program they do not exist: `prim` is refused
-and a `__` name is a reserved-name error. See `docs/stdlib-seam.md`.
+and a `__` name is a reserved-name error. See `docs/stdlib-seam.md`. That
+includes `prim "c"`, the library's checked call of an assembly or C-ABI
+function through spans of a `bytes` or `Array<int>` (`docs/ffi-decision.md`).

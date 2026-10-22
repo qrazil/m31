@@ -1,0 +1,1 @@
+trap: prim ffitest_fill: span `buffer` is outside its buffer

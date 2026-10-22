@@ -1,0 +1,57 @@
+// Test kernels for `prim "c"` (docs/ffi-decision.md, "Testing"). Not part of
+// the standard library: the compiler imports this only when M31C_FFITEST is
+// set, and the kernels are in runtime/ffitest_<arch>.S.
+
+// out[offset .. offset + count] = left ^ right over the same range
+prim "c" nonblocking void __k_ffitest_xor(
+    out bytes output[offset .. offset + count],
+    in bytes left[offset .. offset + count],
+    in bytes right[offset .. offset + count],
+    int count,
+    range int offset);
+prim "c" nonblocking int __k_ffitest_sum(
+    in Array<int> items[start .. start + count],
+    int count,
+    range int start);
+prim "c" nonblocking void __k_ffitest_fill(
+    out bytes buffer[0 .. count],
+    int count,
+    int value);
+prim "c" nonblocking int __k_ffitest_mix(
+    int arg0,
+    int arg1,
+    int arg2,
+    int arg3,
+    int arg4,
+    int arg5);
+prim "c" nonblocking void __k_ffitest_double(
+    inout Array<int> items[0 .. count],
+    int count);
+prim "c" int __k_ffitest_scale(
+    int factor in 1 | 2 | 4,
+    in bytes buffer[0 .. count],
+    int count);
+
+pub void xor(bytes output, bytes left, bytes right, int offset, int count) {
+    __k_ffitest_xor(output, left, right, count, offset);
+}
+
+pub int sum(Array<int> items, int start, int count) {
+    return __k_ffitest_sum(items, count, start);
+}
+
+pub void fill(bytes buffer, int count, int value) {
+    __k_ffitest_fill(buffer, count, value);
+}
+
+pub int mix(int arg0, int arg1, int arg2, int arg3, int arg4, int arg5) {
+    return __k_ffitest_mix(arg0, arg1, arg2, arg3, arg4, arg5);
+}
+
+pub void double_all(Array<int> items, int count) {
+    __k_ffitest_double(items, count);
+}
+
+pub int scale(int factor, bytes buffer, int count) {
+    return __k_ffitest_scale(factor, buffer, count);
+}

@@ -447,6 +447,7 @@ impl Parser {
                     // no receiver, so there is nothing to dispatch on.
                     is_static: false,
                     is_prim: false,
+                    native: None,
                     recv: Some(name.clone()),
                     name: mname,
                     tparams: Vec::new(),
@@ -654,6 +655,30 @@ impl Parser {
                  function interface yet",
             ));
         }
+        // `prim "c" [nonblocking]`: the callee is an assembly or C-ABI
+        // function and the compiler emits the checked call
+        // (docs/ffi-decision.md). The string is the calling convention.
+        let mut native_head: Option<bool> = None;
+        if is_prim {
+            if let Tok::Str(abi) = self.peek().clone() {
+                let at = self.span();
+                self.bump();
+                if abi != "c" {
+                    return Err(Diag::new(
+                        at,
+                        format!(
+                            "`prim \"{abi}\"`: the only calling convention a `prim` can name \
+                             is \"c\" (the platform's C ABI, which assembly follows too)"
+                        ),
+                    ));
+                }
+                let nonblocking = matches!(self.peek(), Tok::Ident(w) if w == "nonblocking");
+                if nonblocking {
+                    self.bump();
+                }
+                native_head = Some(nonblocking);
+            }
+        }
         let is_static = self.eat(&Tok::KwStatic);
         // the `<T>` list has to be read before the return type. It sits after
         // the name in the source, so scan ahead for it first.
@@ -726,15 +751,33 @@ impl Parser {
         self.expect(Tok::LParen)?;
 
         let mut params = Vec::new();
+        let mut raw_native: Vec<RawNative> = Vec::new();
         if self.peek() != &Tok::RParen {
             loop {
-                params.push(self.parse_param()?);
+                if native_head.is_some() {
+                    let (p, n) = self.parse_native_param()?;
+                    params.push(p);
+                    raw_native.push(n);
+                } else {
+                    params.push(self.parse_param()?);
+                }
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
             }
         }
         self.expect(Tok::RParen)?;
+        let native = match native_head {
+            Some(nonblocking) => Some(Box::new(self.check_native(
+                span,
+                &name,
+                ret,
+                nonblocking,
+                &params,
+                raw_native,
+            )?)),
+            None => None,
+        };
         // A primitive's body is C's, so there is none to read. Everything
         // above this point parsed exactly like an ordinary function, which
         // is the point: its types are checked and monomorphised like
@@ -752,6 +795,7 @@ impl Parser {
             ret,
             is_static,
             is_prim,
+            native,
             recv,
             name,
             tparams,

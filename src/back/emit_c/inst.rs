@@ -8,7 +8,7 @@ pub(super) fn emit_inst(
     f: &crate::middle::ir::Func,
     types: &[TypeDef],
     i: &Inst,
-    prim_targets: &std::collections::HashSet<String>,
+    ffi: &Ffi,
 ) {
     match i {
         Inst::FConst { dst, val } => {
@@ -90,7 +90,15 @@ pub(super) fn emit_inst(
             // is NOT in this set and so is correctly left unwrapped: it
             // never leaves this runtime's own control and so can never
             // block on an external syscall the way a `prim` can).
-            let is_ffi = prim_targets.contains(func.as_str());
+            let is_ffi = ffi.prim_targets.contains(func.as_str());
+            if let Some(n) = ffi.natives.get(func.as_str()) {
+                // `prim "c"` (docs/ffi-decision.md): the checked native call,
+                // wrapped in the blocking handoff unless `nonblocking`. The
+                // wrap goes outside the checks' block, around the call only,
+                // by being part of the same text; see native.rs.
+                native::emit_native_call(o, n, func, dst.as_ref(), args, is_ffi);
+                return;
+            }
             if is_ffi {
                 writeln!(o, "    rt_enter_blocking();").unwrap();
             }

@@ -149,6 +149,7 @@ impl Lowerer {
                                 module: sig.module.clone(),
                                 is_pub: sig.is_pub,
                                 is_prim: sig.is_prim,
+                                native: sig.native.clone(),
                             },
                         ))
                     })
@@ -165,6 +166,7 @@ impl Lowerer {
                                 module: g.module.clone(),
                                 is_pub: g.is_pub,
                                 is_prim: g.is_prim,
+                                native: g.native.clone(),
                             },
                         ));
                     }
@@ -240,6 +242,7 @@ impl Lowerer {
                         ret: sig.ret,
                         is_static: false,
                         is_prim: false,
+                        native: None,
                         recv: Some(t.name.clone()),
                         name: mname,
                         tparams: Vec::new(),

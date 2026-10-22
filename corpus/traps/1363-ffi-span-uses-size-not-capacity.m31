@@ -1,0 +1,8 @@
+// `prim "c"` (docs/ffi-decision.md): a span outside its buffer traps before the callee runs.
+import ffitest;
+
+// The buffer has room for 64 octets and holds 4: the range is checked
+// against what it holds.
+bytes e = [0; 64];
+e.truncate(4);
+ffitest.fill(e, 5, 1);

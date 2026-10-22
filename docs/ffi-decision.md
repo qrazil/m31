@@ -15,6 +15,16 @@ decision; `src/` implements it in the commit after it.
 
 ---
 
+## Where it lives in the compiler
+
+| stage | file |
+|---|---|
+| syntax and the declaration's checks | `src/front/parser/native.rs`, called from `parse_func` in `src/front/parser/decl.rs`; the AST types are `NativeDecl`, `NativeParam`, `SpanExpr` in `src/front/ast.rs` |
+| the call site | none: a `prim "c"` is a `prim`, so `lower_call` emits the same `Inst::Call` of `rt_k_...`; `src/middle/lower/native.rs` builds `Module::natives` (`src/middle/ir.rs`, `NativeSig`) |
+| **the checked call, the only place a pointer into an m31 object is made** | `src/back/emit_c/native.rs` |
+| blocking wrap and spawn warning | `prim_targets` loses a `nonblocking` callee (`lower.rs`); the emitter and `src/back/emit_c/blocking.rs` are otherwise unchanged |
+| formatting | `src/tools/fmt.rs` |
+
 ## The problem
 
 1. **A kernel's contract is a pointer and a length, and C was the only thing
@@ -43,14 +53,16 @@ decision; `src/` implements it in the commit after it.
 
 ```
 prim "c" nonblocking void __k_aes_ctr(
-    in    bytes rk[0 .. 16 * (rounds + 1)],
-    int   rounds in 10 | 14,
+    in bytes rk[0 .. 16 * (rounds + 1)],
+    int rounds in 10 | 14,
     inout bytes ctr[0 .. 16],
-    in    bytes src[off .. off + 16 * n],
-    out   bytes dst[off .. off + 16 * n],
-    int   n,
+    in bytes src[off .. off + 16 * n],
+    out bytes dst[off .. off + 16 * n],
+    int n,
     range int off);
 ```
+
+(This is also exactly what `m31c fmt` prints: one parameter to a line.)
 
 It is a `prim`: a bodiless declaration, only in modules that come out of `lib/`,
 parsed and type-checked like any function, no generics, no methods, `__` name.

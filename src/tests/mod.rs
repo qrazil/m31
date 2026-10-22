@@ -47,6 +47,7 @@ mod interfaces;
 mod lambdas;
 mod lexer;
 mod methods;
+mod native;
 mod parser;
 mod refcount;
 mod text;

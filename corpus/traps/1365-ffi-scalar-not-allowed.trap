@@ -1,0 +1,1 @@
+trap: prim ffitest_scale: `factor` is not one of the values the declaration allows

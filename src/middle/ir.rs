@@ -641,6 +641,49 @@ pub struct Module {
     /// queried with `.contains`, so it cannot be the source of the
     /// HashMap-iteration nondeterminism this project has a gate against.
     pub prim_targets: std::collections::HashSet<String>,
+    /// Every `prim "c"`, by callee symbol (`rt_k_aes_ctr`): what the emitter
+    /// needs to turn a call of that symbol into the checked call
+    /// (docs/ffi-decision.md). A `BTreeMap` because the emitter walks it to
+    /// declare the callees, and emission order must be deterministic.
+    pub natives: std::collections::BTreeMap<String, NativeSig>,
+}
+
+/// One `prim "c"`, as the emitter needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSig {
+    /// The declared name without `__k_`, for trap messages.
+    pub name: String,
+    pub nonblocking: bool,
+    /// `int` result (true) or `void`.
+    pub returns_int: bool,
+    /// One per `Inst::Call` argument, in order.
+    pub params: Vec<NativeParam>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeParam {
+    /// Passed as a 64-bit integer; `allowed` empty means any value.
+    Scalar { name: String, allowed: Vec<i64> },
+    /// Evaluated, never passed.
+    Range { name: String },
+    /// Passed as a pointer to element `lo` after `0 <= lo <= hi <= size`.
+    Span {
+        name: String,
+        /// `Array<int>` (8-byte elements) rather than `bytes`.
+        ints: bool,
+        writes: bool,
+        lo: NativeExpr,
+        hi: NativeExpr,
+    },
+}
+
+/// A span bound; `Param` indexes the call's arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeExpr {
+    Lit(i64),
+    Param(usize),
+    Add(Box<NativeExpr>, Box<NativeExpr>),
+    Mul(Box<NativeExpr>, Box<NativeExpr>),
 }
 
 impl Module {
