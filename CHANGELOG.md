@@ -3,7 +3,7 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
-## Unreleased
+## 0.12.0 (2026-10-22)
 
 ### Added
 
