@@ -9,8 +9,7 @@ pub(super) fn emit_inst(
     types: &[TypeDef],
     i: &Inst,
     ffi: &Ffi,
-    sites: &super::heapwatch::Sites,
-    loc: u32,
+    hw: &super::heapwatch::At,
 ) {
     match i {
         Inst::FConst { dst, val } => {
@@ -104,7 +103,7 @@ pub(super) fn emit_inst(
             // Heap watch: an object the runtime makes during this call is
             // counted against this line (rt.h, rt_hw_at).
             if crate::middle::ir::rt_call_allocates(func) {
-                writeln!(o, "    rt_hw_at({loc});").unwrap();
+                writeln!(o, "    rt_hw_at({});", hw.loc).unwrap();
             }
             // `o[i] = v` of a reference: heap watch's store hook first
             // (rt.h, rt_hw_store_elem), which reads the element it replaces.
@@ -211,8 +210,8 @@ pub(super) fn emit_inst(
             if types[*tid as usize].is_immortal_singleton() {
                 writeln!(o, "    {dst} = &imm_T{tid}.hdr;").unwrap();
             } else {
-                let ti = sites.ti(*tid, loc);
-                writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &{ti});").unwrap();
+                let ti = hw.sites.ti(*tid, hw.loc);
+                writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), {ti});").unwrap();
             }
         }
         Inst::EnumPack {
@@ -254,8 +253,8 @@ pub(super) fn emit_inst(
                 writeln!(o, "    {dst} = &imm_T{tid}_v{tag}.hdr;").unwrap();
                 return;
             }
-            let ti = sites.ti(*tid, loc);
-            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &{ti});").unwrap();
+            let ti = hw.sites.ti(*tid, hw.loc);
+            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), {ti});").unwrap();
             writeln!(o, "    ((T{tid} *){dst})->tag = {tag};").unwrap();
             for (k, a) in args.iter().enumerate() {
                 writeln!(o, "    ((T{tid} *){dst})->u.v{tag}.p{k} = {a};").unwrap();
@@ -265,7 +264,7 @@ pub(super) fn emit_inst(
                 if f.ty_of(*a) == IrTy::Ref {
                     writeln!(
                         o,
-                        "    rt_hw_store({dst}, {a}, offsetof(T{tid}, u.v{tag}.p{k}));"
+                        "    rt_hw_store_fresh({dst}, {a}, offsetof(T{tid}, u.v{tag}.p{k}));"
                     )
                     .unwrap();
                 }
@@ -310,8 +309,8 @@ pub(super) fn emit_inst(
         // it, the same way the drop and walk functions do.
         Inst::EnumClone { dst, src, tid } => {
             let t = &types[*tid as usize];
-            let ti = sites.ti(*tid, loc);
-            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &{ti});").unwrap();
+            let ti = hw.sites.ti(*tid, hw.loc);
+            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), {ti});").unwrap();
             writeln!(o, "    ((T{tid} *){dst})->tag = ((T{tid} *){src})->tag;").unwrap();
             if t.variants.iter().any(|v| !v.payload.is_empty()) {
                 // One assignment: the union is whatever the tag says it is,
@@ -341,13 +340,15 @@ pub(super) fn emit_inst(
             let (fname, fty) = &types[*tid as usize].fields[*idx as usize];
             let name = c_ident(fname);
             // Heap watch's store hook (rt.h, rt_hw_store): a reference
-            // field's holder, value and slot, for trace and epoch close.
+            // field's holder, value and slot, for trace and epoch close --
+            // trace's alone into an object just made (emit_func).
             if *fty == IrTy::Ref {
-                writeln!(
-                    o,
-                    "    rt_hw_store({obj}, {val}, offsetof(T{tid}, f_{name}));"
-                )
-                .unwrap();
+                let hook = if hw.into_fresh {
+                    "rt_hw_store_fresh"
+                } else {
+                    "rt_hw_store"
+                };
+                writeln!(o, "    {hook}({obj}, {val}, offsetof(T{tid}, f_{name}));").unwrap();
             }
             writeln!(o, "    ((T{tid} *){obj})->f_{name} = {val};").unwrap();
         }

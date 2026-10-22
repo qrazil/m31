@@ -14,11 +14,18 @@
 #   - trace, from the start: a connection held by a session held by a cache's
 #     map, and a cycle of nodes, are printed as those paths; and turned on
 #     and off in a running process through its ledger's control page;
-#   - epoch close in a build that does not trap: each close that leaves a
-#     cycle is a line in the suspect log, a count in the ledger, and with
-#     trace on the cycle in the trace file; M31_HEAPWATCH_TRAP=1 traps;
-#   - the count word: a retain and a release touch only the count, and a
-#     retain past its 33 bits traps.
+#   - epoch close (M31_HEAPWATCH=full) in a build that does not trap: each
+#     close that leaves a cycle is a line in the suspect log, a count in the
+#     ledger, and with trace on the cycle in the trace file;
+#     M31_HEAPWATCH_TRAP=1 traps; sampled, a close still counts every
+#     object left, and names the sites of the sampled ones;
+#   - sampling: with a sample every few hundred bytes rather than every
+#     object, the leaking site is still found;
+#   - the count word: a retain and a release touch only the count.
+#
+# Every program here is a heap watch build (-DRT_HEAPWATCH, docs/heap-watch-
+# design.md, "Builds"), and samples every object (M31_HEAPWATCH_SAMPLE=1),
+# so the counts it checks are exact, unless a check says otherwise.
 #
 # Timing margins are generous (a loaded CI runner): every wait polls for
 # what it needs, up to tens of seconds, and never relies on a fixed sleep.
@@ -49,7 +56,7 @@ build() { # build <name> <source>
         echo "FAILED: compile $2: $(head -3 "$WORK/$1.err")"
         exit 1
     fi
-    if ! cc -O2 -pthread -I runtime -o "$WORK/$1" "$WORK/$1.c" \
+    if ! cc -O2 -pthread -DRT_HEAPWATCH -I runtime -o "$WORK/$1" "$WORK/$1.c" \
             runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" 2>"$WORK/$1.cc"; then
         echo "FAILED: build $2:"
         sed 's/^/    /' "$WORK/$1.cc" | head -20
@@ -68,6 +75,8 @@ wait_for() {
     done
     return 1
 }
+
+export M31_HEAPWATCH_SAMPLE=1
 
 build age runtime/tests/heapwatch/t_age.m31
 build clean runtime/tests/heapwatch/t_clean.m31
@@ -108,6 +117,22 @@ if grep -qE '^SUSPECT +(Asset|Mesh|Config)' <<<"$out"; then
     bad "a type marked forever is a suspect"
 fi
 [ -s "$WORK/age.stderr" ] && bad "the program wrote to stderr: $(head -3 "$WORK/age.stderr")"
+
+# --- sampled: the leak is still found ----------------------------------------
+dir6="$WORK/sampled-ledgers"
+mkdir -p "$dir6"
+M31_HEAPWATCH_DIR="$dir6" M31_HEAPWATCH_MINUTE_MS=20 M31_HEAPWATCH_SAMPLE=256 \
+    "$WORK/age" >/dev/null 2>&1 &
+pid=$!
+pids+=("$pid")
+if ! wait_for 60 grep -qs 'SUSPECT Session t_age.m31:32 ' "$dir6/age.$pid.suspects"; then
+    bad "sampled: no suspect line for the leaking site in 60 s"
+fi
+kill -9 "$pid"
+wait "$pid" 2>/dev/null
+out=$("$LANGC" -heapwatch "$dir6/age.$pid.ledger" 2>&1)
+grep -q '^sampled: one object in every 256 bytes made, on average; counts are estimates$' <<<"$out" \
+    || bad "sampled: the report does not say so: $(head -5 <<<"$out")"
 
 # --- a clean exit leaves nothing; M31_HEAPWATCH=0 makes nothing ------------
 dir2="$WORK/clean-ledgers"
@@ -180,6 +205,7 @@ grep -q "is not running" <<<"$out" || bad "on the fly: --trace of a dead process
 build epoch runtime/tests/heapwatch/t_epoch.m31
 dir5="$WORK/epoch-ledgers"
 mkdir -p "$dir5"
+export M31_HEAPWATCH=full
 out=$(M31_HEAPWATCH_DIR="$dir5" M31_HEAPWATCH_DEPTH=8 M31_HEAPWATCH_TRACE=Node,List "$WORK/epoch" 2>&1)
 rc=$?
 [ $rc -eq 0 ] && [ "$out" = "done" ] || bad "epoch: exit $rc, printed $out"
@@ -198,16 +224,25 @@ out=$(M31_HEAPWATCH_DIR="$dir5" M31_HEAPWATCH_TRAP=1 "$WORK/epoch" 2>&1)
 rc=$?
 [ $rc -eq 134 ] && grep -q "^trap: epoch \"request\" closed with leaks: $leaks$" <<<"$out" \
     || bad "epoch: M31_HEAPWATCH_TRAP=1 did not trap: exit $rc, $out"
+# Sampled, so that no object is: the count of what is left is still exact.
+out=$(M31_HEAPWATCH_DIR="$dir5" M31_HEAPWATCH_SAMPLE=1000000000 M31_HEAPWATCH_TRAP=1 "$WORK/epoch" 2>&1)
+rc=$?
+[ $rc -eq 134 ] && grep -q '^trap: epoch "request" closed with leaks: 4 objects; none sampled$' <<<"$out" \
+    || bad "epoch, sampled: exit $rc, $out"
+# Off, or the ledger alone: no epoch is closed, so nothing traps.
+for mode in 0 ledger; do
+    out=$(M31_HEAPWATCH_DIR="$dir5" M31_HEAPWATCH=$mode M31_HEAPWATCH_TRAP=1 "$WORK/epoch" 2>&1)
+    rc=$?
+    [ $rc -eq 0 ] && [ "$out" = "done" ] || bad "epoch, M31_HEAPWATCH=$mode: exit $rc, $out"
+done
+unset M31_HEAPWATCH
 
 # --- the count word --------------------------------------------------------
-if cc -O2 -pthread -I runtime -o "$WORK/bits" runtime/tests/heapwatch/count_bits.c \
+if cc -O2 -pthread -DRT_HEAPWATCH -I runtime -o "$WORK/bits" runtime/tests/heapwatch/count_bits.c \
         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" 2>"$WORK/bits.cc"; then
     out=$("$WORK/bits" 2>&1)
     rc=$?
-    [ $rc -eq 134 ] || bad "count bits: exit $rc, expected the overflow trap (134)"
-    want="ok
-trap: reference count overflow: more than 8589934591 references to one object"
-    [ "$out" = "$want" ] || bad "count bits printed: $out"
+    [ $rc -eq 0 ] && [ "$out" = "ok" ] || bad "count bits: exit $rc, printed $out"
 else
     bad "count bits: $(head -5 "$WORK/bits.cc")"
 fi

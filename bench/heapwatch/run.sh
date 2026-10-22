@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Heap watch's cost (docs/heap-watch-design.md, "Cost"): each program built
-# once and run with heap watch on, as every program is by default, and with
-# M31_HEAPWATCH=0 -- the same binary, so the difference is the counting, the
-# ledger and the epochs. What stays with it off is the store hook's compare
-# and the per-site records; comparing against a build of the commit before
-# heap watch measures those too, which is what the design doc's table does.
+# twice -- the default build, which has no heap watch in it at all, and a
+# heap watch build (-DRT_HEAPWATCH) -- and the heap watch build run in each
+# mode: M31_HEAPWATCH=0, the sampled ledger (the default) and full (the
+# ledger and epoch close).
 #
 # Interleaved, best of RUNS: the noise on this machine is other builds, and
-# noise only ever adds.
+# noise only ever adds. Compare the default build against a build of the
+# commit before heap watch, too: that it costs nothing is a claim about it
+# (the design doc's table), and gates.sh checks it has none of heap watch's
+# code.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 . ./config.sh
@@ -20,9 +22,9 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 export M31_HEAPWATCH_DIR="$WORK/ledgers"
 
-build() {
+build() { # build <source> <name> [-DRT_HEAPWATCH]
     "$LANGC" -emit-c "$1" --out "$WORK/$2.c" || return 1
-    "$CC" -O2 -ffp-contract=off -I runtime "$WORK/$2.c" \
+    "$CC" -O2 -ffp-contract=off ${3:-} -I runtime "$WORK/$2.c" \
         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
         -lpthread -o "$WORK/$2.bin" || return 1
 }
@@ -31,18 +33,27 @@ seconds() {
     { /usr/bin/time -f '%e' env "$@" >/dev/null; } 2>&1 | tail -1
 }
 
-printf '%-14s %8s %8s %7s\n' benchmark off on ratio
+ratio() { awk -v a="$1" -v b="$2" 'BEGIN{ if (a>0) printf "%+.0f%%", (b/a-1)*100; else print "-" }'; }
+
+printf '%-14s %8s %16s %16s %16s\n' benchmark default "hw build, off" "ledger" "full"
 for src in bench/trees/trees.m31 bench/heapwatch/allocs.m31 bench/heapwatch/stores.m31 \
            bench/valenum/result-boxed.m31 bench/valenum/option-boxed.m31; do
     name=$(basename "$src" ".$LANG_EXT")
     build "$src" "$name" || { echo "$name: build failed"; continue; }
-    off="" on=""
+    build "$src" "$name.hw" -DRT_HEAPWATCH || { echo "$name: heap watch build failed"; continue; }
+    plain="" off="" ledger="" full=""
+    best() { # best <var> <seconds>
+        local cur=${!1}
+        { [ -z "$cur" ] || awk -v a="$2" -v b="$cur" 'BEGIN{exit !(a<b)}'; } && printf -v "$1" '%s' "$2"
+    }
     for _ in $(seq "$RUNS"); do
-        t=$(seconds M31_HEAPWATCH=0 "$WORK/$name.bin")
-        { [ -z "$off" ] || awk -v a="$t" -v b="$off" 'BEGIN{exit !(a<b)}'; } && off=$t
-        t=$(seconds M31_HEAPWATCH=1 "$WORK/$name.bin")
-        { [ -z "$on" ] || awk -v a="$t" -v b="$on" 'BEGIN{exit !(a<b)}'; } && on=$t
+        best plain "$(seconds "$WORK/$name.bin")"
+        best off "$(seconds M31_HEAPWATCH=0 "$WORK/$name.hw.bin")"
+        best ledger "$(seconds M31_HEAPWATCH=ledger "$WORK/$name.hw.bin")"
+        best full "$(seconds M31_HEAPWATCH=full "$WORK/$name.hw.bin")"
     done
-    r=$(awk -v a="$off" -v b="$on" 'BEGIN{ if (a>0) printf "%.2fx", b/a; else print "-" }')
-    printf '%-14s %7ss %7ss %7s\n' "$name" "$off" "$on" "$r"
+    printf '%-14s %7ss %9ss %5s %9ss %5s %9ss %5s\n' "$name" "$plain" \
+        "$off" "$(ratio "$plain" "$off")" \
+        "$ledger" "$(ratio "$plain" "$ledger")" \
+        "$full" "$(ratio "$plain" "$full")"
 done

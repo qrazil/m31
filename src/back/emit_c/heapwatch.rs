@@ -7,8 +7,13 @@
 //! of the type's TypeInfo with its own ledger slot, numbered 1, 2, ... in
 //! the order the functions are emitted, so the numbering is the same on
 //! every run (the reproducibility gate). The runtime's own objects -- a str,
-//! a List -- get their site records at run time instead, from the line the
-//! program last passed to `rt_hw_at`.
+//! a List -- are counted against the line the program last passed to
+//! `rt_hw_at`, when they are sampled.
+//!
+//! All of it is for a heap watch build (`-DRT_HEAPWATCH`): the records and
+//! tables are inside `#if RT_HEAPWATCH`, an allocation names its record as
+//! `RT_HW_TI(site, type)`, and every hook is a macro rt.h makes nothing in
+//! any other build.
 //!
 //! Every line written here that depends on line numbers or site numbers
 //! carries the comment `/*hwsite*/`, or a `_s<N>` name, so a gate that
@@ -70,14 +75,24 @@ impl Sites {
         self.slot.insert((tid, loc), self.order.len() as u32);
     }
 
-    /// The TypeInfo an allocation of `tid` at `loc` names.
+    /// The TypeInfo an allocation of `tid` at `loc` passes: the site's own
+    /// record in a heap watch build, the type's otherwise (rt.h, RT_HW_TI).
     pub fn ti(&self, tid: u32, loc: u32) -> String {
         match self.slot.get(&(tid, loc)) {
-            Some(n) => format!("ti_T{tid}_s{n}"),
+            Some(n) => format!("RT_HW_TI(ti_T{tid}_s{n}, ti_T{tid})"),
             // Not reached: `find` saw every allocation the emitter emits.
-            None => format!("ti_T{tid}"),
+            None => format!("&ti_T{tid}"),
         }
     }
+}
+
+/// What an instruction's code needs from heap watch: the site records, the
+/// line it is at, and whether the object it stores into was just made
+/// (emit_func).
+pub(super) struct At<'a> {
+    pub sites: &'a Sites,
+    pub loc: u32,
+    pub into_fresh: bool,
 }
 
 /// The reference fields of type `i`, for trace to name a holder's slot by:
@@ -130,10 +145,16 @@ pub(super) fn name_literal(t: &TypeDef) -> String {
 
 /// The per-site TypeInfos: the type's own initialiser, with the site's slot
 /// and line. `body` is the part every record of the type shares.
+/// Only a heap watch build has them (`#if RT_HEAPWATCH`).
 pub(super) fn emit_site_infos(o: &mut String, sites: &Sites, tid: usize, tail: &str, body: &str) {
+    let mut any = false;
     for (n, (t, loc)) in sites.order.iter().enumerate() {
         if *t as usize != tid {
             continue;
+        }
+        if !any {
+            any = true;
+            writeln!(o, "#if RT_HEAPWATCH").unwrap();
         }
         let slot = n + 1;
         writeln!(
@@ -143,11 +164,15 @@ pub(super) fn emit_site_infos(o: &mut String, sites: &Sites, tid: usize, tail: &
         )
         .unwrap();
     }
+    if any {
+        writeln!(o, "#endif").unwrap();
+    }
 }
 
 /// The program's source lines and its site records, and the call that hands
-/// them to the runtime from `main`.
+/// them to the runtime from `main`; in a heap watch build only.
 pub(super) fn emit_tables(o: &mut String, m: &Module, sites: &Sites) {
+    writeln!(o, "#if RT_HEAPWATCH").unwrap();
     writeln!(o, "static const RtHwLoc hw_locs[] = {{").unwrap();
     for (file, line) in &m.locs {
         writeln!(
@@ -168,13 +193,14 @@ pub(super) fn emit_tables(o: &mut String, m: &Module, sites: &Sites) {
         }
         writeln!(o, "}};").unwrap();
     }
+    writeln!(o, "#endif").unwrap();
     o.push('\n');
 }
 
-/// The line in `main` that starts heap watch.
+/// The lines in `main` that start heap watch, in a heap watch build.
 pub(super) fn init_call(m: &Module, sites: &Sites) -> String {
     format!(
-        "    rt_hw_program(hw_locs, {}, hw_slots, {}); /*hwsite*/",
+        "#if RT_HEAPWATCH\n    rt_hw_program(hw_locs, {}, hw_slots, {}); /*hwsite*/\n#endif",
         m.locs.len(),
         sites.order.len()
     )

@@ -1,6 +1,7 @@
 /* Heap watch: one ledger for every object (docs/heap-watch-design.md).
  *
- * #included by rt.c, for the reason the sys layer and greenthread.c are: the
+ * #included by rt.c in a heap watch build (-DRT_HEAPWATCH; rt.h), and not
+ * at all otherwise, for the reason the sys layer and greenthread.c are: the
  * runtime stays one translation unit, so every build line keeps naming rt.c
  * alone. It uses the C library directly for the four things the sys layer
  * has no call for -- mmap, ftruncate, a directory listing and the process
@@ -12,8 +13,10 @@
  *     answer comes from counters that allocation and release keep up to
  *     date as they happen.
  *   - Nothing is freed by heap watch. It reports; the program is unchanged.
- *   - O(1) per operation. An allocation and a release each update a fixed
- *     number of counters in the calling thread's own shard.
+ *   - O(1) per operation. An allocation and a release each test a bit or a
+ *     countdown; a sampled one updates a fixed number of counters in the
+ *     calling thread's own shard, and with epoch close on each adds or takes
+ *     one from its epoch's count.
  *
  * The ledger is a file, mapped MAP_SHARED, so a counter update is a plain
  * store into the page cache and the kernel writes it back on its own: the
@@ -21,9 +24,8 @@
  * exit hook involved. `m31c -heapwatch` reads it from a live or a dead
  * process (src/tools/heapwatch.rs, which documents the same layout).
  *
- * Off with M31_HEAPWATCH=0: then nothing is counted and no file is made;
- * an object's header still has its fields, all of them zero but the epoch,
- * which reads "counted against none" (rt.h). */
+ * Off with M31_HEAPWATCH=0: then nothing is counted and no file is made,
+ * and an object's heap watch fields are all zero (rt.h). */
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -88,7 +90,8 @@ typedef struct {
 typedef struct {
     uint32_t minute;    /* the minute this shard's wheels are folded to */
     uint32_t owned;     /* 1 once a thread has it */
-    uint32_t pad[14];
+    uint32_t shared;    /* 1: more threads than shards, this one is locked */
+    uint32_t pad[13];
 } HwShardHead;
 
 /* What a slot counts. Strings are offsets into the string area. */
@@ -142,7 +145,7 @@ typedef struct {
     uint32_t trace_depth;   /* --depth for trace (phase 2) */
     uint32_t edges;         /* trace: edges recorded now */
     uint32_t edges_dropped; /* trace: edges dropped at the cap */
-    uint32_t pad;
+    uint32_t sample_bytes;  /* M31_HEAPWATCH_SAMPLE; 0 in a version-1 file */
     char     program[128];
 } HwHeader;
 
@@ -172,11 +175,20 @@ static int              hw_log_fd = -1;
 /* The program's source lines and its static slots (rt_hw_program). */
 static const RtHwLoc         *hw_locs;
 static uint32_t               hw_nlocs;
-/* The site records made at run time for the runtime's own types: one per
- * (line, kind), published once and never freed -- static data in all but
- * name. */
+/* The slots of the runtime's own types, made at run time: one per (line,
+ * kind), the kind being the column a runtime type's record names in its
+ * `loc` (rt.c: str 1, Array 2 and 3, List 4 and 5, bytes 6, Map 7). 0 until
+ * made; HW_NO_SLOT once the slots ran out. */
 #define HW_KINDS 8
-static const TypeInfo *_Atomic *hw_loc_types;
+#define HW_NO_SLOT UINT32_MAX
+static uint32_t *hw_loc_slots;
+static const char *const hw_kind_names[HW_KINDS] = {
+    "?", "str", "Array", "Array", "List", "List", "bytes", "Map",
+};
+
+/* What is on: the ledger (hw_on), and epoch close with it (hw_epochs_on) --
+ * M31_HEAPWATCH=full, or by default in a test build (rt_hw_program). */
+static bool hw_epochs_on;
 
 /* The line the program is at, for an object the RUNTIME makes on its behalf
  * (a str from concat, a List from a literal). Set by emitted code just
@@ -184,19 +196,21 @@ static const TypeInfo *_Atomic *hw_loc_types;
  * the line belongs to whichever green thread is running on this carrier,
  * and it is set immediately before the call that reads it, with no park in
  * between. */
-static _Thread_local uint32_t hw_loc;
+_Thread_local uint32_t rt_hw_loc;
 
 /* This OS thread's shard, NULL until its first allocation. */
 static _Thread_local HwShardHead *hw_shard;
-static _Thread_local bool         hw_shard_shared;
 
 /* Trace (phase 2) and epoch close (phase 3), below the ledger. */
 static void hw_trace_slot(uint32_t s, uint8_t on);
+static void hw_set_watch(void);
+static void *hw_current_task(void);
+static void hw_epoch_sample(const Obj *o, uint32_t site, int32_t d);
+static uint32_t hw_sample_site(const Obj *o);
 static void hw_trace_suspect(uint32_t s, uint32_t now, uint32_t limit);
 static void hw_control_init(void);
 static void hw_control(void);
-static long hw_epoch_of_new(const TypeInfo *ty);
-static void hw_epoch_free(Obj *o);
+
 static void hw_epoch_store(Obj *h, Obj *v);
 static uint32_t hw_edges_max;
 static uint8_t *hw_edge_sites;
@@ -290,19 +304,24 @@ static unsigned hw_life_bucket(uint32_t age) {
 }
 
 /* This thread's shard, claimed on first use. Past the last shard every
- * further thread shares the last one, under a lock. */
-static HwShardHead *hw_my_shard(void) {
-    HwShardHead *sh = hw_shard;
-    if (sh != NULL) return sh;
+ * further thread shares the last one, under a lock (its `shared`). */
+static HwShardHead *hw_claim_shard(void) {
     uint32_t i = __atomic_fetch_add(&hw_next_shard, 1, __ATOMIC_RELAXED);
+    bool shared = false;
     if (i >= hw_head->n_shards) {
         i = hw_head->n_shards - 1;
-        hw_shard_shared = true;
+        shared = true;
     }
-    sh = (HwShardHead *)(void *)(hw_shards + (size_t)i * hw_head->shard_stride);
+    HwShardHead *sh = (HwShardHead *)(void *)(hw_shards + (size_t)i * hw_head->shard_stride);
     __atomic_store_n(&sh->owned, 1, __ATOMIC_RELAXED);
+    if (shared) __atomic_store_n(&sh->shared, 1, __ATOMIC_RELAXED);
     hw_shard = sh;
     return sh;
+}
+
+static inline HwShardHead *hw_my_shard(void) {
+    HwShardHead *sh = hw_shard;
+    return __builtin_expect(sh != NULL, 1) ? sh : hw_claim_shard();
 }
 
 /* ---- strings and slots -------------------------------------------------- */
@@ -590,139 +609,242 @@ static uint32_t hw_new_slot(const char *type, uint32_t loc) {
     return s;
 }
 
-/* Which of the runtime's own types a canonical record is, as an index into
- * a line's table of site records. */
-static unsigned hw_kind(const TypeInfo *canon) {
-    if (canon == &rt_str_type) return 0;
-    if (canon == &rt_arr_val_type) return 1;
-    if (canon == &rt_arr_ref_type) return 2;
-    if (canon == &rt_lst_val_type) return 3;
-    if (canon == &rt_lst_ref_type) return 4;
-    if (canon == &rt_bytes_type) return 5;
-    if (canon == &rt_map_type) return 6;
-    return 7;
+/* ---- sampling -----------------------------------------------------------
+ *
+ * The ledger does not count every object: it samples them, by bytes, the
+ * way tcmalloc's and heapprofd's heap profilers do. Each thread counts down
+ * the bytes it allocates, and the object that takes the count below zero
+ * is SAMPLED; the next countdown is drawn at random, uniformly between 0
+ * and twice M31_HEAPWATCH_SAMPLE bytes (64 KiB by default), so no loop can
+ * line up with it. A sampled object carries RC_HW_SAMPLED in its count word
+ * (rt.h), and its site, birth minute and WEIGHT -- how many objects of its
+ * size it stands for, M31_HEAPWATCH_SAMPLE / size, at least 1 -- go in the
+ * table below, keyed by its address. The ledger's counters add weights, so
+ * every count it shows is an estimate of the real one, and a site that
+ * keeps objects alive keeps sampled ones alive too: a leak of any size
+ * shows, a small one later than a large one. M31_HEAPWATCH_SAMPLE=1 samples
+ * every object, and every count is exact (the tests' setting).
+ *
+ * What an object that is not sampled costs is the countdown when it is
+ * made and one bit test when it is freed. Its count word and `ty` mean what
+ * they mean without heap watch, so rc_inc, rc_dec and the runtime's type
+ * tests are the same code.
+ *
+ * Epoch close counts every object, and names the sites of the sampled
+ * ones (below, "epoch close"). Trace does not sample: it works from `ty`,
+ * which names the site of every object of a user type (rt.h, TypeInfo) and
+ * the kind of every object of the runtime's own types -- a List, a str --
+ * each kind with a slot of its own (hw_kind_slot) that has no line. */
+#define HW_BIRTH_MAX ((1u << 20) - 1)
+#define HW_BIRTH_FOREVER HW_BIRTH_MAX
+#define HW_SAMPLE_DEFAULT 65536u
+
+static uint32_t hw_kind_slot[HW_KINDS];
+static uint64_t hw_sample_mean = HW_SAMPLE_DEFAULT; /* bytes; 1: every object */
+/* Bytes this thread may still allocate before the next sample. */
+static _Thread_local int64_t  hw_budget;
+static _Thread_local uint64_t hw_rng;
+
+/* The slot epoch close and trace count an object of type record `ty` in:
+ * its site, for a user type; its kind's slot, for one of the runtime's. */
+static inline uint32_t hw_site_of_ty(const TypeInfo *ty) {
+    uint32_t s = ty->site;
+    return s != 0 ? s : hw_kind_slot[ty->loc & (HW_KINDS - 1)];
 }
 
-/* The site record for an object of canonical type `canon` made at the line
- * the program is at. Made on first use and published with a release store,
- * so the common case is one acquire load. A user type reaching here (a
- * canonical record handed to rt_alloc, which the compiler does not do) gets
- * no record of its own and is left uncounted. */
-static _Thread_local const TypeInfo *hw_last_canon;
-static _Thread_local uint32_t        hw_last_loc;
-static _Thread_local const TypeInfo *hw_last_site;
-
-static const TypeInfo *hw_site_type_slow(const TypeInfo *canon);
-
-/* The common case first: the same type at the same line as this thread's
- * last allocation of a runtime type, which is what a loop does. */
-static inline const TypeInfo *hw_site_type(const TypeInfo *canon) {
-    if (canon == hw_last_canon && hw_loc == hw_last_loc) return hw_last_site;
-    const TypeInfo *t = hw_site_type_slow(canon);
-    hw_last_canon = canon;
-    hw_last_loc = hw_loc;
-    hw_last_site = t;
-    return t;
+/* The same for an object: 0 for an immortal, which is never counted. */
+static inline uint32_t hw_site(const Obj *o) {
+    return o->rc == RC_IMMORTAL ? 0 : hw_site_of_ty(o->ty);
 }
 
-static const TypeInfo *hw_site_type_slow(const TypeInfo *canon) {
-    unsigned kind = hw_kind(canon);
-    if (kind == 7) return canon;
-    uint32_t loc = hw_loc < hw_nlocs ? hw_loc : 0;
-    const TypeInfo *_Atomic *cell = &hw_loc_types[(size_t)loc * HW_KINDS + kind];
-    const TypeInfo *t = atomic_load_explicit(cell, memory_order_acquire);
-    if (t != NULL) return t;
+/* The slot of a SAMPLED object of the runtime's own type of column `kind`
+ * made at the line the program is at: made the first time that line makes
+ * that kind. */
+static uint32_t hw_rt_site(uint32_t kind) {
+    if (kind == 0) return 0; /* a user type's own record: not counted */
+    uint32_t loc = rt_hw_loc < hw_nlocs ? rt_hw_loc : 0;
+    uint32_t *cell = &hw_loc_slots[(size_t)loc * HW_KINDS + kind];
+    uint32_t s = __atomic_load_n(cell, __ATOMIC_RELAXED);
+    if (s == HW_NO_SLOT) return 0;
+    if (s != 0) return s;
     pthread_mutex_lock(&hw_lock);
-    t = atomic_load_explicit(cell, memory_order_relaxed);
-    if (t == NULL) {
-        uint32_t s = hw_new_slot(canon->name, loc);
-        if (s == 0) {
-            t = canon;
-        } else {
-            TypeInfo *n = malloc(sizeof *n);
-            if (n == NULL) rt_trap("out of memory");
-            *n = *canon;
-            n->canon = canon;
-            n->site = s;
-            n->loc = loc;
-            t = n;
-        }
-        atomic_store_explicit(cell, t, memory_order_release);
+    s = __atomic_load_n(cell, __ATOMIC_RELAXED);
+    if (s == 0) {
+        s = hw_new_slot(hw_kind_names[kind], loc);
+        __atomic_store_n(cell, s == 0 ? HW_NO_SLOT : s, __ATOMIC_RELAXED);
     }
     pthread_mutex_unlock(&hw_lock);
-    return t;
+    return s == HW_NO_SLOT ? 0 : s;
 }
 
-/* ---- allocation and release ------------------------------------------- */
+/* The table of sampled objects: open addressing on the object's address,
+ * under one lock -- it is touched once per sample, never per object. */
+typedef struct {
+    Obj     *o;       /* NULL: empty; HW_GONE: removed */
+    uint32_t site;
+    uint32_t birth;   /* the minute it was made, or HW_BIRTH_FOREVER */
+    uint32_t weight;  /* how many objects it stands for */
+    uint32_t pad;
+} HwSample;
 
-/* The header bits for a new object of `*typ`, which this may swap for the
- * record of the site the program is at, counting it. */
-static long hw_alloc(const TypeInfo **typ) {
-    const TypeInfo *ty = *typ;
-    if (!hw_on) return 1 | ((long)RC_EPOCH_NONE << RC_EPOCH_SHIFT);
-    if (ty->site == 0) {
-        ty = hw_site_type(ty);
-        *typ = ty;
-    }
-    uint32_t m = hw_now();
-    long epoch = hw_epoch_of_new(ty);
-    if (ty->site != 0) {
-        HwShardHead *sh = hw_my_shard();
-        if (hw_shard_shared) pthread_mutex_lock(&hw_shared_lock);
-        if (sh->minute != m) hw_fold(sh, m);
-        hw_add(&hw_counts(sh)[ty->site].wheel[0][m & (HW_CELLS - 1)], 1);
-        if (hw_shard_shared) pthread_mutex_unlock(&hw_shared_lock);
-    }
-    return 1 | ((long)m << RC_BIRTH_SHIFT) | (epoch << RC_EPOCH_SHIFT);
+#define HW_GONE ((Obj *)(uintptr_t)1)
+static pthread_mutex_t hw_sample_lock = PTHREAD_MUTEX_INITIALIZER;
+static HwSample *hw_samples;
+static size_t    hw_samples_cap, hw_samples_used;
+
+static size_t hw_sample_home(const Obj *o, size_t mask) {
+    uint64_t x = (uint64_t)(uintptr_t)o * 0x9E3779B97F4A7C15ull;
+    return (size_t)(x >> 32) & mask;
 }
 
-/* An object is about to be freed: take it off its birth minute and add its
+/* The entry of `o`, or NULL. Called with hw_sample_lock held. */
+static HwSample *hw_sample_find(const Obj *o) {
+    if (hw_samples_cap == 0) return NULL;
+    size_t mask = hw_samples_cap - 1;
+    for (size_t i = hw_sample_home(o, mask);; i = (i + 1) & mask) {
+        if (hw_samples[i].o == o) return &hw_samples[i];
+        if (hw_samples[i].o == NULL) return NULL;
+    }
+}
+
+/* Called with hw_sample_lock held. */
+static void hw_sample_put(Obj *o, uint32_t site, uint32_t birth, uint32_t weight) {
+    if ((hw_samples_used + 1) * 2 > hw_samples_cap) {
+        size_t cap = hw_samples_cap == 0 ? 1024 : hw_samples_cap;
+        size_t live = 0;
+        for (size_t i = 0; i < hw_samples_cap; i++) live += hw_samples[i].o > HW_GONE;
+        while ((live + 1) * 4 > cap) cap *= 2;
+        HwSample *t = calloc(cap, sizeof *t);
+        if (t == NULL) rt_trap("out of memory");
+        for (size_t i = 0; i < hw_samples_cap; i++) {
+            if (hw_samples[i].o <= HW_GONE) continue;
+            size_t j = hw_sample_home(hw_samples[i].o, cap - 1);
+            while (t[j].o != NULL) j = (j + 1) & (cap - 1);
+            t[j] = hw_samples[i];
+        }
+        free(hw_samples);
+        hw_samples = t;
+        hw_samples_cap = cap;
+        hw_samples_used = live;
+    }
+    size_t mask = hw_samples_cap - 1;
+    size_t i = hw_sample_home(o, mask);
+    while (hw_samples[i].o > HW_GONE) i = (i + 1) & mask;
+    if (hw_samples[i].o == NULL) hw_samples_used++;
+    hw_samples[i] = (HwSample){ o, site, birth, weight, 0 };
+}
+
+/* `w` objects of slot `site` born in minute `m` (or forever) were made
+ * (d = 1) or died (d = -1), on this thread's shard. A death also adds its
  * age to the slot's lifetime histogram. */
-static void hw_free(Obj *o) {
-    if (!hw_on) return;
-    const TypeInfo *ty = o->ty;
-    hw_epoch_free(o);
-    if (__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) hw_trace_free(o);
-    if (ty->site == 0) return;
-    uint32_t m = (uint32_t)((o->rc & RC_BIRTH) >> RC_BIRTH_SHIFT);
+static void hw_count(uint32_t site, uint32_t m, int32_t d, uint32_t w) {
     uint32_t now = hw_now();
     HwShardHead *sh = hw_my_shard();
-    if (hw_shard_shared) pthread_mutex_lock(&hw_shared_lock);
+    bool shared = __atomic_load_n(&sh->shared, __ATOMIC_RELAXED) != 0;
+    if (shared) pthread_mutex_lock(&hw_shared_lock);
     if (sh->minute != now) hw_fold(sh, now);
-    HwCount *c = &hw_counts(sh)[ty->site];
-    if (m == RC_BIRTH_FOREVER) {
-        hw_add(&c->forever, -1);
+    HwCount *c = &hw_counts(sh)[site];
+    if (m == HW_BIRTH_FOREVER) {
+        hw_add(&c->forever, d * (int32_t)w);
     } else {
         if (m > now) m = now;
-        hw_add(hw_cell(c, now, m), -1);
-        hw_addu(&c->life[hw_life_bucket(now - m)], 1);
+        hw_add(hw_cell(c, now, m), d * (int32_t)w);
+        if (d < 0) hw_addu(&c->life[hw_life_bucket(now - m)], w);
     }
-    if (hw_shard_shared) pthread_mutex_unlock(&hw_shared_lock);
+    if (shared) pthread_mutex_unlock(&hw_shared_lock);
 }
 
+/* The next countdown: uniform in [0, 2 x mean), from xorshift64*. */
+static int64_t hw_next_budget(void) {
+    if (hw_sample_mean <= 1) return 0;
+    uint64_t x = hw_rng;
+    if (x == 0) x = (uint64_t)(uintptr_t)&hw_rng ^ (uint64_t)sys_clock_ns(SYS_CLOCK_MONOTONIC) ^ 1;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    hw_rng = x;
+    return (int64_t)((x * 0x2545F4914F6CDD1Dull >> 11) % (2 * hw_sample_mean));
+}
+
+/* The countdown ran out on `o`: sample it, setting RC_HW_SAMPLED and
+ * RC_HW_NOTE, unless it is not counted after all. */
+__attribute__((noinline)) static void hw_sample(Obj *o, size_t size) {
+    const TypeInfo *ty = o->ty;
+    uint32_t site = ty->site;
+    if (site == 0) site = hw_rt_site(ty->loc);
+    if (site == 0) return;
+    uint64_t w = size >= hw_sample_mean ? 1 : (hw_sample_mean + size / 2) / (size ? size : 1);
+    uint32_t weight = w > (1u << 24) ? (1u << 24) : (uint32_t)w;
+    uint32_t m = hw_now();
+    pthread_mutex_lock(&hw_sample_lock);
+    hw_sample_put(o, site, m, weight);
+    pthread_mutex_unlock(&hw_sample_lock);
+    hw_count(site, m, 1, weight);
+    o->rc |= RC_HW_SAMPLED | RC_HW_NOTE;
+    if (hw_epochs_on) hw_epoch_sample(o, site, 1);
+}
+
+/* A sampled object is being freed: out of the table, and counted dead. */
+static void hw_unsample(Obj *o) {
+    pthread_mutex_lock(&hw_sample_lock);
+    HwSample *e = hw_sample_find(o);
+    HwSample got = e != NULL ? *e : (HwSample){ 0 };
+    if (e != NULL) e->o = HW_GONE;
+    pthread_mutex_unlock(&hw_sample_lock);
+    if (got.o == NULL) return;
+    hw_count(got.site, got.birth, -1, got.weight);
+    if (hw_epochs_on) hw_epoch_sample(o, got.site, -1);
+}
+
+/* When `o` was made, if it was sampled; otherwise the minute it is now,
+ * which it is at least as old as. For trace's edges. */
+static uint32_t hw_birth(const Obj *o) {
+    uint32_t b = hw_now();
+    if (o->rc == RC_IMMORTAL) return HW_BIRTH_FOREVER;
+    if ((o->rc & RC_HW_SAMPLED) == 0) return b;
+    pthread_mutex_lock(&hw_sample_lock);
+    HwSample *e = hw_sample_find(o);
+    if (e != NULL) b = e->birth;
+    pthread_mutex_unlock(&hw_sample_lock);
+    return b;
+}
+
+/* rt_alloc's and rc_release's hooks, hw_countdown, hw_alloc and hw_free,
+ * are below with epoch close, which they mostly are. */
+
+#if !(defined(__x86_64__) && defined(__linux__))
 void rt_hw_at(uint32_t loc) {
-    hw_loc = loc;
+    rt_hw_loc = loc;
 }
+#endif
 
-/* heapwatch.forever(x): move `o` from its birth minute to the slot's
- * forever count, and mark it so its release takes it from there. Exempt
- * from age, and from nothing else. */
+/* heapwatch.forever(x): a sampled `o` moves from its birth minute to its
+ * slot's forever count, and its release takes it from there; trace's edges
+ * to it stop counting as old. Exempt from age, and from nothing else. */
 void rt_hw_forever(Obj *o) {
     if (o == NULL || o->rc == RC_IMMORTAL || !hw_on) return;
-    uint32_t m = (uint32_t)((o->rc & RC_BIRTH) >> RC_BIRTH_SHIFT);
-    if (m == RC_BIRTH_FOREVER) return;
-    if (o->ty->site != 0) {
-        uint32_t now = hw_now();
-        HwShardHead *sh = hw_my_shard();
-        if (hw_shard_shared) pthread_mutex_lock(&hw_shared_lock);
-        if (sh->minute != now) hw_fold(sh, now);
-        HwCount *c = &hw_counts(sh)[o->ty->site];
-        if (m > now) m = now;
-        hw_add(hw_cell(c, now, m), -1);
-        hw_add(&c->forever, 1);
-        if (hw_shard_shared) pthread_mutex_unlock(&hw_shared_lock);
+    if ((o->rc & RC_HW_SAMPLED) != 0) {
+        pthread_mutex_lock(&hw_sample_lock);
+        HwSample *e = hw_sample_find(o);
+        HwSample got = { 0 };
+        if (e != NULL && e->birth != HW_BIRTH_FOREVER) {
+            got = *e;
+            e->birth = HW_BIRTH_FOREVER;
+        }
+        pthread_mutex_unlock(&hw_sample_lock);
+        if (got.o != NULL) {
+            /* Out of its minute's cell, without dying: not an age. */
+            uint32_t now = hw_now();
+            HwShardHead *sh = hw_my_shard();
+            bool shared = __atomic_load_n(&sh->shared, __ATOMIC_RELAXED) != 0;
+            if (shared) pthread_mutex_lock(&hw_shared_lock);
+            if (sh->minute != now) hw_fold(sh, now);
+            HwCount *c = &hw_counts(sh)[got.site];
+            hw_add(hw_cell(c, now, got.birth > now ? now : got.birth), -(int32_t)got.weight);
+            hw_add(&c->forever, (int32_t)got.weight);
+            if (shared) pthread_mutex_unlock(&hw_shared_lock);
+        }
     }
-    o->rc |= RC_BIRTH;
     if (__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) hw_trace_owner(o, NULL, true);
 }
 
@@ -939,7 +1061,7 @@ void rt_hw_tick(void) {
         return;
     }
     uint64_t m64 = (now_ns - hw_start_ns) / hw_minute_ns;
-    uint32_t m = m64 >= RC_BIRTH_MAX - 1 ? RC_BIRTH_MAX - 1 : (uint32_t)m64;
+    uint32_t m = m64 >= HW_BIRTH_MAX - 1 ? HW_BIRTH_MAX - 1 : (uint32_t)m64;
     if (now_ns - hw_last_second_ns >= 1000000000ull) {
         hw_last_second_ns = now_ns;
         __atomic_store_n(&hw_head->tick_unix, sys_clock_ns(SYS_CLOCK_REALTIME) / 1000000000,
@@ -1041,8 +1163,25 @@ static void hw_exit(void);
  * the program's first statement. */
 void rt_hw_program(const RtHwLoc *locs, uint32_t nlocs, const TypeInfo *const *slots,
                    uint32_t nslots) {
-    const char *off = getenv("M31_HEAPWATCH");
-    if (off != NULL && strcmp(off, "0") == 0) return;
+    /* M31_HEAPWATCH: 0 (off), ledger, or full -- the ledger and epoch
+     * close. The ledger alone by default, and full in a test build, whose
+     * epoch close traps on a leaked cycle (below). */
+    const char *mode = getenv("M31_HEAPWATCH");
+#ifdef RC_DEBUG
+    bool epochs = true;
+#else
+    bool epochs = false;
+#endif
+    if (mode != NULL && *mode != 0) {
+        if (strcmp(mode, "0") == 0 || strcmp(mode, "off") == 0) return;
+        if (strcmp(mode, "ledger") == 0) {
+            epochs = false;
+        } else if (strcmp(mode, "full") == 0 || strcmp(mode, "1") == 0) {
+            epochs = true;
+        } else {
+            hw_warn("M31_HEAPWATCH (it is 0, ledger or full)", mode);
+        }
+    }
     if (hw_on) return;
     hw_locs = locs;
     hw_nlocs = nlocs;
@@ -1125,8 +1264,8 @@ void rt_hw_program(const RtHwLoc *locs, uint32_t nlocs, const TypeInfo *const *s
     hw_epochs = (HwEpochRow *)(void *)(hw_base + off_epochs);
     hw_shards = hw_base + off_shards;
 
-    hw_loc_types = calloc((size_t)(nlocs > 0 ? nlocs : 1) * HW_KINDS, sizeof *hw_loc_types);
-    if (hw_loc_types == NULL) rt_trap("out of memory");
+    hw_loc_slots = calloc((size_t)(nlocs > 0 ? nlocs : 1) * HW_KINDS, sizeof *hw_loc_slots);
+    if (hw_loc_slots == NULL) rt_trap("out of memory");
 
     HwHeader *h = hw_head;
     h->version = HW_VERSION;
@@ -1171,6 +1310,16 @@ void rt_hw_program(const RtHwLoc *locs, uint32_t nlocs, const TypeInfo *const *s
     if (conf != NULL && *conf != 0) hw_read_conf(conf);
     hw_each_entry(getenv("M31_HEAPWATCH_TRACE"), hw_add_trace_spec);
 
+    /* M31_HEAPWATCH_SAMPLE: the mean bytes between samples; 1 counts
+     * every object (rt.h, RC_HW_SAMPLED), a test build's default. */
+#ifdef RC_DEBUG
+    hw_sample_mean = hw_env_u32("M31_HEAPWATCH_SAMPLE", 1, 1, 1u << 30);
+#else
+    hw_sample_mean = hw_env_u32("M31_HEAPWATCH_SAMPLE", HW_SAMPLE_DEFAULT, 1, 1u << 30);
+#endif
+    h->sample_bytes = (uint32_t)hw_sample_mean;
+    hw_budget = 0; /* this thread's first allocation starts its countdown */
+
     pthread_mutex_lock(&hw_lock);
     for (uint32_t i = 0; i < nslots; i++) {
         const TypeInfo *t = slots[i];
@@ -1179,10 +1328,21 @@ void rt_hw_program(const RtHwLoc *locs, uint32_t nlocs, const TypeInfo *const *s
         uint32_t s = hw_new_slot(t->name, t->loc);
         if (s != t->site) rt_trap("internal: heap watch slot table out of order");
     }
+    /* A slot for each of the runtime's own kinds, for epoch close and
+     * trace, which know an object of one by its kind and not its line. */
+    for (uint32_t k = 1; k < HW_KINDS; k++) {
+        if (k == 3 || k == 5) {
+            hw_kind_slot[k] = hw_kind_slot[k - 1]; /* an Array, a List, of refs */
+            continue;
+        }
+        hw_kind_slot[k] = hw_new_slot(hw_kind_names[k], 0);
+    }
     pthread_mutex_unlock(&hw_lock);
     /* The magic last, so a reader never sees a half-made header. */
     __atomic_store_n(&h->magic[0], 'M', __ATOMIC_RELAXED);
     memcpy(h->magic + 1, "31HWLDG", 7);
+    hw_epochs_on = epochs;
+    hw_set_watch();
     hw_on = true;
     atexit(hw_exit);
 }
@@ -1252,7 +1412,15 @@ typedef struct {
 } HwMap;
 
 static pthread_mutex_t hw_trace_lock = PTHREAD_MUTEX_INITIALIZER;
-uint8_t                rt_hw_tracing;      /* read inline by emitted stores */
+uint8_t                rt_hw_tracing;      /* trace is on for some slot */
+uint8_t                rt_hw_watch;        /* read inline by emitted stores (rt.h) */
+
+/* rt_hw_watch from what is on: epoch close, and trace for anything. */
+static void hw_set_watch(void) {
+    unsigned w = (hw_epochs_on ? RT_HW_WATCH_EPOCHS : 0u) |
+                 (__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED) ? RT_HW_WATCH_TRACE : 0u);
+    __atomic_store_n(&rt_hw_watch, (uint8_t)w, __ATOMIC_RELAXED);
+}
 static uint32_t        hw_traced_slots;    /* how many slots trace is on for */
 static HwEdge         *hw_edges;
 static uint32_t        hw_edges_cap, hw_edges_used, hw_edge_free = UINT32_MAX;
@@ -1266,8 +1434,9 @@ static int             hw_trace_fd = -1;
 static uint8_t        *hw_edge_sites;
 
 static inline bool hw_may_have_edges(const Obj *o) {
-    return hw_edge_sites != NULL && o->ty->site != 0 &&
-           __atomic_load_n(&hw_edge_sites[o->ty->site], __ATOMIC_RELAXED) != 0;
+    uint32_t s = hw_site(o);
+    return hw_edge_sites != NULL && s != 0 &&
+           __atomic_load_n(&hw_edge_sites[s], __ATOMIC_RELAXED) != 0;
 }
 
 static uint64_t hw_mix(uintptr_t a, uintptr_t b) {
@@ -1416,11 +1585,14 @@ static void hw_edge_add(Obj *h, Obj *v, uint32_t where) {
     x->v = v;
     x->where = where;
     x->count = 1;
-    x->birth = (uint32_t)((v->rc & RC_BIRTH) >> RC_BIRTH_SHIFT);
-    x->task = rt_hw_task_slot != NULL ? *rt_hw_task_slot : NULL;
+    x->birth = hw_birth(v);
+    x->task = hw_current_task();
+    /* Their releases must take this edge out again (rt.h, RC_HW_NOTE). */
+    if (h->rc != RC_IMMORTAL) h->rc |= RC_HW_NOTE;
+    if (v->rc != RC_IMMORTAL) v->rc |= RC_HW_NOTE;
     if (hw_edge_sites != NULL) {
-        __atomic_store_n(&hw_edge_sites[h->ty->site], 1, __ATOMIC_RELAXED);
-        __atomic_store_n(&hw_edge_sites[v->ty->site], 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&hw_edge_sites[hw_site(h)], 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&hw_edge_sites[hw_site(v)], 1, __ATOMIC_RELAXED);
     }
     x->hprev = x->vprev = -1;
     x->hnext = hw_map_get(&hw_by_holder, (uintptr_t)h, 0);
@@ -1436,18 +1608,19 @@ static void hw_edge_add(Obj *h, Obj *v, uint32_t where) {
 /* An immortal is never traced: its record is a type's own, site 0. Only
  * `ty` is read, which never changes once an object is made. */
 static bool hw_is_traced(const Obj *v) {
-    return v != NULL && v->ty->site != 0 &&
-           __atomic_load_n(&hw_traced[v->ty->site], __ATOMIC_RELAXED) != 0;
+    if (v == NULL) return false;
+    uint32_t s = hw_site(v);
+    return s != 0 && __atomic_load_n(&hw_traced[s], __ATOMIC_RELAXED) != 0;
 }
 
-/* `o` changes hands (a send, a receive) or its birth changes (forever):
+/* `o` changes hands (a send, a receive) or is marked forever (`birth`):
  * bring its edges' copies up to date. */
 static void hw_trace_owner(Obj *o, void *task, bool birth) {
     if (!hw_may_have_edges(o)) return;
     pthread_mutex_lock(&hw_trace_lock);
     for (int32_t e = hw_map_get(&hw_by_value, (uintptr_t)o, 0); e >= 0; e = hw_edges[e].vnext) {
         if (birth) {
-            hw_edges[e].birth = (uint32_t)((o->rc & RC_BIRTH) >> RC_BIRTH_SHIFT);
+            hw_edges[e].birth = HW_BIRTH_FOREVER;
         } else {
             hw_edges[e].task = task;
         }
@@ -1503,12 +1676,13 @@ static void hw_trace_slot(uint32_t s, uint8_t on) {
     uint32_t n = on ? __atomic_add_fetch(&hw_traced_slots, 1, __ATOMIC_RELAXED)
                     : __atomic_sub_fetch(&hw_traced_slots, 1, __ATOMIC_RELAXED);
     __atomic_store_n(&rt_hw_tracing, n != 0, __ATOMIC_RELAXED);
+    hw_set_watch();
     if (on) return;
     /* Off: forget the edges to its objects, so the table only holds what a
      * report could still print. */
     pthread_mutex_lock(&hw_trace_lock);
     for (uint32_t e = 0; e < hw_edges_used; e++) {
-        if (hw_edges[e].v != NULL && hw_edges[e].v->ty->site == s) hw_edge_remove((int32_t)e);
+        if (hw_edges[e].v != NULL && hw_site_of_ty(hw_edges[e].v->ty) == s) hw_edge_remove((int32_t)e);
     }
     pthread_mutex_unlock(&hw_trace_lock);
 }
@@ -1518,18 +1692,18 @@ static void hw_trace_slot(uint32_t s, uint8_t on) {
  * anything, or when the value must be adopted into an older epoch. */
 void rt_hw_store_slow(Obj *h, Obj *v, uint32_t where) {
     if (!hw_on || v == NULL) return;
-    hw_epoch_store(h, v);
+    if (hw_epochs_on) hw_epoch_store(h, v);
     if (__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) hw_trace_store(h, v, where);
 }
 
 /* Element `i` of List or Array `o` is about to be `v`. */
 void rt_hw_store_elem_slow(Obj *o, int64_t i, Obj *v) {
     if (!hw_on || v == NULL) return;
-    hw_epoch_store(o, v);
+    if (hw_epochs_on) hw_epoch_store(o, v);
     if (!__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) return;
     int64_t n = rt_len_of(o);
     if (i >= 0 && i < n) {
-        int64_t *d = rt_is_list(o) ? ((Lst *)o)->data : ((Arr *)o)->data;
+        int64_t *d = is_list(o) ? ((Lst *)o)->data : ((Arr *)o)->data;
         Obj *old = (Obj *)(intptr_t)d[i];
         if (old != NULL) hw_trace_unstore(o, old, HW_WHERE_ELEM);
     }
@@ -1560,10 +1734,10 @@ void rt_hw_fresh(Obj *o) {
  * for a `const` -- holds its elements with no store the hook saw. */
 static void hw_fresh_collection(Obj *o) {
     if (!hw_on) return;
-    const TypeInfo *c = o->ty->canon;
+    const TypeInfo *c = o->ty;
     if (c == &rt_arr_ref_type || c == &rt_lst_ref_type) {
         int64_t n = rt_len_of(o);
-        int64_t *d = rt_is_list(o) ? ((Lst *)o)->data : ((Arr *)o)->data;
+        int64_t *d = is_list(o) ? ((Lst *)o)->data : ((Arr *)o)->data;
         for (int64_t i = 0; i < n; i++) {
             Obj *v = (Obj *)(intptr_t)d[i];
             if (v != NULL) hw_trace_store(o, v, HW_WHERE_ELEM);
@@ -1616,9 +1790,24 @@ static void hw_slot_name(char *buf, size_t cap, const Obj *h, uint32_t where) {
     }
 }
 
+/* The slot a report names `o` by: its sample's, if it is sampled -- which
+ * knows the line one of the runtime's own types was made at -- and its
+ * type record's otherwise. It reads no count word: a report runs on any
+ * thread, and `o` may be another's. */
+static uint32_t hw_report_slot(const Obj *o) {
+    pthread_mutex_lock(&hw_sample_lock);
+    HwSample *e = hw_sample_find(o);
+    uint32_t s = e != NULL ? e->site : 0;
+    pthread_mutex_unlock(&hw_sample_lock);
+    return s != 0 ? s : hw_site_of_ty(o->ty);
+}
+
+/* Where `o` was made: its line, for a user type or a sampled object;
+ * otherwise "?", for one of the runtime's own types, which only a sample
+ * knows the line of. */
 static void hw_site_text(char *buf, size_t cap, const Obj *o) {
-    uint32_t s = o->ty->site;
-    if (s == 0) {
+    uint32_t s = hw_report_slot(o);
+    if (s == 0 || hw_slots[s].line == 0) {
         snprintf(buf, cap, "?");
         return;
     }
@@ -1653,10 +1842,10 @@ static void hw_paths(char *out, size_t cap, size_t *len, Obj *v, Obj **path, int
                                  name, site, cycle ? "  <- cycle" : "");
         if (cycle || at + 1 >= HW_PATH_MAX) continue;
         if (!hw_is_traced(x->h)) {
-            if (at + 1 < depth && x->h->ty->site != 0) {
+            if (at + 1 < depth && hw_site_of_ty(x->h->ty) != 0) {
                 /* --depth: trace the holder's site from now on (turning a
                  * slot on takes no lock), so its own holders show next. */
-                hw_trace_slot(x->h->ty->site, 1);
+                hw_trace_slot(hw_site_of_ty(x->h->ty), 1);
                 *len += (size_t)snprintf(out + *len, cap - *len,
                                          "  %*s(untraced holder: trace is now on for %s %s)\n",
                                          2 * at + 2, "", x->h->ty->name, site);
@@ -1692,7 +1881,7 @@ static void hw_trace_report(uint32_t s, const char *header, HwPick pick, const v
     pthread_mutex_lock(&hw_trace_lock);
     for (uint32_t e = 0; e < hw_edges_used && objects < 100000; e++) {
         Obj *v = hw_edges[e].v;
-        if (v == NULL || v->ty->site != s) continue;
+        if (v == NULL || (hw_site_of_ty(v->ty) != s && hw_report_slot(v) != s)) continue;
         /* Once per object: at the head of its list of holders. */
         if (hw_edges[e].vprev >= 0) continue;
         if (!pick(&hw_edges[e], arg)) continue;
@@ -1760,7 +1949,7 @@ typedef struct {
 } HwOld;
 
 static bool hw_pick_old(const HwEdge *x, const void *arg) {
-    return x->birth != RC_BIRTH_FOREVER && x->birth <= ((const HwOld *)arg)->born_by;
+    return x->birth != HW_BIRTH_FOREVER && x->birth <= ((const HwOld *)arg)->born_by;
 }
 
 static bool hw_pick_all(const HwEdge *x, const void *arg) {
@@ -1890,58 +2079,98 @@ static void hw_control(void) {
  * cycle. It is reported then -- the suspect log, the ledger's epoch table,
  * trace's paths for traced sites -- and in a test build it traps.
  *
- * The rows belong to the task, not the thread: a green thread keeps its
- * own (HwTask, reached through the scheduler's per-green-thread slot), and
- * every object is the task's that made or received it -- the move rule
- * means no two tasks ever reach one object. The row of a depth is a small
- * open-addressed table, site -> count. */
+ * What an epoch counts is how many of its objects are alive: one more as
+ * each is made, one fewer as each is freed -- a single counter, kept in
+ * the green thread itself for the innermost epoch (HwHot), so that is all
+ * an allocation and a release do. Which SITES the survivors were made at
+ * is known for the sampled ones (above, "sampling"), which each epoch also
+ * counts by site in a small table; with M31_HEAPWATCH_SAMPLE=1, a test
+ * build's default, every object is sampled and the report names every
+ * site exactly. Otherwise it gives the exact number left and the sites of
+ * the sampled ones among them, and trace, if it is on for the type, who
+ * holds them.
+ *
+ * The books belong to the task, not the thread: a green thread keeps its
+ * own (HwHot and HwTask, reached through the scheduler's per-green-thread
+ * slot), and every object is the task's that made or received it -- the
+ * move rule means no two tasks ever reach one object. */
 
 typedef struct {
     uint32_t site;   /* 0: empty */
     int32_t  count;
 } HwCell;
 
+/* One open epoch: how many of its objects are alive (`live`, while it is
+ * not the innermost; the innermost's is in HwHot), and its sampled ones by
+ * site, an open-addressed table. */
 typedef struct {
-    HwCell  *cells;  /* open addressing, home cell `site & (cap - 1)` */
+    HwCell  *cells;  /* home cell `site & (cap - 1)` */
     uint32_t cap;    /* a power of two, or 0 */
     uint32_t used;
+    int64_t  live;
     char     name[48];
 } HwRow;
+
+typedef struct HwHot HwHot;
 
 typedef struct {
     uint32_t depth;     /* the innermost open epoch; 0 is the task itself */
     uint32_t overflow;  /* blocks nested past the deepest depth counted */
     uint32_t cap;
     HwRow   *rows;
+    HwHot   *hot;
 } HwTask;
+
+/* What every allocation and release of the task reads, kept in the green
+ * thread itself (scheduler.c, rt_green's `hw`: three words, all zero for a
+ * task that has not started counting): the innermost epoch's live count
+ * and depth. */
+struct HwHot {
+    int64_t  live;
+    uint32_t depth;
+    uint32_t pad;
+    HwTask  *task;   /* NULL until the task needs more than the above */
+};
+
+_Static_assert(sizeof(HwHot) <= 3 * sizeof(void *), "rt_green's hw is three words");
 
 #define HW_MAX_DEPTH 61
 
-/* The current green thread's slot for its HwTask (scheduler.c sets it
- * around each dispatch); NULL on a thread that is not running a task. */
-_Thread_local void **rt_hw_task_slot;
+/* The running green thread's HwHot (scheduler.c sets it around each
+ * dispatch); NULL on a thread that is not running a task. */
+_Thread_local void *rt_hw_task_slot;
 
 static bool hw_trap_on_leak;
 
-static HwTask *hw_task_new(void **slot);
-
-/* The running task's books, made on its first use; NULL outside a task. */
-static inline HwTask *hw_task(void) {
-    void **slot = rt_hw_task_slot;
-    if (slot == NULL) return NULL;
-    HwTask *t = *slot;
-    return t != NULL ? t : hw_task_new(slot);
+/* The EPOCH field of an object made now, in place in a count word. */
+static inline long hw_hot_bits(const HwHot *h) {
+    return (long)(62 - h->depth) << RC_EPOCH_SHIFT;
 }
 
-static HwTask *hw_task_new(void **slot) {
+static HwTask *hw_task_new(HwHot *h) {
     HwTask *t = calloc(1, sizeof *t);
     if (t == NULL) rt_trap("out of memory");
     t->cap = 4;
     t->rows = calloc(t->cap, sizeof *t->rows);
     if (t->rows == NULL) rt_trap("out of memory");
     snprintf(t->rows[0].name, sizeof t->rows[0].name, "task");
-    *slot = t;
+    t->depth = h->depth;
+    t->hot = h;
+    h->task = t;
     return t;
+}
+
+/* The running task's books, made on their first use; NULL outside a task. */
+static inline HwTask *hw_task(void) {
+    HwHot *h = rt_hw_task_slot;
+    if (h == NULL) return NULL;
+    return h->task != NULL ? h->task : hw_task_new(h);
+}
+
+/* The running task's books, as trace's edges name an owner. */
+static void *hw_current_task(void) {
+    HwHot *h = rt_hw_task_slot;
+    return h != NULL ? h->task : NULL;
 }
 
 static void hw_row_add_slow(HwRow *r, uint32_t site, int32_t d) {
@@ -1981,14 +2210,6 @@ static inline void hw_row_add(HwRow *r, uint32_t site, int32_t d) {
     hw_row_add_slow(r, site, d);
 }
 
-/* The row an object with EPOCH field `e` is counted in, if it is one of
- * this task's open epochs. */
-static HwRow *hw_row_of(HwTask *t, unsigned e) {
-    if (t == NULL || e == RC_EPOCH_TRANSIT || e == RC_EPOCH_NONE) return NULL;
-    unsigned depth = 62 - e;
-    return depth <= t->depth ? &t->rows[depth] : NULL;
-}
-
 static inline unsigned hw_epoch_bits(const Obj *o) {
     return (unsigned)(((unsigned long)o->rc >> RC_EPOCH_SHIFT) & 63);
 }
@@ -1997,25 +2218,135 @@ static inline void hw_set_epoch(Obj *o, unsigned e) {
     o->rc = (o->rc & ~RC_EPOCH) | ((long)e << RC_EPOCH_SHIFT);
 }
 
-static long hw_epoch_of_new(const TypeInfo *ty) {
+/* The depth of EPOCH field `e`, if it is one of this task's open epochs;
+ * -1 otherwise (in transit, counted against none, or closed). */
+static int hw_open_depth(const HwHot *h, unsigned e) {
+    if (h == NULL || e == RC_EPOCH_TRANSIT || e == RC_EPOCH_NONE) return -1;
+    unsigned depth = 62 - e;
+    return depth <= h->depth ? (int)depth : -1;
+}
+
+/* One more, or fewer, alive in the epoch at `depth`. */
+static void hw_live_add(HwHot *h, int depth, int64_t d) {
+    if (depth < 0) return;
+    if ((uint32_t)depth == h->depth) {
+        h->live += d;
+    } else {
+        hw_task()->rows[depth].live += d;
+    }
+}
+
+/* The sampled object `o` of slot `site` is counted in its epoch's table, or
+ * taken out of it (d = -1). */
+static void hw_epoch_sample(const Obj *o, uint32_t site, int32_t d) {
+    HwHot *h = rt_hw_task_slot;
+    int depth = hw_open_depth(h, hw_epoch_bits(o));
+    if (depth < 0 || site == 0) return;
     HwTask *t = hw_task();
-    if (t == NULL) return RC_EPOCH_NONE;
-    if (ty->site != 0) hw_row_add(&t->rows[t->depth], ty->site, 1);
-    return 62 - (long)t->depth;
+    hw_row_add(&t->rows[depth], site, d);
 }
 
-static void hw_epoch_free(Obj *o) {
-    if (o->ty->site == 0) return;
-    void **slot = rt_hw_task_slot;
-    if (slot == NULL) return;
-    HwRow *r = hw_row_of(*slot, hw_epoch_bits(o));
-    if (r != NULL) hw_row_add(r, o->ty->site, -1);
+/* The slot a sampled object is counted in, for moving it between epochs. */
+static uint32_t hw_sample_site(const Obj *o) {
+    if ((o->rc & RC_HW_SAMPLED) == 0) return 0;
+    pthread_mutex_lock(&hw_sample_lock);
+    HwSample *e = hw_sample_find(o);
+    uint32_t s = e != NULL ? e->site : 0;
+    pthread_mutex_unlock(&hw_sample_lock);
+    return s;
 }
 
-/* Move `v`, and everything it reaches that is younger than `target`, to
- * epoch field `target`: out of the row it was counted in and into
- * `target`'s (none, for kept). The walk stops at anything already as old as
- * the target, so it is bounded by the objects that move -- each at most once
+/* ---- rt_alloc's and rc_release's hooks ----------------------------------
+ *
+ * What an object costs that is not sampled, with the ledger alone: the
+ * countdown in rt_alloc, before malloc so nothing is kept across it; a test
+ * of hw_epochs_on after it; and one bit test in rc_release. With epoch
+ * close on, each also adds or takes one from the innermost epoch's count. */
+
+/* Count `size` bytes down: true when the object about to be made is the
+ * one that takes the count below zero -- it is sampled -- or when epoch
+ * close is on, which keeps the count below zero, because it counts every
+ * object; its sampling countdown is then hw_sample_left. */
+static _Thread_local int64_t hw_sample_left;
+#define HW_ALWAYS (INT64_MIN / 2)
+
+static inline bool hw_countdown(size_t size) {
+    int64_t left = hw_budget - (int64_t)size;
+    hw_budget = left;
+    return __builtin_expect(left < 0, 0);
+}
+
+/* rt_alloc for an object hw_countdown picked out. */
+__attribute__((noinline)) static Obj *hw_alloc_counted(size_t size, const TypeInfo *ty) {
+    Obj *o = malloc(size);
+    if (o == NULL) rt_trap("out of memory");
+    o->ty = ty;
+    o->rc = 1;
+    RC_TRACK_ALLOC();
+    if (!hw_on) {
+        hw_budget = INT64_MAX; /* rt_hw_program starts this thread's again */
+        return o;
+    }
+    int64_t *countdown = &hw_budget;
+    if (hw_epochs_on) {
+        HwHot *h = rt_hw_task_slot;
+        long rc = 1 | RC_HW_NOTE | (long)RC_EPOCH_NONE << RC_EPOCH_SHIFT;
+        if (h != NULL) {
+            h->live++;
+            rc = 1 | RC_HW_NOTE | hw_hot_bits(h);
+        }
+        o->rc = rc;
+        hw_budget = HW_ALWAYS;
+        countdown = &hw_sample_left;
+        int64_t left = hw_sample_left - (int64_t)size;
+        hw_sample_left = left;
+        if (__builtin_expect(left >= 0, 1)) return o;
+    }
+    if (hw_rng == 0 && hw_sample_mean > 1) {
+        /* A thread's first sample only starts its countdown, at a random
+         * point like every other. */
+        *countdown = hw_next_budget();
+        return o;
+    }
+    *countdown = hw_next_budget();
+    hw_sample(o, size);
+    return o;
+}
+
+/* Trace's and the sample table's part of a release. */
+static void hw_free_rest(Obj *o) {
+    if (__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) hw_trace_free(o);
+    if ((o->rc & RC_HW_SAMPLED) != 0) hw_unsample(o);
+}
+
+/* A release of an object with RC_HW_NOTE that is not the common case of
+ * the innermost epoch's, unsampled, with trace off. */
+__attribute__((noinline)) static void hw_free_slow(Obj *o) {
+    if (hw_epochs_on) {
+        HwHot *h = rt_hw_task_slot;
+        hw_live_add(h, hw_open_depth(h, hw_epoch_bits(o)), -1);
+    }
+    hw_free_rest(o);
+}
+
+static inline void hw_free(Obj *o) {
+    long rc = o->rc;
+    if (__builtin_expect((rc & RC_HW_NOTE) == 0, 1)) return;
+    HwHot *h = rt_hw_task_slot;
+    if (h != NULL && (rc & (RC_EPOCH | RC_HW_SAMPLED)) == hw_hot_bits(h) &&
+        __atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED) == 0) {
+        h->live--;
+        return;
+    }
+    hw_free_slow(o);
+}
+
+/* ---- moving between epochs ---------------------------------------------
+ *
+ * Move `v`, and everything it reaches that is younger than `target`, to
+ * epoch field `target`: out of the count it was in and into `target`'s
+ * (none, for kept). The walk stops at anything already as old as the
+ * target, so it is bounded by the objects that move -- each at most once
  * per epoch it climbs -- and never visits the rest of the heap. */
 typedef struct {
     Obj    *small[32];
@@ -2044,28 +2375,31 @@ static void hw_spread_visit(void *ctx, Obj *c) {
 }
 
 static void hw_adopt(Obj *v, unsigned target) {
-    HwTask *t = hw_task();
+    HwHot *h = rt_hw_task_slot;
     HwSpread w;
     w.todo = w.small;
     w.len = 0;
     w.cap = sizeof w.small / sizeof w.small[0];
     w.target = target;
     hw_spread_visit(&w, v);
+    int to = hw_open_depth(h, target);
     while (w.len > 0) {
         Obj *o = w.todo[--w.len];
         unsigned e = hw_epoch_bits(o);
         if (e >= target) continue; /* reached twice; moved the first time */
-        if (o->ty->site != 0) {
-            HwRow *from = hw_row_of(t, e);
-            if (from != NULL) hw_row_add(from, o->ty->site, -1);
-            HwRow *to = hw_row_of(t, target);
-            if (to != NULL) hw_row_add(to, o->ty->site, 1);
+        if (h != NULL) {
+            hw_live_add(h, hw_open_depth(h, e), -1);
+            hw_live_add(h, to, 1);
         }
+        uint32_t site = hw_sample_site(o);
+        if (site != 0) hw_epoch_sample(o, site, -1);
         /* Out of transit: this task's now, edges and all. */
         if (e == RC_EPOCH_TRANSIT && __atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) {
-            hw_trace_owner(o, t, false);
+            hw_trace_owner(o, hw_current_task(), false);
         }
         hw_set_epoch(o, target);
+        o->rc |= RC_HW_NOTE;
+        if (site != 0) hw_epoch_sample(o, site, 1);
         if (o->ty->walk != NULL) o->ty->walk(o, hw_spread_visit, &w);
     }
     if (w.todo != w.small) free(w.todo);
@@ -2083,8 +2417,8 @@ static void hw_epoch_store(Obj *h, Obj *v) {
  * is counted, out of this task's books. Its uniqueness was just checked, so
  * nothing else here reaches any of it. */
 void rt_hw_send(Obj *v) {
-    if (!hw_on || v == NULL || v->rc == RC_IMMORTAL) return;
-    HwTask *t = hw_task();
+    if (!hw_epochs_on || v == NULL || v->rc == RC_IMMORTAL) return;
+    HwHot *h = rt_hw_task_slot;
     HwSpread w;
     w.todo = w.small;
     w.len = 0;
@@ -2095,10 +2429,9 @@ void rt_hw_send(Obj *v) {
         Obj *o = w.todo[--w.len];
         unsigned e = hw_epoch_bits(o);
         if (e == RC_EPOCH_TRANSIT || e == RC_EPOCH_NONE) continue;
-        if (o->ty->site != 0) {
-            HwRow *from = hw_row_of(t, e);
-            if (from != NULL) hw_row_add(from, o->ty->site, -1);
-        }
+        if (h != NULL) hw_live_add(h, hw_open_depth(h, e), -1);
+        uint32_t site = hw_sample_site(o);
+        if (site != 0) hw_epoch_sample(o, site, -1);
         hw_set_epoch(o, RC_EPOCH_TRANSIT);
         if (__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) hw_trace_owner(o, NULL, false);
         if (o->ty->walk != NULL) o->ty->walk(o, hw_spread_visit, &w);
@@ -2110,10 +2443,10 @@ void rt_hw_send(Obj *v) {
  * argument: what is in transit is counted here from now on, against the
  * epoch the task is in. */
 void rt_hw_receive(Obj *v) {
-    if (!hw_on || v == NULL || v->rc == RC_IMMORTAL) return;
-    HwTask *t = hw_task();
-    if (t == NULL) return;
-    hw_adopt(v, 62 - t->depth);
+    if (!hw_epochs_on || v == NULL || v->rc == RC_IMMORTAL) return;
+    HwHot *h = rt_hw_task_slot;
+    if (h == NULL) return;
+    hw_adopt(v, 62 - h->depth);
 }
 
 /* ---- opening and closing --------------------------------------------- */
@@ -2146,13 +2479,18 @@ static int hw_site_order(uint32_t a, uint32_t b) {
     return strcmp(hw_str(x->type_off), hw_str(y->type_off));
 }
 
-/* The leaks of a closing row, as "2 Node @ main.m31:12, 1 List @ ...". */
-static size_t hw_row_text(const HwRow *r, char *out, size_t cap) {
+/* The leaks of a closing row that `live` objects are left in. When every
+ * one of them is sampled -- M31_HEAPWATCH_SAMPLE=1 -- it is the sites, as
+ * "2 Node @ main.m31:12, 1 List @ ..."; otherwise the number, and the
+ * sites of the sampled ones: "40 objects; sampled: 1 Node @ ...". */
+static size_t hw_row_text(const HwRow *r, int64_t live, char *out, size_t cap) {
     HwCell left[32];
     uint32_t n = 0, more = 0;
+    int64_t sampled = 0;
     for (uint32_t i = 0; i < r->cap; i++) {
         const HwCell *c = &r->cells[i];
         if (c->site == 0 || c->count == 0) continue;
+        sampled += c->count;
         if (n == 32) {
             more++;
             continue;
@@ -2166,6 +2504,10 @@ static size_t hw_row_text(const HwRow *r, char *out, size_t cap) {
     }
     size_t len = 0;
     out[0] = 0;
+    if (sampled != live) {
+        len += (size_t)snprintf(out, cap, "%lld object%s; %s", (long long)live,
+                                live == 1 ? "" : "s", n == 0 ? "none sampled" : "sampled: ");
+    }
     for (uint32_t i = 0; i < n && len + 200 < cap; i++) {
         const HwSlot *sl = &hw_slots[left[i].site];
         len += (size_t)snprintf(out + len, cap - len, "%s%d %s @ %s:%u", i == 0 ? "" : ", ",
@@ -2194,14 +2536,13 @@ static bool hw_pick_epoch(const HwEdge *x, const void *arg) {
     return true;
 }
 
-/* Close the innermost open epoch of `t`. */
+/* Close the innermost open epoch of `t`, whose live count is in its HwHot. */
 static void hw_close(HwTask *t) {
     HwRow *r = &t->rows[t->depth];
-    bool leaked = false;
-    for (uint32_t i = 0; i < r->cap; i++) leaked = leaked || (r->cells[i].site != 0 && r->cells[i].count != 0);
-    if (leaked) {
+    int64_t live = t->hot->live;
+    if (live != 0) {
         char text[440];
-        hw_row_text(r, text, sizeof text);
+        hw_row_text(r, live, text, sizeof text);
         char line[600], when[32];
         hw_stamp(when, sizeof when);
         snprintf(line, sizeof line, "%s EPOCH \"%s\" closed with leaks: %s\n", when, r->name, text);
@@ -2219,7 +2560,7 @@ static void hw_close(HwTask *t) {
             __atomic_store_n(&row->times, row->times + 1, __ATOMIC_RELEASE);
         }
         pthread_mutex_unlock(&hw_lock);
-        /* Who holds what leaked, for the sites trace is on for. */
+        /* Who holds what leaked, for the sampled sites trace is on for. */
         if (__atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED)) {
             HwOfEpoch of = { 62 - t->depth, t };
             char header[100];
@@ -2239,11 +2580,12 @@ static void hw_close(HwTask *t) {
     }
     free(r->cells);
     memset(r, 0, sizeof *r);
+    t->hot->live = 0;
 }
 
 /* heapwatch.epoch(name, ..): open an epoch inside the current task. */
 void rt_hw_epoch_enter(Obj *name) {
-    if (!hw_on) return;
+    if (!hw_epochs_on) return;
     HwTask *t = hw_task();
     if (t == NULL) return;
     if (t->depth == HW_MAX_DEPTH) {
@@ -2251,13 +2593,25 @@ void rt_hw_epoch_enter(Obj *name) {
         return;
     }
     hw_task_grow(t, t->depth + 1);
+    t->rows[t->depth].live = t->hot->live;
     t->depth++;
+    t->hot->depth = t->depth;
+    t->hot->live = 0;
     const Str *s = (const Str *)name;
     hw_name_row(&t->rows[t->depth], s->data, (size_t)s->len);
 }
 
+/* The innermost epoch closes, and the one around it is innermost again. */
+static void hw_leave(HwTask *t) {
+    hw_close(t);
+    t->depth--;
+    t->hot->depth = t->depth;
+    t->hot->live = t->rows[t->depth].live;
+    t->rows[t->depth].live = 0;
+}
+
 void rt_hw_epoch_leave(void) {
-    if (!hw_on) return;
+    if (!hw_epochs_on) return;
     HwTask *t = hw_task();
     if (t == NULL) return;
     if (t->overflow > 0) {
@@ -2265,13 +2619,12 @@ void rt_hw_epoch_leave(void) {
         return;
     }
     if (t->depth == 0) return;
-    hw_close(t);
-    t->depth--;
+    hw_leave(t);
 }
 
 /* A task starts: name its own epoch -- "main", or the spawned function. */
 void rt_hw_task_begin(const char *name) {
-    if (!hw_on) return;
+    if (!hw_epochs_on) return;
     HwTask *t = hw_task();
     if (t != NULL) hw_name_row(&t->rows[0], name, strlen(name));
 }
@@ -2279,18 +2632,18 @@ void rt_hw_task_begin(const char *name) {
 /* A task ended (scheduler.c, after its entry returned): close whatever it
  * still has open, then the task's own epoch, and drop its books. */
 void rt_hw_task_end(void) {
-    void **slot = rt_hw_task_slot;
-    if (slot == NULL || *slot == NULL) return;
-    HwTask *t = *slot;
-    if (hw_on) {
-        while (t->depth > 0) {
-            hw_close(t);
-            t->depth--;
-        }
+    HwHot *h = rt_hw_task_slot;
+    if (h == NULL) return;
+    if (hw_epochs_on) {
+        HwTask *t = hw_task();
+        while (t->depth > 0) hw_leave(t);
         hw_close(t);
     }
-    for (uint32_t i = 0; i < t->cap; i++) free(t->rows[i].cells);
-    free(t->rows);
-    free(t);
-    *slot = NULL;
+    HwTask *t = h->task;
+    if (t != NULL) {
+        for (uint32_t i = 0; i < t->cap; i++) free(t->rows[i].cells);
+        free(t->rows);
+        free(t);
+    }
+    memset(h, 0, sizeof *h);
 }

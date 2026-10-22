@@ -7,83 +7,90 @@ change landed on master.
 
 ### Added
 
-- **Heap watch, phase 1: a ledger of every object, by allocation site**
-  (docs/heap-watch-design.md). Every compiled program now counts what it
-  allocates and frees -- by site, a (type, source line) pair -- in a file it
-  maps, `<program>.<pid>.ledger` under `$M31_HEAPWATCH_DIR` (default
-  `${TMPDIR:-/tmp}/m31-heapwatch-<uid>`). A counter update is a plain store
-  into the mapping, so the ledger survives a crash or `kill -9` with no exit
-  hook. Each site learns how long its objects normally live; once a minute
-  a site whose oldest survivor is older than max(10 minutes, 10 x its own
-  p99 lifetime) is a SUSPECT, written to `<program>.<pid>.suspects` when it
-  becomes one and each time its survivors double in age again. Nothing is
-  walked and nothing is freed: every answer comes from counters the
-  allocator and `rc_dec` keep.
+- **Heap watch** (docs/heap-watch-design.md): a ledger of the heap by
+  allocation site, epoch close and trace, in a **heap watch build** -- the
+  program and the runtime compiled with `-DRT_HEAPWATCH`, which
+  `./build.sh prog.m31 --heapwatch` does. **A default build has none of it**:
+  every hook is a macro that is nothing, the runtime's hooks and
+  `runtime/heapwatch.c` are compiled out, and `rc_inc`, `rc_dec`,
+  `rt_alloc` and the runtime's stores are the same machine code as in
+  0.11.0. `M31_HEAPWATCH` picks a heap watch build's mode at start:
+  `ledger` (the default), `full`, or `0`.
+- **The ledger.** A heap watch build samples what it allocates -- by bytes,
+  one object in every `M31_HEAPWATCH_SAMPLE` bytes (64 KiB) on average, at a
+  random point each time, as tcmalloc's and heapprofd's profilers do -- and
+  counts the sampled objects, weighted by how many each stands for, by site,
+  a (type, source line) pair, in a file it maps, `<program>.<pid>.ledger`
+  under `$M31_HEAPWATCH_DIR` (default `${TMPDIR:-/tmp}/m31-heapwatch-<uid>`).
+  A counter update is a plain store into the mapping, so the ledger
+  survives a crash or `kill -9` with no exit hook. Each site learns how long
+  its objects normally live; once a minute a site whose oldest survivor is
+  older than max(10 minutes, 10 x its own p99 lifetime) is a SUSPECT,
+  written to `<program>.<pid>.suspects` when it becomes one and each time
+  its survivors double in age again. `M31_HEAPWATCH_SAMPLE=1` counts every
+  object exactly. Nothing is walked and nothing is freed.
 - **`m31c -heapwatch <ledger|pid>`** reads a ledger, from a running
   process or a dead one, and lists suspects, sites that never freed
-  anything, and what is marked as living long on purpose.
+  anything, and what is marked as living long on purpose; a sampled
+  ledger's counts are estimates, and it says so.
 - **Long-lived on purpose:** `M31_AGE=Type:forever`,
   `M31_AGE=Type@file.m31:40:forever` (or a duration, `10m`), the same in a
   file named by `M31_HEAPWATCH_CONF`, and `heapwatch.forever(x)` in code
-  (new module `lib/heapwatch.m31`), which returns `x`. `M31_HEAPWATCH=0`
-  turns it all off; `M31_HEAPWATCH_MIN`, `M31_HEAPWATCH_FACTOR` tune the
-  threshold. A clean exit with nothing to report removes the files
-  (`M31_HEAPWATCH_KEEP=1` keeps them); a program removes the ledgers of
-  dead processes of its own name beyond the newest 8.
-
-- **Heap watch, phase 2: trace -- who holds it.** For the types it is asked
-  to watch, the runtime records reference edges as stores make and break
-  them -- no heap walk -- and writes the paths that keep a suspect's old
-  objects alive to `<program>.<pid>.trace`: through holders that are traced
-  too, up to `--depth` levels (turning trace on for the next holder up as it
-  goes), to a cycle (`<- cycle`), or to an object only a local holds. On at
-  start with `M31_HEAPWATCH_TRACE=Conn,Session@app/session.m31:12`, or in a
-  running process with `m31c -heapwatch <pid> --trace Conn` (`--untrace`,
-  `--depth N`), which writes to the ledger's control page; the process
-  applies it within a second. `--paths` prints the trace file, asking a
-  running process for the paths as they are now. Every reference store now
-  passes a hook first (`rt_hw_store`, `rt_hw_store_elem`, and the runtime's
-  own collection stores), which costs a compare and an untaken branch while
-  nothing is traced.
-
-- **Heap watch, phase 3: epoch close.** Every task is now an epoch -- the
+  (new module `lib/heapwatch.m31`), which returns `x`.
+  `M31_HEAPWATCH_MIN`, `M31_HEAPWATCH_FACTOR` tune the threshold. A clean
+  exit with nothing to report removes the files (`M31_HEAPWATCH_KEEP=1`
+  keeps them); a program removes the ledgers of dead processes of its own
+  name beyond the newest 8.
+- **Trace -- who holds it.** For the types it is asked to watch, a heap
+  watch build records reference edges as stores make and break them -- no
+  heap walk -- and writes the paths that keep a suspect's old objects alive
+  to `<program>.<pid>.trace`: through holders that are traced too, up to
+  `--depth` levels, to a cycle (`<- cycle`), or to an object only a local
+  holds. On at start with `M31_HEAPWATCH_TRACE=Conn,Session@app/session.m31:12`,
+  or in a running process with `m31c -heapwatch <pid> --trace Conn`
+  (`--untrace`, `--depth N`), through the ledger's control page. `--paths`
+  prints the trace file.
+- **Epoch close** (`M31_HEAPWATCH=full`). Every task is an epoch -- the
   program's own statements as `"main"`, each spawned thread under its
   function's name -- and `heapwatch.epoch(name, () => body)` /
   `heapwatch.epoch_of(name, () => value)` open one inside a task. Whatever an
-  epoch made and still counts when it ends is held only by other objects
-  of the same epoch: a leaked cycle, reported at once to the suspect log,
-  the ledger's table of epochs and, for a traced type, the trace file with
-  who holds it. An object leaves its epoch legitimately by being stored
-  into an older object (it and everything younger it reaches are adopted),
-  sent to another thread (it leaves the sender's books after the
-  uniqueness check and joins the receiver's on arrival), or returned by
-  `epoch_of`. **In a test build -- the runtime compiled with `-DRC_DEBUG`,
-  as the corpus is -- an epoch that closes with leaks traps**, naming the
-  sites (`M31_HEAPWATCH_TRAP=1` or `0` overrides), so every corpus program
-  closing clean is now a gate (corpus `1401`, `1405`; traps `1402` to
-  `1404`).
+  epoch made and still holds alive when it ends is held only by other
+  objects of the same epoch: a leaked cycle, reported at once with how many
+  objects and the sites of the sampled ones (every site, with
+  `M31_HEAPWATCH_SAMPLE=1`), to the suspect log, the ledger's table of
+  epochs and, for a traced type, the trace file with who holds them. An
+  object leaves its epoch legitimately by being stored into an older object
+  (it and everything younger it reaches are adopted), sent to another
+  thread, or returned by `epoch_of`. **In a heap watch test build --
+  `-DRC_DEBUG` too, as the corpus's `-O0` builds are -- epoch close is on,
+  every object is sampled, and an epoch that closes with leaks traps**,
+  naming the sites (`M31_HEAPWATCH_TRAP=1` or `0` overrides), so every
+  corpus program closing clean is a gate (corpus `1401`, `1405`; traps
+  `1402` to `1404`).
+- **What it costs** (docs/heap-watch-design.md, "Cost";
+  `bench/heapwatch/run.sh`), against 0.11.0 on the five allocation- and
+  store-bound benchmarks: the default build nothing -- its runtime and
+  the benchmarks' code are the same machine code as 0.11.0's, function by
+  function; a heap watch build +2 % to +5 % in instructions with the
+  ledger, within noise in time (-4 % to +4 %), and +6 % to +25 % with epoch
+  close as well.
 
 ### Changed
 
-- **The reference count is 33 bits** (8 589 934 591 references to one
-  object), and a retain past that traps instead of wrapping. The count
-  word's other bits hold the object's birth minute and its epoch for heap
-  watch, so the header stays two words; nothing reads the count word raw
-  any more (`RC_COUNT`, `rt_rc_count`, `rt_rc_set_count`).
-- **Heap watch costs allocation-bound code**: measured +16 % on binary trees
-  and about +65 % on loops that do little but allocate and free, +20 % on a
-  loop that only stores references, nothing on code that does neither
-  (docs/heap-watch-design.md, "Cost"; `bench/heapwatch/run.sh`). It is on
-  by default, as the requirement asks; `M31_HEAPWATCH=0` runs within noise of
-  0.10.0.
+- **The corpus runs every program both ways**: its `-O0` builds are heap
+  watch test builds and its `-O2` builds default builds, which must print
+  the same; a test whose point is heap watch (a `.heapwatch` file beside it)
+  is a heap watch build every time. `scripts/sanitize.sh` builds every other
+  program with heap watch. A gate checks that a default build has no heap
+  watch code in the runtime or in a program.
 - **The corpus and sanitizer runs compile the runtime once per build** and
   link it into each test, instead of compiling `rt.c` into every test binary
-  four times: the runtime grew by heap watch, and the corpus gate had
-  outgrown its time limit on a loaded machine.
-- **Every allocation site has its own TypeInfo**, a copy of the type's with
-  a ledger slot, its source line and a table of its reference fields. A
-  type's identity is `o->ty->canon`; the 18 runtime checks that compared
-  `o->ty` itself were converted, and a gate refuses a new one.
+  four times.
+- **Every allocation site of a user type has its own TypeInfo** in a heap
+  watch build, a copy of the type's with a ledger slot, its source line and
+  a table of its reference fields; a TypeInfo has those fields in every
+  build, as static data.
+
 ## 0.12.0 (2026-10-22)
 
 ### Fixed before release

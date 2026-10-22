@@ -1,8 +1,8 @@
-/* Heap watch's split of the count word (runtime/rt.h): a retain and a
- * release change the count and nothing beside it, and a retain past the
- * 33-bit count traps instead of carrying into the birth minute. Built and
- * run by runtime/tests/heapwatch_test.sh; exits 0 or prints what broke,
- * then traps on purpose at the end, which the script expects. */
+/* Heap watch's fields in the count word (runtime/rt.h): a retain and a
+ * release change the count and nothing beside it -- not RC_HW_NOTE, the
+ * EPOCH field or RC_HW_SAMPLED, nor a flag -- and so does what a
+ * destructor's code sets it with. Built with -DRT_HEAPWATCH and run by
+ * runtime/tests/heapwatch_test.sh; prints "ok", or what broke. */
 #include "rt.h"
 
 #include <stdio.h>
@@ -10,7 +10,7 @@
 
 int main(void) {
     Obj o;
-    long high = (12345L << RC_BIRTH_SHIFT) | (40L << RC_EPOCH_SHIFT) | RC_FROZEN;
+    long high = RC_HW_NOTE | (40L << RC_EPOCH_SHIFT) | RC_HW_SAMPLED | RC_FROZEN;
     o.rc = high | 7;
     o.ty = &rt_str_type;
     rc_inc(&o);
@@ -28,12 +28,9 @@ int main(void) {
     o.rc = high | (RC_COUNT - 1);
     rc_inc(&o);
     if ((o.rc & ~RC_COUNT) != high || rt_rc_count(&o) != RC_COUNT) {
-        printf("FAILED: the last count before the limit\n");
+        printf("FAILED: the widest count\n");
         return 1;
     }
     printf("ok\n");
-    fflush(stdout);
-    rc_inc(&o); /* traps */
-    printf("FAILED: a retain past the count's width did not trap\n");
-    return 1;
+    return 0;
 }

@@ -9,10 +9,14 @@
 //   heapwatch.Work                     interface { void run(); }
 //   heapwatch.Make<T>                  interface { T make(); }
 //
-// Every object a program makes is counted, by allocation site, in a ledger
-// the runtime keeps in a file; `m31c -heapwatch <ledger|pid>` reads it, from a
-// running process or from one that crashed. A site whose oldest live object
-// is much older than its objects normally live is reported as a suspect.
+// In a heap watch build (`./build.sh prog.m31 --heapwatch`, or -DRT_HEAPWATCH
+// on both cc lines) the objects a program makes are sampled and counted, by
+// allocation site, in a ledger the runtime keeps in a file; `m31c -heapwatch
+// <ledger|pid>` reads it, from a running process or from one that crashed. A
+// site whose oldest live object is much older than its objects normally live
+// is reported as a suspect. In any other build there is no ledger, and the
+// calls below do only what they do for the program: `forever` returns its
+// argument and `epoch` runs its body.
 //
 // **`forever` is for an object that lives long on purpose**: a game's
 // textures, a cache filled at startup, a connection pool. It exempts that one
@@ -23,11 +27,12 @@
 // `M31_AGE=Type:forever` or `M31_AGE=Type@file.m31:40:forever`.
 //
 // **An epoch is a unit of work that should leave nothing behind**: a
-// request, a frame, a level. Everything made while `body` runs is counted
-// against the epoch, and the moment it ends whatever is still counted -- held
-// only by other objects of the same epoch, which is a leaked cycle -- is
-// reported in the ledger and the suspect log, with who holds it for a type
-// trace is on for. In a test build (the corpus's, `-DRC_DEBUG`, or
+// request, a frame, a level. With epoch close on (M31_HEAPWATCH=full, or a
+// test build), everything made while `body` runs is counted against the
+// epoch, and the moment it ends whatever is still counted -- held only by
+// other objects of the same epoch, which is a leaked cycle -- is reported in
+// the ledger and the suspect log, with who holds it for a type trace is on
+// for. In a test build (the corpus's, `-DRC_DEBUG`, or
 // `M31_HEAPWATCH_TRAP=1`) it traps. An object leaves the epoch legitimately
 // by being stored into something made before the epoch began (a captured
 // list, a field of an outer object), by being sent to another thread, or by

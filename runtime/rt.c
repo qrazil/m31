@@ -69,11 +69,16 @@
 #include "scheduler.h"
 #include "reactor.h"
 
+#if RT_HEAPWATCH
+/* A statement that exists only in a heap watch build (rt.h, RT_HEAPWATCH). */
+#define HW_ONLY(...) __VA_ARGS__
+
 /* Heap watch's two hooks into the object lifecycle (runtime/heapwatch.c,
- * #included at the end of this file): the header bits a new object starts
+ * #included at the end of this file): the count word a new object starts
  * with, and the accounting for one about to be freed. */
-static long hw_alloc(const TypeInfo **typ);
-static void hw_free(Obj *o);
+static inline bool hw_countdown(size_t size);
+static Obj *hw_alloc_counted(size_t size, const TypeInfo *ty);
+static inline void hw_free(Obj *o);
 
 /* What a collection's store tells heap watch: `v` is now held by the
  * collection `h` -- as an element, a key or a value -- or no longer is. The
@@ -99,21 +104,25 @@ static inline void hw_let_go(Obj *h, int64_t slot, uint32_t where) {
     }
 }
 
-static bool seq_holds_refs(const Obj *o);
+/* Whether a List's or an Array's elements are references. */
+static inline bool seq_holds_refs(const Obj *o) {
+    return o->ty == &rt_arr_ref_type || o->ty == &rt_lst_ref_type;
+}
 
 static inline bool hw_tracing(void) {
     return __atomic_load_n(&rt_hw_tracing, __ATOMIC_RELAXED) != 0;
 }
 
-__attribute__((cold, noinline)) static _Noreturn void rc_overflow_trap(void) {
-    rt_trap("reference count overflow: more than 8589934591 references to one object");
+/* Whether a store has anything to tell heap watch at all (rt.h). */
+static inline bool hw_watching(void) {
+    return __atomic_load_n(&rt_hw_watch, __ATOMIC_RELAXED) != 0;
 }
+#else
+#define HW_ONLY(...)
+#endif
 
 void rc_inc(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
-    /* The count is 33 bits (rt.h); past them a retain would carry into the
-     * birth minute, so it traps instead -- never wraps. */
-    if (__builtin_expect((o->rc & RC_COUNT) == RC_COUNT, 0)) rc_overflow_trap();
     o->rc++;
 }
 
@@ -188,7 +197,7 @@ static void rc_release(Obj *o) {
     if (o->ty != NULL && o->ty->drop != NULL) {
         o->ty->drop(o);
     }
-    hw_free(o);
+    HW_ONLY(hw_free(o);)
     RC_TRACK_FREE();
     free(o);
 }
@@ -377,7 +386,7 @@ typedef struct {
 
 static void held_visit(void *ctx, Obj *c) {
     Held **hp = (Held **)ctx;
-    if (c == NULL || (c->rc & RC_FROZEN) != 0 || c->ty->canon == &rt_str_type) return;
+    if (c == NULL || (c->rc & RC_FROZEN) != 0 || c->ty == &rt_str_type) return;
     Held *h = *hp;
     if (h->len == h->cap) {
         int64_t cap = h->cap * 2;
@@ -392,7 +401,7 @@ static void held_visit(void *ctx, Obj *c) {
 
 int64_t rt_freeze_enter(Obj *o) {
     /* RC_IMMORTAL has every bit set, so an immortal object is frozen here. */
-    if ((o->rc & RC_FROZEN) != 0 || o->ty->canon == &rt_str_type) return 0;
+    if ((o->rc & RC_FROZEN) != 0 || o->ty == &rt_str_type) return 0;
     o->rc |= RC_HELD_BITS;
     if (o->ty == NULL || o->ty->walk == NULL) return 1;
     Held *h = malloc(sizeof(Held) + 16 * sizeof(Obj *));
@@ -423,7 +432,7 @@ void rt_freeze_leave(Obj *o, int64_t took) {
 }
 
 const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                                &rt_str_type, 0, 0, "str", NULL, 0 };
+                                &rt_str_type, 0, 1, "str", NULL, 0 };
 
 Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty) {
     Obj *o = malloc(size);
@@ -434,11 +443,12 @@ Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty) {
 }
 
 Obj *rt_alloc(size_t size, const TypeInfo *ty) {
+    /* Heap watch: this object is sampled, or epoch close is on, and it is
+     * made out of line with its counting (heapwatch.c, hw_alloc_counted). */
+    HW_ONLY(if (hw_countdown(size)) return hw_alloc_counted(size, ty);)
     Obj *o = malloc(size);
     if (o == NULL) rt_trap("out of memory");
-    /* A count of 1, plus heap watch's birth minute and epoch; `ty` becomes
-     * the record of the site the program is at, if it was a type's own. */
-    o->rc = hw_alloc(&ty);
+    o->rc = 1;
     o->ty = ty;
     RC_TRACK_ALLOC();
     return o;
@@ -927,16 +937,16 @@ static void lst_walk_refs(Obj *o, VisitFn visit, void *ctx) {
 }
 
 const TypeInfo rt_arr_val_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                                   &rt_arr_val_type, 0, 0, "Array", NULL, 0 };
+                                   &rt_arr_val_type, 0, 2, "Array", NULL, 0 };
 const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL, arr_walk_refs, NULL, NULL,
                                    NULL, NULL, NULL,
-                                   &rt_arr_ref_type, 0, 0, "Array", NULL, 0 };
+                                   &rt_arr_ref_type, 0, 3, "Array", NULL, 0 };
 const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL, NULL, NULL, NULL,
                                    NULL, NULL, NULL,
-                                   &rt_lst_val_type, 0, 0, "List", NULL, 0 };
+                                   &rt_lst_val_type, 0, 4, "List", NULL, 0 };
 const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL, lst_walk_refs, NULL, NULL,
                                    NULL, NULL, NULL,
-                                   &rt_lst_ref_type, 0, 0, "List", NULL, 0 };
+                                   &rt_lst_ref_type, 0, 5, "List", NULL, 0 };
 
 
 /* Bytes for `n` slots plus a `head` header, trapping rather than wrapping.
@@ -966,7 +976,7 @@ Obj *rt_array_new(int64_t len, int64_t fill, bool elems_are_refs) {
         a->data[i] = fill;
         if (elems_are_refs) rc_inc((Obj *)(intptr_t)fill);
     }
-    if (elems_are_refs && hw_tracing()) hw_fresh_collection((Obj *)a);
+    HW_ONLY(if (elems_are_refs && hw_tracing()) hw_fresh_collection((Obj *)a);)
     return (Obj *)a;
 }
 
@@ -998,7 +1008,7 @@ void rt_array_put(Obj *o, int64_t i, int64_t v) {
     Arr *a = (Arr *)o;
     if (i < 0 || i >= a->len) rt_trap("index out of range");
     a->data[i] = v;
-    if (seq_holds_refs(o)) hw_hold(o, v, HW_WHERE_ELEM);
+    HW_ONLY(if (hw_watching() && seq_holds_refs(o)) hw_hold(o, v, HW_WHERE_ELEM);)
 }
 
 Obj *rt_list_new(bool elems_are_refs) {
@@ -1014,17 +1024,11 @@ Obj *rt_list_new(bool elems_are_refs) {
  * serves both. The compiler knows which it has; the runtime does not need
  * to, except to find the elements. */
 static bool is_list(const Obj *o) {
-    return rt_is_list(o);
+    return o->ty == &rt_lst_val_type || o->ty == &rt_lst_ref_type;
 }
 
 static int64_t *slots(Obj *o) {
     return is_list(o) ? ((Lst *)o)->data : ((Arr *)o)->data;
-}
-
-/* Whether a List's or an Array's elements are references. */
-static bool seq_holds_refs(const Obj *o) {
-    const TypeInfo *c = o->ty->canon;
-    return c == &rt_arr_ref_type || c == &rt_lst_ref_type;
 }
 
 /* rt_len_of, rt_index_get and rt_index_set moved to rt.h as `static inline`
@@ -1046,7 +1050,7 @@ void rt_list_push(Obj *o, int64_t v) {
         l->cap = cap;
     }
     l->data[l->len++] = v;
-    if (seq_holds_refs(o)) hw_hold(o, v, HW_WHERE_ELEM);
+    HW_ONLY(if (hw_watching() && seq_holds_refs(o)) hw_hold(o, v, HW_WHERE_ELEM);)
 }
 
 /* A list of `n` copies of `fill`: the `[v; n]` literal in List position.
@@ -1067,7 +1071,7 @@ Obj *rt_list_repeat(int64_t n, int64_t fill, bool elems_are_refs) {
         l->data[i] = fill;
         if (elems_are_refs) rc_inc((Obj *)(intptr_t)fill);
     }
-    if (elems_are_refs && hw_tracing()) hw_fresh_collection((Obj *)l);
+    HW_ONLY(if (elems_are_refs && hw_tracing()) hw_fresh_collection((Obj *)l);)
     return (Obj *)l;
 }
 
@@ -1076,7 +1080,7 @@ Obj *rt_list_repeat(int64_t n, int64_t fill, bool elems_are_refs) {
  * which is a question only the program can answer. */
 Obj *rt_seq_clone(Obj *o) {
     int64_t n = rt_len_of(o);
-    bool refs = seq_holds_refs(o);
+    bool refs = o->ty == &rt_arr_ref_type || o->ty == &rt_lst_ref_type;
     int64_t *src = slots(o);
 
     if (is_list(o)) {
@@ -1095,7 +1099,7 @@ Obj *rt_seq_clone(Obj *o) {
         a->data[i] = src[i];
         if (refs) rc_inc((Obj *)(intptr_t)src[i]);
     }
-    if (refs && hw_tracing()) hw_fresh_collection((Obj *)a);
+    HW_ONLY(if (refs && hw_tracing()) hw_fresh_collection((Obj *)a);)
     return (Obj *)a;
 }
 
@@ -1109,7 +1113,7 @@ Obj *rt_seq_clone(Obj *o) {
 Obj *rt_seq_slice(Obj *o, int64_t from, int64_t to) {
     int64_t n = rt_len_of(o);
     if (from < 0 || to < from || to > n) rt_trap("slice range out of bounds");
-    bool refs = seq_holds_refs(o);
+    bool refs = o->ty == &rt_arr_ref_type || o->ty == &rt_lst_ref_type;
     int64_t *src = slots(o);
     int64_t m = to - from;
 
@@ -1129,7 +1133,7 @@ Obj *rt_seq_slice(Obj *o, int64_t from, int64_t to) {
         a->data[i] = src[from + i];
         if (refs) rc_inc((Obj *)(intptr_t)src[from + i]);
     }
-    if (refs && hw_tracing()) hw_fresh_collection((Obj *)a);
+    HW_ONLY(if (refs && hw_tracing()) hw_fresh_collection((Obj *)a);)
     return (Obj *)a;
 }
 
@@ -1137,9 +1141,13 @@ int64_t rt_list_pop(Obj *o) {
     rt_check_mutable(o);
     Lst *l = (Lst *)o;
     if (l->len == 0) rt_trap("pop from an empty list");
+#if RT_HEAPWATCH
     int64_t v = l->data[--l->len];
-    if (seq_holds_refs(o)) hw_let_go(o, v, HW_WHERE_ELEM);
+    if (hw_tracing() && seq_holds_refs(o)) hw_let_go(o, v, HW_WHERE_ELEM);
     return v;
+#else
+    return l->data[--l->len];
+#endif
 }
 
 /* `insert` and `remove_at` transfer ownership the same way push and pop do:
@@ -1154,7 +1162,7 @@ void rt_list_insert(Obj *o, int64_t i, int64_t v) {
         l->data[j] = l->data[j - 1];
     }
     l->data[i] = v;
-    if (seq_holds_refs(o)) hw_hold(o, v, HW_WHERE_ELEM);
+    HW_ONLY(if (hw_watching() && seq_holds_refs(o)) hw_hold(o, v, HW_WHERE_ELEM);)
 }
 
 int64_t rt_list_remove_at(Obj *o, int64_t i) {
@@ -1166,7 +1174,7 @@ int64_t rt_list_remove_at(Obj *o, int64_t i) {
         l->data[j] = l->data[j + 1];
     }
     l->len--;
-    if (seq_holds_refs(o)) hw_let_go(o, gone, HW_WHERE_ELEM);
+    HW_ONLY(if (hw_tracing() && seq_holds_refs(o)) hw_let_go(o, gone, HW_WHERE_ELEM);)
     return gone;
 }
 
@@ -1207,7 +1215,7 @@ void rt_list_clear(Obj *o, bool elems_are_refs) {
     l->data = NULL;
     l->len = 0;
     l->cap = 0;
-    if (hw_tracing()) hw_trace_drop_holder(o);
+    HW_ONLY(if (hw_tracing()) hw_trace_drop_holder(o);)
     for (int64_t i = 0; i < n; i++) {
         rc_dec((Obj *)(intptr_t)data[i]);
     }
@@ -1413,7 +1421,7 @@ static void bytes_drop(Obj *o) {
 /* No walk: a byte is not a reference, so a bytes is a leaf at a thread
  * boundary and rt_check_unique answers it from the count alone. */
 const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                                  &rt_bytes_type, 0, 0, "bytes", NULL, 0 };
+                                  &rt_bytes_type, 0, 6, "bytes", NULL, 0 };
 
 /* A value going INTO a bytes. Truncating 256 to 0 would be a silent wrong
  * answer in exactly the code -- codecs, checksums -- least able to notice. */
@@ -1772,7 +1780,7 @@ static void map_walk(Obj *o, VisitFn visit, void *ctx) {
 }
 
 const TypeInfo rt_map_type = { map_drop, NULL, map_walk, NULL, NULL, NULL, NULL, NULL,
-                                &rt_map_type, 0, 0, "Map", NULL, 0 };
+                                &rt_map_type, 0, 7, "Map", NULL, 0 };
 
 static uint64_t hash_int(int64_t x) {
     /* splitmix64's finaliser: cheap and mixes the low bits, which matters
@@ -1916,10 +1924,10 @@ void rt_map_set(Obj *o, int64_t k, int64_t v) {
         bool val_is_ref = m->val_is_ref;
         if (val_is_ref) rc_inc((Obj *)(intptr_t)v);
         m->slots[i].v = v;
-        if (val_is_ref) {
+        HW_ONLY(if (val_is_ref) {
             hw_let_go(o, (int64_t)(intptr_t)old, HW_WHERE_VALUE);
             hw_hold(o, v, HW_WHERE_VALUE);
-        }
+        })
         rc_guard_drop(o, RC_PROBING, guard);
         /* The mark comes off before the release: the value being replaced
          * may be the last of its kind, and its destructor is program code
@@ -1937,8 +1945,8 @@ void rt_map_set(Obj *o, int64_t k, int64_t v) {
     m->len++;
     if (m->key_is_ref) rc_inc((Obj *)(intptr_t)k);
     if (m->val_is_ref) rc_inc((Obj *)(intptr_t)v);
-    if (m->key_is_ref) hw_hold(o, k, HW_WHERE_KEY);
-    if (m->val_is_ref) hw_hold(o, v, HW_WHERE_VALUE);
+    HW_ONLY(if (hw_watching() && m->key_is_ref) hw_hold(o, k, HW_WHERE_KEY);)
+    HW_ONLY(if (hw_watching() && m->val_is_ref) hw_hold(o, v, HW_WHERE_VALUE);)
     rc_guard_drop(o, RC_PROBING, guard);
 }
 
@@ -1988,8 +1996,8 @@ void rt_map_remove(Obj *o, int64_t k) {
     bool val_is_ref = m->val_is_ref;
     m->slots[i].state = SLOT_DEAD;   /* not EMPTY: a probe must not stop here */
     m->len--;
-    if (key_is_ref) hw_let_go(o, (int64_t)(intptr_t)dk, HW_WHERE_KEY);
-    if (val_is_ref) hw_let_go(o, (int64_t)(intptr_t)dv, HW_WHERE_VALUE);
+    HW_ONLY(if (key_is_ref) hw_let_go(o, (int64_t)(intptr_t)dk, HW_WHERE_KEY);)
+    HW_ONLY(if (val_is_ref) hw_let_go(o, (int64_t)(intptr_t)dv, HW_WHERE_VALUE);)
     /* The slot is gone from the table before either release runs: a
      * destructor is program code and may look at this map, which must
      * already read as one entry shorter, and may change it, which the mark
@@ -2052,7 +2060,7 @@ void rt_map_clear(Obj *o) {
     m->cap = 0;
     m->len = 0;
     m->used = 0;
-    if (hw_tracing()) hw_trace_drop_holder(o);
+    HW_ONLY(if (hw_tracing()) hw_trace_drop_holder(o);)
     for (int64_t i = 0; i < oldcap; i++) {
         if (old[i].state != SLOT_FULL) continue;
         if (key_is_ref) rc_dec((Obj *)(intptr_t)old[i].k);
@@ -2081,7 +2089,7 @@ Obj *rt_map_clone(Obj *o) {
         if (c->key_is_ref) rc_inc((Obj *)(intptr_t)c->slots[i].k);
         if (c->val_is_ref) rc_inc((Obj *)(intptr_t)c->slots[i].v);
     }
-    if (hw_tracing()) hw_fresh_collection((Obj *)c);
+    HW_ONLY(if (hw_tracing()) hw_fresh_collection((Obj *)c);)
     return (Obj *)c;
 }
 
@@ -2447,7 +2455,7 @@ void rt_chan_drop(Chan *c) {
  * not a new kind of assumption for this runtime to make. */
 static void rt_main_trampoline(void *argp) {
     void (*entry)(void) = (void (*)(void))(uintptr_t)argp;
-    rt_hw_task_begin("main");
+    HW_ONLY(rt_hw_task_begin("main");)
     entry();
 }
 
@@ -2603,7 +2611,7 @@ static void reach_grow(Reach *r) {
 /* Record one reference into `o`, and queue it for walking the first time. */
 static void reach_add(Reach *r, Obj *o) {
     if (o == NULL || o->rc == RC_IMMORTAL) return;
-    if (r->freezing && (rc_permanent(o) || o->ty->canon == &rt_str_type)) return;
+    if (r->freezing && (rc_permanent(o) || o->ty == &rt_str_type)) return;
     if (r->cap == 0 || (r->len + 1) * 10 >= r->cap * 7) reach_grow(r);
 
     int64_t mask = r->cap - 1;
@@ -2757,7 +2765,7 @@ static Obj *copy_obj(CopyMap *m, Obj *o);
 Obj *rt_copy_child(void *ctx, Obj *c) {
     CopyMap *m = (CopyMap *)ctx;
     if (c == NULL) return NULL;
-    if (rc_permanent(c) || c->ty->canon == &rt_str_type) {
+    if (rc_permanent(c) || c->ty == &rt_str_type) {
         rc_inc(c);
         return c;
     }
@@ -2782,37 +2790,36 @@ static void copy_slots(CopyMap *m, int64_t *dst, const int64_t *src, int64_t n, 
  * Recursive, so a very deep chain of objects is bounded by the C stack. */
 static Obj *copy_obj(CopyMap *m, Obj *o) {
     const TypeInfo *ty = o->ty;
-    const TypeInfo *kind = ty->canon;
-    if (kind == &rt_arr_val_type || kind == &rt_arr_ref_type) {
+    if (ty == &rt_arr_val_type || ty == &rt_arr_ref_type) {
         const Arr *a = (const Arr *)o;
         Arr *n = (Arr *)rt_alloc(slot_bytes(sizeof(Arr), a->len), ty);
         n->len = a->len;
         for (int64_t i = 0; i < a->len; i++) n->data[i] = 0;
         rt_copy_register(m, o, (Obj *)n);
-        copy_slots(m, n->data, a->data, a->len, kind == &rt_arr_ref_type);
-        if (hw_tracing()) hw_fresh_collection((Obj *)n);
+        copy_slots(m, n->data, a->data, a->len, ty == &rt_arr_ref_type);
+        HW_ONLY(if (hw_tracing()) hw_fresh_collection((Obj *)n);)
         return (Obj *)n;
     }
-    if (kind == &rt_lst_val_type || kind == &rt_lst_ref_type) {
+    if (ty == &rt_lst_val_type || ty == &rt_lst_ref_type) {
         const Lst *l = (const Lst *)o;
-        Lst *n = (Lst *)rt_list_new(kind == &rt_lst_ref_type);
+        Lst *n = (Lst *)rt_list_new(ty == &rt_lst_ref_type);
         if (l->len > 0) {
             n->data = calloc((size_t)l->len, sizeof(int64_t));
             if (n->data == NULL) rt_trap("out of memory");
             n->cap = l->len;
         }
         rt_copy_register(m, o, (Obj *)n);
-        copy_slots(m, n->data, l->data, l->len, kind == &rt_lst_ref_type);
+        copy_slots(m, n->data, l->data, l->len, ty == &rt_lst_ref_type);
         n->len = l->len;
-        if (hw_tracing()) hw_fresh_collection((Obj *)n);
+        HW_ONLY(if (hw_tracing()) hw_fresh_collection((Obj *)n);)
         return (Obj *)n;
     }
-    if (kind == &rt_bytes_type) {
+    if (ty == &rt_bytes_type) {
         Obj *n = rt_bytes_clone(o);
         rt_copy_register(m, o, n);
         return n;
     }
-    if (kind == &rt_map_type) {
+    if (ty == &rt_map_type) {
         const Map *src = (const Map *)o;
         Map *n = (Map *)rt_map_new(src->key, src->key_is_ref, src->val_is_ref);
         rt_copy_register(m, o, (Obj *)n);
@@ -2838,7 +2845,7 @@ static Obj *copy_obj(CopyMap *m, Obj *o) {
             }
             n->len = src->len;
         }
-        if (hw_tracing()) hw_fresh_collection((Obj *)n);
+        HW_ONLY(if (hw_tracing()) hw_fresh_collection((Obj *)n);)
         return (Obj *)n;
     }
     if (ty != NULL && ty->copy != NULL) return ty->copy(o, m);
@@ -2875,13 +2882,17 @@ static void refuse_resource(const Obj *o) {
 }
 
 Obj *rt_snapshot(Obj *o) {
-    if (rc_permanent(o) || o->ty->canon == &rt_str_type) return o;
+    if (rc_permanent(o) || o->ty == &rt_str_type) return o;
     if (o->ty == NULL || o->ty->walk == NULL) {
         refuse_resource(o);
         /* A leaf a block froze reads as more than 1 here, its flags being
          * above the count, so it takes the copy below. Heap watch's fields
-         * are not flags and do not count. */
+         * are not flags and do not count (rt.h). */
+#if RT_HEAPWATCH
         if ((o->rc & (RC_COUNT | RC_FLAGS)) == 1) {
+#else
+        if (o->rc == 1) {
+#endif
             o->rc |= RC_FROZEN;
             return o;
         }
@@ -4098,4 +4109,6 @@ void rt_term_restore(void) {
 
 /* Heap watch (docs/heap-watch-design.md). Last, because it reads the
  * runtime's own types and helpers defined above. */
+#if RT_HEAPWATCH
 #include "heapwatch.c"
+#endif

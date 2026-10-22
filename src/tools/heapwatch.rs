@@ -379,6 +379,9 @@ pub(crate) struct Ledger<'a> {
     off_traced: usize,
     pub edges: u32,
     pub edges_dropped: u32,
+    /// M31_HEAPWATCH_SAMPLE: the mean bytes between sampled objects; 1
+    /// (or 0, from a program that predates sampling) counts every object.
+    pub sample_bytes: u32,
     pub program: String,
 }
 
@@ -416,6 +419,7 @@ impl<'a> Ledger<'a> {
             off_traced: u64_at(b, h + 72) as usize,
             edges: u32_at(b, h + 140),
             edges_dropped: u32_at(b, h + 144),
+            sample_bytes: u32_at(b, h + 148),
             program: cstr_at(b, h + 152, 128),
         };
         if l.count_size != 320 || l.off_shards + l.n_shards as usize * l.stride > b.len() {
@@ -609,6 +613,12 @@ fn report(l: &Ledger, path: &Path, all: bool) -> String {
     if l.minute_ms != 60000 {
         o.push_str(&format!("  (a minute is {} ms in this run)\n", l.minute_ms));
     }
+    if l.sample_bytes > 1 {
+        o.push_str(&format!(
+            "sampled: one object in every {} bytes made, on average; counts are estimates\n",
+            l.sample_bytes
+        ));
+    }
     let _ = path;
 
     struct Row {
@@ -709,7 +719,13 @@ fn report(l: &Ledger, path: &Path, all: bool) -> String {
         .filter(|&s| l.traced(s))
         .map(|s| {
             let slot = l.slot(s);
-            format!("{} {}:{}", slot.type_name, slot.file, slot.line)
+            // A slot of one of the runtime's own kinds has no line: trace
+            // knows a List by its kind (runtime/heapwatch.c, "sampling").
+            if slot.line == 0 {
+                slot.type_name
+            } else {
+                format!("{} {}:{}", slot.type_name, slot.file, slot.line)
+            }
         })
         .collect();
     if !traced.is_empty() {

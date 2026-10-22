@@ -1,9 +1,23 @@
 # Heap watch: one ledger for every object
 
-Status: **approved and built.** Revision 6, 2026-10-21. All three parts
-are built: the ledger and epoch close are on by default, trace on request.
-"As built" under each part says what differs from the proposal, and the
-cost section has measurements in place of the estimates.
+Status: **approved and built.** Revision 7, 2026-10-21. All three parts
+are built, in a **heap watch build** only: a program and runtime compiled
+with `-DRT_HEAPWATCH` (`./build.sh prog.m31 --heapwatch`). The default
+build has none of it. In a heap watch build the ledger is on, by sampling;
+epoch close is on with `M31_HEAPWATCH=full`; trace is on request. "As built"
+under each part says what differs from the proposal, and the cost section
+has measurements in place of the estimates.
+
+Revision 7: the cost. Revision 6 measured +16 % to +68 % on allocation-bound
+benchmarks with heap watch on, and up to +20 % with it off, which could not
+be merged. Now: heap watch is compiled in only on request ("Builds"), so
+the default build is the code it was before heap watch; the ledger samples
+objects by bytes allocated, as tcmalloc's and heapprofd's profilers do,
+rather than counting every one; the per-object state left the count word's
+BIRTH field and the per-site records of the runtime's own types, which took
+`canon` and the 33-bit count with them; and epoch close counts the objects
+left alive per epoch, naming the sites of sampled ones. "Cost" has the new
+numbers.
 
 Revision 6: phase 3 built. Every task is an epoch; blocks are the library
 calls `heapwatch.epoch` and `heapwatch.epoch_of` rather than a keyword; a
@@ -54,15 +68,20 @@ queue, is hard to know at compile time and easy to measure at run time.
    process, by an environment variable at start or a command at any time,
    with no rebuild and no restart.
 
+Since revision 7 these hold for a heap watch build, which a program has to
+be built as ("Builds"): the owner ruled out the cost of having them in every
+program (2026-10-21). Requirement 1 holds by sampling, exactly with
+`M31_HEAPWATCH_SAMPLE=1`.
+
 ---
 
 ## Three parts, one ledger
 
-| Part | Question it answers | When it answers | Always on? |
+| Part | Question it answers | When it answers | In a heap watch build |
 |---|---|---|---|
-| **Age ledger** | which site is leaking, how many, how old | once survivors outlive the site's normal lifetime | yes |
-| **Epoch close** | this unit of work certainly leaked, and what | the moment the unit ends | yes |
-| **Trace** | who holds the leaked object, up to a root | from the moment it is turned on | no, per type, on request |
+| **Age ledger** | which site is leaking, how many, how old | once survivors outlive the site's normal lifetime | on (sampled) |
+| **Epoch close** | this unit of work certainly leaked, and what | the moment the unit ends | `M31_HEAPWATCH=full`; on in a test build |
+| **Trace** | who holds the leaked object, up to a root | from the moment it is turned on | per type, on request |
 
 They overlap only where it helps: a leaked cycle inside a request shows up
 at once in epoch close, and later in the age ledger as well. Neither of the
@@ -78,6 +97,46 @@ tool, `m31c -heapwatch`.
 - **Nothing is freed.** The runtime reports and the developer fixes.
 - **O(1) per operation.** Every cost is a counter update on an event that
   already happens: allocate, free, store.
+- **Nothing in a build that did not ask for it** (revision 7). See "Builds".
+
+---
+
+## Builds
+
+Heap watch is in a program only when the program and its runtime are both
+compiled with `-DRT_HEAPWATCH`: `./build.sh prog.m31 --heapwatch`, or the
+flag on both `cc` lines. Without it -- the default -- the emitted C names
+every hook as a macro that is nothing (`runtime/rt.h`, `RT_HEAPWATCH`), the
+runtime's hooks are `#if`'d out, `heapwatch.c` is not compiled, and the count
+word is the count and the flags exactly as before heap watch. A gate (`heap watch
+only if asked`) checks that a default build of the
+runtime has no heap watch symbol and that a program using
+`lib/heapwatch.m31` has no heap watch call once preprocessed; with the flag,
+both are there. `rc_inc`, `rc_dec`, `rt_alloc` and the runtime's stores
+compile to the same machine code as before heap watch.
+
+The two halves must agree. A program built with the flag and a runtime
+built without it fail to link (`rt_hw_program`); a program built without
+it and a runtime built with it run as if heap watch were off.
+
+`lib/heapwatch.m31` works in both: `heapwatch.forever(x)` returns `x`, and
+`heapwatch.epoch(name, body)` runs `body`, with or without the books.
+
+A heap watch build runs in one of three modes, chosen at start by
+`M31_HEAPWATCH`:
+
+| Mode | What it does | Cost |
+|---|---|---|
+| `ledger` (default) | the sampled age ledger, the suspect log; trace on request | see "Cost": a few percent |
+| `full` (default in a test build, `-DRC_DEBUG`) | the ledger, and epoch close for every task and block | see "Cost" |
+| `0` | nothing counted, no file | the hooks' tests alone |
+
+The corpus runs every program both ways (`scripts/run.sh`): its `-O0`
+builds are heap watch builds, in a test build -- epoch close on, every
+object sampled, a leaked cycle a trap -- and its `-O2` builds are default
+builds, which must print the same. A test whose point is heap watch itself
+has a `.heapwatch` file beside it and is a heap watch build every time.
+`scripts/sanitize.sh` builds every other program with heap watch.
 
 ---
 
@@ -91,38 +150,43 @@ them. The counters alone answer every question.
 
 The header stays two words (`runtime/rt.h`). Since 0.10.0's deep freeze added
 `RC_HELD`, the count word has 59 bits below its flags, and no program needs
-anywhere near that many. Heap watch splits them up:
+anywhere near that many. A heap watch build takes eight of them:
 
 ```
- 63    62      61..60   59    58..53    52..33         32..0
-[sign][FROZEN][BUSY x2][HELD][EPOCH 6][BIRTH 20 bits][COUNT 33 bits]
+ 63    62      61..60   59    58     57..52    51        50..0
+[sign][FROZEN][BUSY x2][HELD][NOTE][EPOCH 6][SAMPLED][COUNT 51 bits]
 ```
 
-- **COUNT**, 33 bits, allows 8 589 934 591 references to one object. A
-  retain past that traps ("reference count overflow") instead of carrying
-  into BIRTH; `rc_inc` tests for it with one compare.
-- **BIRTH** is the minute the object was made, counted from program start.
-  20 bits is 728 days. A process that lives longer stamps every later object
-  with the last minute it can count, which reads as old -- the right side to
-  err on for a leak report. All ones marks an object `heapwatch.forever`.
+- **COUNT**, 51 bits: 2^51 references would need 2^54 bytes of references,
+  so, like the 59-bit count of the default build, it cannot overflow, and
+  `rc_inc` does not check.
+- **NOTE**: the object's release has something to tell heap watch -- it is
+  sampled, counted by epoch close, or named by one of trace's edges. Every
+  other release tests this bit and nothing more.
 - **EPOCH** is for epoch close (below). The proposal had a 6-bit DEPTH and a
   KEPT bit; as built they are one 6-bit field, `62 - depth`, with 63 for an
   object counted against no epoch and 0 for one crossing between tasks.
   "Outlives more epochs" is then simply "larger", so a store compares two
-  numbers, and the bit saved is what keeps COUNT at 33 bits beside `HELD`.
+  numbers. 0 everywhere when epoch close is off.
+- **SAMPLED**: the ledger sampled this object (below); its site and birth
+  minute are in the table of samples, keyed by its address.
 
 `rc_dec`, the uniqueness check, the snapshot and the emitted destructor
 read the count through a mask, `RC_COUNT`; nothing reads or writes the count
 word raw (`rt_rc_count`, `rt_rc_set_count`), and a runtime test checks that
-a retain and a release leave every bit above the count alone.
+a retain and a release leave every bit above the count alone. In the
+default build `RC_COUNT` is everything below the flags, as before.
 
 The allocation site, meaning the file and line of the constructor or the
-collection literal, comes from the type pointer. **Each allocation site gets
-its own `TypeInfo`.** It is a copy of the type's record with the same drop,
-walk and method table, plus a site id and a `canon` pointer to the real type.
-That costs static data only, about 100 B per site and nothing per object.
-Type identity checks in the runtime (`o->ty == &rt_lst_ref_type`, and a few
-others) switch to `o->ty->canon`.
+collection literal, comes from the type pointer for a user type. **Each
+allocation site of a user type gets its own `TypeInfo`** -- in a heap watch
+build; the default build's code names the type's own. It is a copy of the
+type's record with the same drop, walk and method table, plus a site id and
+a `canon` pointer to the real type. That costs static data only, about
+100 B per site and nothing per object. Nothing compares a user type's
+record by address, so nothing else changes. The runtime's own types --
+the ones it does compare by address, `o->ty == &rt_lst_ref_type` -- are
+never copied, and their objects' `ty` is always the type's own record.
 
 As built:
 
@@ -131,24 +195,37 @@ As built:
   its own). The lowering puts an `Inst::Site` before each allocation in a
   block whose line differs from the last one; the emitter turns each user
   type's (type, line) pair into a static `ti_T<n>_s<slot>` and numbers the
-  slots 1, 2, ... in emission order, so the C is the same on every run.
+  slots 1, 2, ... in emission order, so the C is the same on every run. An
+  allocation names its record as `RT_HW_TI(site, type)`, the site's in a
+  heap watch build and the type's otherwise.
 - The runtime's own objects -- a `str` from `concat`, a `List` from a
-  literal, the `bytes` a primitive pushes -- are made inside the runtime,
-  from a canonical record. Emitted code calls `rt_hw_at(line)` before each
-  runtime call that may allocate (`ir::rt_call_allocates` lists the ones
-  that cannot), and `rt_alloc` swaps the canonical record for the line's own,
-  made the first time that line allocates that type and published once. A
-  thread caches its last one, so a loop pays a compare.
+  literal, the `bytes` a primitive pushes -- are made inside the runtime.
+  Emitted code says the line it is at before each runtime call that may
+  allocate (`rt_hw_at(line)`; `ir::rt_call_allocates` lists the ones that
+  cannot -- checks, conversions and system calls among them): on x86-64
+  Linux one store to a thread-local through `%fs`, written as an `asm` so
+  the compiler cannot cache the variable's address across a green thread's
+  move to another carrier (the bug described at `rt_stack_check`); elsewhere
+  a call. When such an object is SAMPLED, its slot is the line's own for its
+  kind (`str`, `List`, ...), made the first time that line samples one. When
+  it is not, epoch close and trace know it by its kind alone: one slot per
+  kind, with no line.
 - The file of a site is the entry file by its own name, a module of the
   program by its path from the entry file's directory (`ui/panel.m31`), and
   a module of the standard library as `net/http.m31` -- never a path on the
   compiling machine, so the emitted C is the same everywhere.
 - TypeInfo grew `canon`, `site`, `loc`, `name` and a table of reference
-  fields (name, offset, variant tag) for trace. The 18 identity checks in
-  `runtime/` were converted; a gate (`no raw type identity checks`) refuses
-  a comparison of `ty` itself with a type's address.
+  fields (name, offset, variant tag) for trace, in every build: static data,
+  read only by heap watch. On a runtime type's record `loc` is its kind's
+  column (1 for `str` ... 7 for `Map`).
 
-**Per-object memory cost: 0 bytes.**
+Revision 6 put a BIRTH minute in the count word and swapped the runtime's
+own objects' `ty` for per-line copies. That cost every build a check in
+`rc_inc` (the count was 33 bits), a load in every type test (`o->ty->canon`)
+and the hooks themselves; revision 7 removed all three.
+
+**Per-object memory cost: 0 bytes**; a sampled object has a 24-byte entry
+in the table of samples.
 
 ### What the runtime counts
 
@@ -156,18 +233,37 @@ For every allocation site `s`:
 
 | Counter | Updated on | Answers |
 |---|---|---|
-| `live[s][birth_minute]`, sparse | allocate `+1`; free `-1` (the object's birth minute is in its header) | how many objects from site `s` born at minute `m` are still alive, so **how old the survivors are** |
-| `lifetime[s][k]`, 16 log2 buckets | free: the object's age goes in bucket `log2(age)` | how long objects from `s` **normally** live, learned from the program itself |
-| `epoch[depth][s]` | see "Epoch close" | what the current unit of work made and did not keep |
+| `live[s][birth_minute]`, sparse | a sampled object made: `+w`; freed: `-w` | how many objects from site `s` born at minute `m` are still alive, so **how old the survivors are** |
+| `lifetime[s][k]`, 16 log2 buckets | a sampled object freed: its age goes in bucket `log2(age)`, weight `w` | how long objects from `s` **normally** live, learned from the program itself |
+| `epoch[depth]` | see "Epoch close" | what the current unit of work made and did not keep |
 
 The current minute is a global that the scheduler tick updates. Reading the
 clock costs one load, never a system call.
+
+**Sampling** (revision 7). The ledger does not see every object. Each
+thread counts down the bytes it allocates, and the object that takes the
+count below zero is **sampled**; the next countdown is drawn at random,
+uniformly between 0 and twice `M31_HEAPWATCH_SAMPLE` (64 KiB by default), so
+no loop can line up with it -- byte-based sampling, as in tcmalloc's and
+heapprofd's heap profilers. A sampled object gets RC_HW_SAMPLED and an
+entry in a table of samples -- its address, slot, birth minute and
+**weight** `w`, how many objects of its size it stands for
+(`M31_HEAPWATCH_SAMPLE / size`, at least 1) -- under one lock, touched once
+per sample. The counters add weights, so every count the tool shows is an
+estimate, and says so. A site that keeps objects alive keeps sampled ones
+alive too: a leak of any size is found, a small one later than a large one.
+`M31_HEAPWATCH_SAMPLE=1` samples every object and every count is exact; it
+is a test build's default.
+
+An object that is not sampled costs the countdown when it is made (a
+subtract and a branch on a thread-local, before `malloc`) and the NOTE test
+when it is freed. A thread's first allocation only starts its countdown.
 
 As built (`runtime/heapwatch.c`):
 
 - **`live` is a timing wheel, not a sparse table.** Per site, 7 levels of 8
   cells: level 0 holds the last 8 minutes one by one, level L cells of 8^L
-  minutes, and level 6 reaches past the 20-bit birth field. When a shard's
+  minutes, and level 6 reaches past the 20-bit birth minute. When a shard's
   clock moves on, a cell about to be reused hands its count up a level --
   O(sites) once a minute, never O(objects). It answers "how old are the
   survivors" to within a factor of 8 for old objects and exactly for recent
@@ -180,7 +276,7 @@ As built (`runtime/heapwatch.c`):
   which compile to exactly that). An object freed on another shard is
   subtracted there at whatever level that shard holds its birth minute; the
   reader merges each cell into the coarser block of any shard that contains
-  it, so the +1 and the -1 always meet (`hw_sum_slot`, and the same in
+  it, so the +w and the -w always meet (`hw_sum_slot`, and the same in
   `src/tools/heapwatch.rs`). Shards are carriers + 8; a thread past the last
   shares it under a lock.
 - **The tick** is the scheduler's monitor thread, which every compiled
@@ -279,11 +375,14 @@ broadest to the narrowest, and all of them cost nothing per operation:
 | one object | `heapwatch.forever(x)` in code, which returns `x` | that object only |
 
 `heapwatch.forever(x)` moves the object from its birth-minute bucket to a
-**forever** bucket by setting `BIRTH` to a reserved value (all ones), so it
-needs no new bit. It is still counted, still listed (`forever  Texture
+**forever** bucket by setting its birth minute to a reserved value (all
+ones). It is still counted, still listed (`forever  Texture
 assets.m31:40  812 alive`), and still checked by epoch close and trace --
 being marked long-lived exempts it from age and nothing else. A forever
-object that is freed is simply uncounted; that is not an error.
+object that is freed is simply uncounted; that is not an error. As built
+(revision 7) the birth minute is the sampled object's, in the table of
+samples: an object that is not sampled has nothing in the ledger to move,
+and is marked only for trace, whose edges to it stop counting as old.
 
 As built: `lib/heapwatch.m31` declares `pub T forever<T>(T value)`, which
 calls a builtin only the standard library can name, `__forever` -- a `prim`
@@ -361,6 +460,19 @@ adoption rule gets caught.
   levels can nest; deeper blocks are counted as the deepest), 63 for one
   counted against none -- KEPT, and every immortal -- and 0 for one in
   transit between tasks.
+- **What an epoch counts** (revision 7) is how many of its objects are
+  alive: one more as each is made, one fewer as each is freed, a single
+  number for the innermost epoch kept in the green thread itself (`HwHot`,
+  three words in the scheduler's `rt_green`), so an allocation and a release
+  add or take one from a counter one load away, and the outer epochs' in the
+  task's rows. Which **sites** the survivors were made at is counted for the
+  sampled ones, by site, in a small table per epoch. With
+  `M31_HEAPWATCH_SAMPLE=1` -- a test build's default -- every object is
+  sampled, and a close names every site exactly; otherwise it gives the
+  exact number left and the sites of the sampled ones among them (`40
+  objects; sampled: 1 Node @ server.m31:13`), or `none sampled`, and trace,
+  if it is on, who holds them. Revision 6 counted every object by site,
+  which was most of epoch close's cost.
 - **The adoption list, as built:**
 
 | Way out | Where | What happens |
@@ -374,19 +486,22 @@ adoption rule gets caught.
 | receive | `rt_hw_receive` after `recv`, and at a spawned thread's start for each reference argument | what is in transit joins the receiver's current epoch |
 | globals | -- | m31 has none |
 
-- **At close** a row that still counts anything goes to the suspect log
+- **At close** an epoch that still counts anything goes to the suspect log
   (`EPOCH "request" closed with leaks: 1 Node @ server.m31:13, ...`, sites in
   file and line order), to the ledger's table of epochs by name (how many
-  times, when last, what), and -- for each leaked site trace is on for -- to
-  the trace file with the leaked objects' holders, which are then marked so
-  the next close does not report them again. Then the row is cleared.
+  times, when last, what), and -- for each leaked sampled site trace is on
+  for -- to the trace file with the leaked objects' holders, which are then
+  marked so the next close does not report them again. Then the row is
+  cleared.
 - **Test builds trap** (open question 5, decided): the corpus builds the
   runtime with `-DRC_DEBUG`, and so does any test that wants its refcount
-  checks; there an epoch that closes with leaks traps, naming them. Any
-  build traps with `M31_HEAPWATCH_TRAP=1`, and `M31_HEAPWATCH_TRAP=0` turns
-  it off in a debug build. So **every corpus program closing clean** is a
-  gate: each of its threads -- `main` and every spawned one -- is an epoch,
-  and a missed adoption rule there is a trap and a failed test.
+  checks; in a heap watch build there epoch close is on by default and an
+  epoch that closes with leaks traps, naming them. Any heap watch build
+  traps with `M31_HEAPWATCH_TRAP=1`, and `M31_HEAPWATCH_TRAP=0` turns it off
+  in a debug build. So **every corpus program closing clean** is a gate --
+  in its heap watch builds, the `-O0` ones ("Builds"): each of its threads
+  -- `main` and every spawned one -- is an epoch, and a missed adoption rule
+  there is a trap and a failed test.
 - **Proved by:** `corpus/core/1401` (every way out of a block, two deep,
   through captures, and a round trip through another thread), `1405`
   (threads, channels, a payload taken out of a match, epochs inside spawned
@@ -421,8 +536,8 @@ adoption rule gets caught.
   when a site has no lifetime baseline yet.** Those show as "never freed" for
   the developer to judge.
 
-Within those limits this is one tool, one file and one report for every
-object in the heap.
+Within those limits this is one tool, one file and one report for the
+whole heap -- in a heap watch build.
 
 ---
 
@@ -521,15 +636,21 @@ Node  graph/build.m31:22  (epoch "request" left 2)
   write the ledger**: it is 0644 in a 0700 directory, so its owner (open
   question 9).
 - **The store hook.** The emitter puts `rt_hw_store(h, v, offset)` before
-  every store of a reference into a field -- construction included -- and
-  `rt_hw_store_elem(o, i, v)` before every `o[i] = v` of one; the runtime's
-  own stores (push, insert, a map's key and value, an array literal's
-  elements) call the same slow path, and a clone, a slice or a copy for a
-  `const` records what it holds when made. Its fast path is the test epoch
-  close needs anyway -- `h`'s epoch field greater than `v`'s, or trace on for
-  anything -- so with trace off a store costs two header loads (both
-  already in a register or the cache: the frozen check read `h`, `rc_inc`
-  wrote `v`), a load of a global and an untaken branch.
+  every store of a reference into a field and `rt_hw_store_elem(o, i, v)`
+  before every `o[i] = v` of one; the runtime's own stores (push, insert, a
+  map's key and value, an array literal's elements) call the same slow
+  path, and a clone, a slice or a copy for a `const` records what it holds
+  when made. Its fast path loads one global, `rt_hw_watch` -- nonzero only
+  with epoch close on or trace on for anything -- and with the ledger alone
+  that is all a store costs. With epoch close on it then compares `h`'s and
+  `v`'s EPOCH fields (two header loads, both already in a register or the
+  cache). A store into an object made just before it in the same block,
+  which nothing else has seen yet -- a constructor's -- is
+  `rt_hw_store_fresh`, which tests for trace alone: the object is in the
+  innermost epoch, so nothing it is given needs adopting. An object an edge
+  names gets RC_HW_NOTE, so its release takes the edge out. A report reads
+  no other thread's count word: an object's slot comes from its `ty`, or
+  from the table of samples.
 - **The edge table** is kept in memory, under one lock, and only ever holds
   what stores told it: a field's edge is keyed by (holder, offset) -- a
   field holds one value, so a store replaces the old value's edge without
@@ -646,30 +767,38 @@ while (running) {
 
 **Pros**
 
-- **Every object, 0 bytes each.** All the state is in counters, plus a
-  header that is already there.
+- **Nothing in a default build.** A program built without `-DRT_HEAPWATCH`
+  runs the code it ran before heap watch.
+- **0 bytes per object.** All the state is in counters, a header that is
+  already there, and a table of the sampled objects.
 - **No heap walk and no collection.** The cost per operation is bounded, with
   no pauses and no dependence on heap size.
 - **Survives crashes and redeploys.** A memory-mapped ledger plus an
   append-only suspect log.
 - **Learns its own thresholds.** Each site's lifetime histogram is the
   baseline, so no configuration is needed to start.
-- **Exact where it can be.** Epoch close never reports a false leak.
+- **Exact where it can be.** Epoch close counts every object and never
+  reports a false leak; with `M31_HEAPWATCH_SAMPLE=1` the ledger is exact
+  too.
 - **Points at the fix.** Type, file and line, age, unit of work.
-- **Same program behaviour either way.** Turning it off changes only what is
+- **Same program behaviour either way.** Heap watch changes only what is
   written to the files.
 
 **Cons**
 
-- **Store sites gain a branch.** It is one predictable compare per reference
-  store.
+- **It has to be asked for.** A process that was not built with heap watch
+  has no ledger to read after it crashed; finding a leak in production
+  means deploying a heap watch build (a few percent, "Cost") and waiting
+  for it to recur.
+- **Sampled counts are estimates**, and a small leak is found later than a
+  large one; `M31_HEAPWATCH_SAMPLE` trades cost for resolution.
+- **Store sites gain a test** in a heap watch build: one load of a global
+  per reference store, an EPOCH compare with epoch close on.
 - **Adoption rules must stay complete.** Closures and any future feature that
   lets a value escape need an entry, or false epoch reports appear (the
   corpus catches them).
-- **A per-site `TypeInfo`** means runtime type checks go through `canon`, and
-  the emitted static data grows.
-- **The count drops from 59 bits to 33.** It is still 8.6 billion, and an
-  overflow traps rather than corrupting.
+- **The emitted static data grows** in a heap watch build: a `TypeInfo` per
+  user-type allocation site, and the line table.
 - **Age suspects need time**, and a site with no baseline needs a human to
   judge it.
 - **Disk:** one ledger file per process. Ledgers from old pids need a
@@ -687,65 +816,88 @@ the measurements replace them.
 
 ### CPU
 
-Best of 5 runs, interleaved, gcc 14 `-O2`, x86-64 (12 cores, load about
-1.3 from other work), measured 2026-10-21: differences under ~5 % are noise.
-Each column is the program built by that commit's compiler and runtime;
-"off" is the final build run with `M31_HEAPWATCH=0`. `bench/heapwatch/run.sh`
-repeats the on/off comparison for any later change.
+Revision 7, measured 2026-10-22 on the five benchmarks revision 6 was
+measured on: best of 15 runs, interleaved, gcc 14 `-O2`, x86-64 (an
+i7-8750H, 12 threads, load 2-3 from other work), against 0.11.0
+(`a0bd007`, before heap watch). Wall time is the column; the user-mode
+cycles (fewest of the 15) and instructions of each run were counted too,
+with `perf_event_open`. On this machine two builds of identical code differ
+by up to 3 % in wall time and cycles from run to run; instruction counts do
+not vary. `bench/heapwatch/run.sh` repeats the comparison.
 
-| Benchmark | What it does | before (528cc2a) | + ledger | + trace hook | + epochs | off |
+| Benchmark | What it does | 0.11.0 | default build | heap watch build, `M31_HEAPWATCH=0` | heap watch build, ledger (its default) | heap watch build, `full` |
 |---|---|---|---|---|---|---|
-| `bench/trees` | binary trees: allocate and free 16 x 2^19 nodes | 0.55 s | 0.62 s | 0.61 s | 0.64 s (+16 %) | 0.58 s |
-| `bench/heapwatch/allocs` | a struct, a str and a 2-element List per iteration, little else | 0.46 s | 0.57 s | 0.65 s | 0.76 s (+65 %) | 0.50 s |
-| `bench/valenum/result-boxed` | a boxed `Result` per call, 50 M calls | 1.54 s | 2.03 s | 1.96 s | 2.52 s (+64 %) | 1.55 s |
-| `bench/valenum/option-boxed` | a boxed `Option` per call | 0.79 s | 1.01 s | 1.09 s | 1.33 s (+68 %) | 0.85 s |
-| `bench/heapwatch/stores` | 40 M reference stores into fields and List slots, no allocation | 0.66 s | 0.72 s | 0.88 s | 0.79 s (+20 %) | 0.80 s |
+| `bench/trees` | binary trees: allocate and free 16 x 2^19 nodes | 0.561 s | 0.545 s (-2.8 %) | 0.555 s (-1.0 %) | 0.550 s (-1.9 %) | 0.592 s (+5.6 %) |
+| `bench/heapwatch/allocs` | a struct, a str and a 2-element List per iteration, little else | 0.453 s | 0.448 s (-1.2 %) | 0.459 s (+1.4 %) | 0.463 s (+2.2 %) | 0.562 s (+24.0 %) |
+| `bench/heapwatch/stores` | 40 M reference stores into fields and List slots, no allocation | 0.683 s | 0.688 s (+0.8 %) | 0.662 s (-3.0 %) | 0.663 s (-2.9 %) | 0.779 s (+14.1 %) |
+| `bench/valenum/result-boxed` | a boxed `Result` per call, 50 M calls | 1.499 s | 1.483 s (-1.0 %) | 1.503 s (+0.3 %) | 1.494 s (-0.3 %) | 1.686 s (+12.5 %) |
+| `bench/valenum/option-boxed` | a boxed `Option` per call | 0.784 s | 0.786 s (+0.2 %) | 0.779 s (-0.7 %) | 0.788 s (+0.5 %) | 0.877 s (+11.9 %) |
 
-What it comes to, per operation: an allocation and its release cost a few
-nanoseconds more with the ledger (three counter updates: a wheel cell on
-each end, a lifetime bucket on release) and about as much again with epochs
-(one more update on each end, in the task's row). The cost is not the
-instructions -- rewriting both ends as straight-line fast paths with every
-slow case out of line changed nothing measurable -- but the dependency of
-each update on the store before it to the same counter, which a tight
-allocate-and-free loop lines up back to back. The store hook (two header
-loads, a global load and an untaken branch per reference store) is about
-20 % of a loop that does nothing but store references, and stays when heap
-watch is off: it is compiled in.
+The same runs in cycles and instructions, against 0.11.0:
 
-So the estimate of 3-7 % was optimistic for code that does nothing but
-allocate: **+16 % on binary trees, +65 % on loops that allocate and free an
-object or more per iteration and do little else, +20 % on a loop that does
-nothing but store references.** Code that computes between allocations and
-stores pays proportionally less. With `M31_HEAPWATCH=0` the allocation
-benchmarks run within a few percent of the build before heap watch.
+| Benchmark | default build: cycles / instructions | ledger: cycles / instructions | `full`: cycles / instructions |
+|---|---|---|---|
+| trees | +1.2 % / 0.0 % | +1.1 % / +2.1 % | +8.2 % / +9.6 % |
+| allocs | -0.3 % / 0.0 % | +4.1 % / +4.0 % | +25.3 % / +22.0 % |
+| stores | -0.1 % / 0.0 % | -4.4 % / +5.4 % | +13.1 % / +19.6 % |
+| result-boxed | +0.1 % / 0.0 % | +0.8 % / +3.9 % | +13.8 % / +22.8 % |
+| option-boxed | +0.8 % / 0.0 % | 0.0 % / +3.6 % | +12.3 % / +21.0 % |
 
-**Decision (open question 1): on by default, as the requirement asks**, with
-these numbers on record. A server is exactly where it is needed, and one
-switch turns it off for a process where the allocation rate is the
-bottleneck. If the default should change, it is a one-line change in
-`rt_hw_program` (and the off switch becomes an on switch); see open question
-12 for a cheaper middle ground.
+- **The default build costs nothing, by construction.** Compiled without
+  `-DRT_HEAPWATCH`, every function of `runtime/rt.c` and
+  `runtime/scheduler.c` is the same machine code as 0.11.0's -- checked
+  function by function, gcc and clang, at `-O0`, `-O1`, `-O2`, `-O3` and
+  `-Os` -- and so is every function of the five benchmarks' emitted C at
+  `-O0` and `-O2`; the instruction counts are equal to the last one. The
+  only difference is static data: a TypeInfo has the fields heap watch
+  reads (+0.7 KB of `.rodata` on `bench/trees`). The time differences in
+  the "default build" column are the machine's noise.
+- **A heap watch build with the ledger** costs 2-5 % in instructions: the
+  sampling countdown in `rt_alloc` (a subtract and a branch on a
+  thread-local), the NOTE test in `rc_release`, one load and a branch per
+  reference store, and the line before a runtime call that may allocate.
+  The sampling itself -- one object in 64 KiB on average -- is lost in it.
+  In time it is within the machine's noise: -2.9 % to +2.2 % above, and
+  -4.1 % to +4.0 % in a second measurement of the same builds (21 runs).
+- **`full`** adds epoch close: one more count up as each object is made and
+  one down as it is freed, in the green thread's own HwHot, and an EPOCH
+  compare on every reference store. 6-25 % on these benchmarks (10-24 % in
+  the second measurement), the most on
+  `allocs`, which does nothing but allocate, free and store; meant for
+  tests -- every corpus program's `-O0` builds run in it -- and for hunting a
+  leak in a heap watch build.
+- **Where revision 6's cost went.** Revision 6 counted every object in a
+  per-site timing-wheel cell and lifetime bucket (a load, an add and a store
+  each, on a shard looked up per operation), stamped a birth minute and an
+  epoch in every count word (so `rc_inc` had to check a 33-bit count), made
+  the runtime's own objects' `ty` a per-line copy (so every type test loaded
+  `o->ty->canon`, and `rt_alloc` looked the copy up by line), counted every
+  object by site in its epoch's hash table, and had all of that compiled
+  into every program. Measured then: +16 % to +68 % with it on, up to +20 %
+  with it off. A word in front of each object for the site and birth was
+  tried on the way: it cost `trees` 14 % on its own, by moving 40-byte
+  objects into malloc's next size class, and was dropped for sampling.
 
 ### Memory
 
 | Item | Measured |
 |---|---|
-| per object | **0 B**: spare bits in the count word |
-| per allocation site, static | one 104 B TypeInfo copy; a site's line is 16 B in the line table. An HTTP server program (`tests/http/t_server_stream.m31`) has 341 user-type sites and 735 lines: about 50 KB. |
-| runtime code | +37 KB of text (`examples/tour` 92 KB -> 129 KB); +100 KB of zeroed data (scratch tables), untouched until used |
-| per site and shard, in the ledger | 320 B (the wheel, the lifetime histogram, the forever count); only shards a thread used and sites that allocated are ever written |
+| per object | **0 B** in the default build and in a heap watch build: spare bits in the count word |
+| per sampled object | a 24 B entry in the table of samples, which stays at most half full |
+| per allocation site, static | in a heap watch build, one 104 B TypeInfo copy per user-type site, and a site's line is 16 B in the line table: about 50 KB for an HTTP server program (341 user-type sites, 735 lines). In every build, a TypeInfo's name and field table: +0.7 KB on `bench/trees` |
+| runtime code | a heap watch build: +41 KB of text (`examples/tour` 93 KB -> 135 KB) and +100 KB of zeroed data (scratch tables), untouched until used; the default build: none |
+| per site and shard, in the ledger | 320 B (the wheel, the lifetime histogram, the forever count); only shards a thread used and sites that sampled are ever written |
 | ledger file | apparent size about 1.3 MB per shard (sites + 4 096 for the runtime's own) times shards (carriers + 8): 27 MB on a 12-core machine, sparse; **written: 20-100 KB** for the corpus's and the tests' programs |
-| resident memory | +250-350 KB on the benchmarks above (19.1 MB -> 19.4 MB on `trees`) |
-| epoch rows | per task, a small table per open depth, 16 cells to start; freed when the task ends |
+| resident memory | +300-500 KB in a heap watch build (19.0 MB -> 19.5 MB on `trees`, 5.8 -> 6.1 MB on `allocs`) |
+| epoch books | per task, three words in its green thread, and a small table per open depth for its sampled objects, 16 cells to start; freed when the task ends |
 | trace edge table | only while tracing: 56 B per edge plus its hash entries, capped (1 M edges by default) |
 
 ### The proposal's estimates, for comparison
 
 Allocate ~2-3 ns, free ~3-5 ns, a reference store ~0.3-1 ns, "about 3-7 %
-on code that allocates heavily" -- the per-operation figures were about
-right in instructions and off by the memory dependencies; the percentage
-was off for allocation-bound code.
+on code that allocates heavily". Counting every object, as proposed and as
+revision 6 did, was well over that on allocation-bound code (+16 % to
++68 %); sampling, as revision 7 does, is under it.
 
 ---
 
@@ -753,10 +905,11 @@ was off for allocation-bound code.
 
 | Piece | Feasible? | Main risk | How it is caught |
 |---|---|---|---|
-| Count word split (59 → 33 bits + BIRTH, EPOCH) | yes; `rc_inc`/`rc_dec` are out-of-line functions in `runtime/rt.h`, so the mask changes in one place | a path that reads the count word raw | sanitizers + an RC_DEBUG check that the flag bits survive every operation |
-| Per-site `TypeInfo` with `canon` | yes; the compiler already emits one `TypeInfo` per type | the 18 `->ty ==` identity checks in `runtime/` must all go through `canon` | a gate that greps for a raw `->ty ==` |
+| Count word fields (59 → 51 bits + NOTE, EPOCH, SAMPLED), heap watch build only | yes; `rc_inc`/`rc_dec` are out-of-line functions in `runtime/rt.c`, so the mask changes in one place | a path that reads the count word raw | sanitizers + a runtime test that a retain and a release leave the fields alone |
+| Per-site `TypeInfo` for user types | yes; the compiler already emits one `TypeInfo` per type | a runtime type check on a user type's record | none exists; the runtime's own types are never copied (revision 7) |
+| Nothing in a default build | yes; `#if RT_HEAPWATCH` in the runtime, macros for the emitted hooks | a hook left outside them | a gate: no heap watch symbol in a default runtime, no heap watch call in a default program |
 | `live` / `lifetime` counters, mmap ledger, suspect log | yes; plain memory writes, one file per process | thread shards and file layout versioning | corpus run with the ledger read back by the tool |
-| Forever marks | yes; a reserved `BIRTH` value, no new bit | none notable | corpus |
+| Forever marks | yes; a reserved birth minute, no new bit | none notable | corpus |
 | Epoch close | yes, but the **hardest** part | an incomplete adoption list gives false reports (closures, sends, globals, future escape routes) | every corpus program must close clean; a false report fails the gate |
 | Trace | yes; event-based, no heap walk | holders inside runtime collections must be attributed to the collection; edge table memory | corpus programs with a known holder path, checked against the trace output |
 | On-the-fly control page | yes; the tool writes the page, the tick reads it | two tools writing at once | a lock word in the page |
@@ -784,11 +937,13 @@ All three are built (2026-10-21), one commit each, and measured together in
 ## Configuration
 
 Everything is read once, at start, from the environment; nothing needs a
-rebuild.
+rebuild -- once the program is a heap watch build (`-DRT_HEAPWATCH`,
+`./build.sh --heapwatch`), which is the one thing that does.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `M31_HEAPWATCH` | on | `0` turns heap watch off: nothing counted, no file |
+| `M31_HEAPWATCH` | `ledger`; `full` in a `-DRC_DEBUG` build | `ledger`: the sampled ledger, trace on request; `full`: and epoch close; `0`: nothing counted, no file |
+| `M31_HEAPWATCH_SAMPLE` | 65536; 1 in a `-DRC_DEBUG` build | the mean bytes allocated between sampled objects; `1` samples every object, and every count is exact |
 | `M31_HEAPWATCH_DIR` | `${TMPDIR:-/tmp}/m31-heapwatch-<uid>` | where the ledger, `.suspects` and `.trace` go |
 | `M31_HEAPWATCH_KEEP` | off | keep the files after a clean exit with nothing to report |
 | `M31_HEAPWATCH_MIN` | 10 | the suspect floor, in minutes |
@@ -815,9 +970,15 @@ overrule any of them):
 5. **Yes: a test build traps.** "Test build" is the runtime compiled with
    `-DRC_DEBUG`, which is what the corpus and the runtime's own tests use;
    `M31_HEAPWATCH_TRAP=1` asks for it in any build, `=0` turns it off.
-1. **On by default.** Every compiled program counts, release builds
-   included, and `M31_HEAPWATCH=0` turns it off. The cost section has the
-   measurement this rests on.
+1. **Off by default -- revision 7.** Revision 6 had it on in every
+   program, at +16 % to +68 % on allocation-bound benchmarks and up to
+   +20 % with it switched off, which could not be merged. Now a default build
+   has none of it, and a heap watch build (`-DRT_HEAPWATCH`) has the sampled
+   ledger on and epoch close on request. The cost section has the
+   measurements this rests on. Requirements 1 and 2 hold in a heap watch
+   build -- every object is covered, by sampling (exactly with
+   `M31_HEAPWATCH_SAMPLE=1`), and the ledger survives a crash -- and not in
+   a default one.
 3. **`F = 10` and a 10-minute floor**, both configurable
    (`M31_HEAPWATCH_FACTOR`, `M31_HEAPWATCH_MIN`). A site with no deaths has no
    baseline and is "never freed", not a suspect, unless `M31_AGE` gives it a
@@ -850,7 +1011,10 @@ Still open:
     missing and such an object were in fact still reachable, stores into it
     would from then on keep, not adopt -- fewer reports, never a false one.
     The corpus gate is what keeps the list complete.
-12. **A cheaper mode?** Epochs are about half of the cost on
-    allocation-bound code. A `M31_HEAPWATCH=ledger` that keeps the ledger
-    and trace but not epoch close would roughly halve it; not built, since
-    the requirement asks for all three always on.
+12. **A cheaper mode: built, revision 7.** `M31_HEAPWATCH=ledger` is a
+    heap watch build's default, and epoch close is `full`.
+13. **Should a default build sample too?** The sampled ledger costs a few
+    percent ("Cost"), most of it the hooks' tests rather than the sampling.
+    Shipping it in every build would put those tests back in every program;
+    it is the owner's call, and a one-line change to `build.sh` and the
+    corpus runner.

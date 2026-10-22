@@ -15,9 +15,9 @@ export RT_KERNELS
 quick=0
 [ "${1:-}" = "--quick" ] && quick=1
 
-# Every compiled program keeps a heap watch ledger (docs/heap-watch-design.md)
-# and leaves it behind when it traps or is killed -- which the trap corpus and
-# the runtime tests do on purpose, thousands of times. Here, not in /tmp.
+# A heap watch build keeps a ledger (docs/heap-watch-design.md) and leaves it
+# behind when it traps or is killed -- which the trap corpus and the runtime
+# tests do on purpose, thousands of times. Here, not in /tmp.
 HEAPWATCH_DIR=$(mktemp -d)
 export M31_HEAPWATCH_DIR=$HEAPWATCH_DIR
 trap 'rm -rf "$HEAPWATCH_DIR"' EXIT
@@ -90,19 +90,32 @@ run "runtime stays separate TU" bash -c '
         exit 1
     fi'
 
-# Heap watch gives every allocation site a TypeInfo of its own, so `o->ty`
-# is the site's record and a type's identity is `o->ty->canon`
-# (docs/heap-watch-design.md, "The ledger"). A comparison of `ty` itself
-# with a type's address would be false for every object made at a site, so
-# none may exist in the runtime, outside comments.
-run "no raw type identity checks" bash -c '
-    hits=$(grep -nE "(->ty|[^a-z_.]ty) *[!=]= *&" runtime/*.c runtime/*.h \
-        | grep -vE "^[^:]*:[0-9]+: *(/\*|\*)" || true)
-    if [ -n "$hits" ]; then
-        echo "compare o->ty->canon, not o->ty, with a type:"
-        echo "$hits"
-        exit 1
-    fi'
+# Heap watch costs nothing in a build without it (docs/heap-watch-design.md,
+# "Builds"): no symbol of it in the runtime, and no call to it in a program's
+# code -- not even in one that uses lib/heapwatch.m31 -- once the C is
+# compiled without -DRT_HEAPWATCH. With it, both are there.
+run "heap watch only if asked" bash -c '
+    w=$(mktemp -d)
+    trap "rm -rf $w" EXIT
+    for hw in "" -DRT_HEAPWATCH; do
+        cc -O2 $hw -I runtime -c runtime/rt.c -o "$w/rt.o" || exit 1
+        n=$(nm "$w/rt.o" | grep -cE " [A-Za-z] (rt_)?hw_" || true)
+        if [ -z "$hw" ] && [ "$n" -ne 0 ]; then
+            echo "heap watch symbols in a runtime built without it:"
+            nm "$w/rt.o" | grep -E " [A-Za-z] (rt_)?hw_" | head
+            exit 1
+        fi
+        if [ -n "$hw" ] && [ "$n" -eq 0 ]; then echo "no heap watch symbols with $hw"; exit 1; fi
+        src=corpus/core/1401-heapwatch-epoch-ways-out.'"$LANG_EXT"'
+        ./target/debug/'"$LANG_BIN"' -emit-c "$src" --out "$w/p.c" || exit 1
+        n=$(cc -E -P $hw -I runtime "$w/p.c" | grep -cE "\b(rt_)?hw_|RT_HW_" || true)
+        if [ -z "$hw" ] && [ "$n" -ne 0 ]; then
+            echo "heap watch in a program built without it:"
+            cc -E -P -I runtime "$w/p.c" | grep -nE "\b(rt_)?hw_|RT_HW_" | head
+            exit 1
+        fi
+        if [ -n "$hw" ] && [ "$n" -eq 0 ]; then echo "no heap watch calls with $hw"; exit 1; fi
+    done'
 
 # Emitted C must compile warning-free under both compilers. run.sh enforces
 # this per-program; this checks the runtime itself -- with each sys-layer
@@ -118,8 +131,11 @@ run "runtime compiles clean" bash -c '
         command -v "$cc" >/dev/null || continue
         for opt in -O0 -O2; do
             for b in "${backends[@]}"; do
-                out=$("$cc" "$opt" $b -Wall -Wextra -DRC_DEBUG -I runtime -c runtime/rt.c -o /dev/null 2>&1)
-                if [ -n "$out" ]; then echo "$cc $opt $b:"; echo "$out"; exit 1; fi
+                # With heap watch and without it (docs/heap-watch-design.md).
+                for hw in "" -DRT_HEAPWATCH; do
+                    out=$("$cc" "$opt" $b $hw -Wall -Wextra -DRC_DEBUG -I runtime -c runtime/rt.c -o /dev/null 2>&1)
+                    if [ -n "$out" ]; then echo "$cc $opt $b $hw:"; echo "$out"; exit 1; fi
+                done
             done
         done
     done'
@@ -198,8 +214,9 @@ run "terminal reads park only the green thread" bash runtime/tests/term_wait_tes
 # pipe with delayed writes (lower bounds strict, upper bounds loose).
 run "term read_keys escape wait" bash runtime/tests/term_keys_wait_test.sh
 # Heap watch's ledger, read back by `m31c -heapwatch`: suspects on a short
-# minute clock, forever marks by type, site and object, the ledger after
-# `kill -9`, a clean exit leaving nothing, and the count word's split.
+# minute clock, exact and sampled, forever marks by type, site and object,
+# the ledger after `kill -9`, a clean exit leaving nothing, trace, epoch
+# close in each mode, and the count word's fields.
 run "heap watch" bash runtime/tests/heapwatch_test.sh
 
 # Child processes (docs/proc-decision.md): lib/proc.m31 over the sys layer's

@@ -306,12 +306,36 @@ pub(super) fn emit_func(
         // Heap watch: the line the allocations below are made at, from the
         // `Inst::Site` the lowering put in front of them in this block.
         let mut loc = 0;
+        // Heap watch: objects made in this block that nothing but their
+        // own field stores has touched since. A store into one needs no
+        // epoch check, only trace's (rt.h, rt_hw_store_fresh): it is in the
+        // innermost epoch and nothing older holds it yet.
+        let mut fresh: Vec<Value> = Vec::new();
         for i in &b.insts {
             if let Inst::Site { loc: l } = i {
                 loc = *l;
                 continue;
             }
-            emit_inst(o, f, types, i, ffi, sites, loc);
+            let into_fresh = matches!(i, Inst::StoreField { obj, .. } if fresh.contains(obj));
+            let hw = heapwatch::At {
+                sites,
+                loc,
+                into_fresh,
+            };
+            emit_inst(o, f, types, i, ffi, &hw);
+            match i {
+                Inst::Alloc { dst, .. } => fresh.push(*dst),
+                Inst::StoreField { val, .. } | Inst::RcInc { val } => fresh.retain(|v| v != val),
+                Inst::IConst { .. }
+                | Inst::FConst { .. }
+                | Inst::BConst { .. }
+                | Inst::SConst { .. }
+                | Inst::KConst { .. }
+                | Inst::Arith { .. }
+                | Inst::ICmp { .. }
+                | Inst::Not { .. } => {}
+                _ => fresh.clear(),
+            }
         }
         emit_term(o, f, &b.term);
     }

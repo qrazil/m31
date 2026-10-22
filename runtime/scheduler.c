@@ -810,10 +810,13 @@ struct rt_green {
     rt_ctx_t  *carrier_ctx; /* this dispatch's switch-back target; reset on
                               * every dispatch, see carrier_dispatch below */
     bool       finished;
-    /* Heap watch's books for this task (runtime/heapwatch.c, HwTask): made
-     * on its first allocation, reached through rt_hw_task_slot while it
-     * runs, closed and freed by rt_hw_task_end when its entry returns. */
-    void      *hw;
+    /* Heap watch's books for this task (runtime/heapwatch.c, HwHot): what
+     * its allocations read, and its HwTask, made on first use. Reached
+     * through rt_hw_task_slot while it runs; closed and cleared by
+     * rt_hw_task_end when its entry returns. */
+#if RT_HEAPWATCH
+    void      *hw[3];
+#endif
 
     /* Phase 3 -- see scheduler.h's "park/unpark" section. */
     rt_scheduler_t *sched;      /* set once, at spawn; never changes */
@@ -1209,7 +1212,9 @@ static void carrier_dispatch(rt_carrier_t *c, rt_green_t *g) {
     /* Heap watch reaches the running task's books through this. A carrier
      * sets it on its own thread, outside any green thread, so no cached
      * thread-local address can go stale here (rt.h, rt_stack_limit). */
-    rt_hw_task_slot = &g->hw;
+#if RT_HEAPWATCH
+    rt_hw_task_slot = g->hw;
+#endif
     rt_gtstate_set(g->id, RT_GT_RUNNING);
 
     /* RELEASE, not relaxed -- found by TSan on exactly this scheduler,
@@ -1262,7 +1267,9 @@ static void carrier_dispatch(rt_carrier_t *c, rt_green_t *g) {
     atomic_store_explicit(&g->claimed_by_carrier, false, memory_order_release);
 
     tls_current_green = NULL;
+#if RT_HEAPWATCH
     rt_hw_task_slot = NULL;
+#endif
 
     if (g->finished) {
         /* Remove from the registry BEFORE freeing -- rt_sched_unpark looks
@@ -1610,7 +1617,9 @@ uint32_t rt_sched_spawn(rt_scheduler_t *s, void (*entry)(void *), void *arg) {
     g->entry = entry;
     g->arg = arg;
     g->finished = false;
-    g->hw = NULL;
+#if RT_HEAPWATCH
+    memset(g->hw, 0, sizeof g->hw);
+#endif
     g->stack = rt_stack_alloc();
     rt_ctx_make(&g->ctx, g->stack.base, rt_stack_size(), green_trampoline, g);
 
@@ -1800,7 +1809,9 @@ static void *monitor_main(void *argp) {
          * every compiled program already runs that wakes on a timer, so it
          * costs no thread of its own; a call that finds nothing to do is a
          * clock read and a compare. */
+#if RT_HEAPWATCH
         rt_hw_tick();
+#endif
 
         struct timespec ts;
         ts.tv_sec = (time_t)(s->monitor_poll_ns / 1000000000ull);

@@ -59,15 +59,21 @@ done
 
 # The runtime, once: it is the same for every program, and compiling it under
 # the sanitizers was most of what each program cost (scripts/run.sh does the
-# same, for the same reason).
-mkdir -p "$WORK/rt"
-n=0
-for rtsrc in runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM"; do
-    n=$((n + 1))
-    if ! clang -O1 -g $SAN -ffp-contract=off -I runtime -c "$rtsrc" -o "$WORK/rt/$n.o" 2>"$WORK/cc"; then
-        echo "the runtime does not build sanitized: $rtsrc: $(head -1 "$WORK/cc")"
-        exit 1
-    fi
+# same, for the same reason). Twice, in fact: every other program is a heap
+# watch build (docs/heap-watch-design.md, "Builds"), with epoch close on and
+# every object sampled, so its code is checked too; the rest are the default
+# build.
+for hw in "" -DRT_HEAPWATCH; do
+    d="$WORK/rt${hw:+.hw}"
+    mkdir -p "$d"
+    n=0
+    for rtsrc in runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM"; do
+        n=$((n + 1))
+        if ! clang -O1 -g $SAN $hw -ffp-contract=off -I runtime -c "$rtsrc" -o "$d/$n.o" 2>"$WORK/cc"; then
+            echo "the runtime does not build sanitized ($hw): $rtsrc: $(head -1 "$WORK/cc")"
+            exit 1
+        fi
+    done
 done
 
 for src in "${programs[@]}"; do
@@ -81,7 +87,13 @@ for src in "${programs[@]}"; do
         bad=1
         continue
     fi
-    if ! clang -O1 -g $SAN -ffp-contract=off -I runtime "$WORK/p.c" "$WORK"/rt/*.o \
+    hw=""
+    hwenv=()
+    if [ $((checked % 2)) -eq 1 ]; then
+        hw=-DRT_HEAPWATCH
+        hwenv=(M31_HEAPWATCH=full M31_HEAPWATCH_SAMPLE=1)
+    fi
+    if ! clang -O1 -g $SAN $hw -ffp-contract=off -I runtime "$WORK/p.c" "$WORK/rt${hw:+.hw}"/*.o \
             -lpthread -o "$WORK/p" 2>"$WORK/cc"; then
         echo "sanitized build failed: $src: $(head -1 "$WORK/cc")"
         bad=1
@@ -102,7 +114,7 @@ for src in "${programs[@]}"; do
         rundir=$(mktemp -d -p "$WORK")
         (cd "$rundir" && bash "$OLDPWD/$stem.setup") >/dev/null 2>&1
     fi
-    (cd "$rundir" && bash "$WT" "$RUN_LIMIT" "$WORK/p" "${argv[@]+"${argv[@]}"}" <"$stdin") >"$WORK/out" 2>&1
+    (cd "$rundir" && env "${hwenv[@]+"${hwenv[@]}"}" bash "$WT" "$RUN_LIMIT" "$WORK/p" "${argv[@]+"${argv[@]}"}" <"$stdin") >"$WORK/out" 2>&1
     checked=$((checked + 1))
     if grep -q '^with_timeout: ' "$WORK/out"; then
         echo "hung (over ${RUN_LIMIT}s): $src"

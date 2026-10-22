@@ -73,42 +73,56 @@ fail_test() {
   fail=$((fail + 1))
 }
 
+# Heap watch (docs/heap-watch-design.md, "Builds") is in a program only when
+# it and the runtime are compiled with -DRT_HEAPWATCH. The corpus runs every
+# program both ways: its -O0 builds with heap watch -- epoch close on, every
+# object counted, and a leaked cycle a trap -- and its -O2 builds without,
+# the default build, which must print the same. A test whose point is heap
+# watch itself (a `.heapwatch` file beside it) is built with it every time.
+hw_flag() { # hw_flag <opt> <source>: -DRT_HEAPWATCH for that build, or nothing
+  if [ "$1" = "-O0" ] || [ -e "${2%.$LANG_EXT}.heapwatch" ]; then
+    echo "-DRT_HEAPWATCH"
+  fi
+}
+
 # The runtime is the same for every program in a run, and compiling it was
 # most of what a test cost -- rt.c #includes the sys layer, the green threads
 # and heap watch, several thousand lines at -O2, four times per test. So it
-# is compiled once per compiler and level, with the flags every test build
-# used (warnings included: one in the runtime fails the run, as it used to
-# fail every test), and each test links the objects. Still a separate
-# translation unit, and still no -flto (docs/ir-v0.md §7.1).
-rt_objs() { # rt_objs <cc> <opt>: the objects for that build
-  printf '%s\n' "$WORK/rt.$1$2"/*.o
+# is compiled once per compiler, level and heap watch or not, with the flags
+# every test build used (warnings included: one in the runtime fails the
+# run, as it used to fail every test), and each test links the objects.
+# Still a separate translation unit, and still no -flto (docs/ir-v0.md §7.1).
+rt_objs() { # rt_objs <cc> <opt> <hw flag>: the objects for that build
+  printf '%s\n' "$WORK/rt.$1$2${3:+.hw}"/*.o
 }
 for entry in "${CCS[@]}"; do
   cc=${entry%%:*}
   opt=${entry##*:}
-  d="$WORK/rt.$cc$opt"
-  mkdir -p "$d"
-  n=0
-  for rtsrc in runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM"; do
-    n=$((n + 1))
-    if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $RT_CFLAGS -I runtime \
-         -pthread -c "$rtsrc" -o "$d/$n.o" 2>"$d/cc"; then
-      echo "the runtime does not compile [$cc $opt]: $rtsrc" >&2
-      head -10 "$d/cc" >&2
-      exit 1
-    fi
-    if [ -s "$d/cc" ]; then
-      echo "the runtime compiles with warnings [$cc $opt]: $rtsrc" >&2
-      head -10 "$d/cc" >&2
-      exit 1
-    fi
+  for hw in "" "-DRT_HEAPWATCH"; do
+    d="$WORK/rt.$cc$opt${hw:+.hw}"
+    mkdir -p "$d"
+    n=0
+    for rtsrc in runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM"; do
+      n=$((n + 1))
+      if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $hw $RT_CFLAGS -I runtime \
+           -pthread -c "$rtsrc" -o "$d/$n.o" 2>"$d/cc"; then
+        echo "the runtime does not compile [$cc $opt $hw]: $rtsrc" >&2
+        head -10 "$d/cc" >&2
+        exit 1
+      fi
+      if [ -s "$d/cc" ]; then
+        echo "the runtime compiles with warnings [$cc $opt $hw]: $rtsrc" >&2
+        head -10 "$d/cc" >&2
+        exit 1
+      fi
+    done
   done
 done
 
 # run_one <source> <expected-stdout> <label>
 run_one() {
   local src=$1 expected=$2 label=$3
-  local base ref="" ref_tag="" entry cc opt bin got rc line
+  local base ref="" ref_tag="" entry cc opt bin got rc line hw
   base=$(basename "$src" ".$LANG_EXT")
 
   # A test's own `.skip-platform` file names the one `uname -s` value it can
@@ -153,9 +167,10 @@ run_one() {
     # `spawn`/`Chan` always route through the Phase 1-3 green-thread runtime
     # now, so every build links the scheduler, the reactor, and the x86-64
     # context switch they share, alongside rt.c.
+    hw=$(hw_flag "$opt" "$src")
     # shellcheck disable=SC2046 # one word per object, none with spaces
-    if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $RT_CFLAGS -I runtime \
-         -pthread -o "$bin" "$WORK/$base.c" $(rt_objs "$cc" "$opt") \
+    if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $hw $RT_CFLAGS -I runtime \
+         -pthread -o "$bin" "$WORK/$base.c" $(rt_objs "$cc" "$opt" "$hw") \
          2>"$WORK/$base.cc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code: $(head -1 "$WORK/$base.cc")"
       return
@@ -315,9 +330,10 @@ for src in corpus/traps/*."$LANG_EXT"; do
     cc=${entry%%:*}
     opt=${entry##*:}
     bin="$WORK/$base.t.$cc$opt"
+    hw=$(hw_flag "$opt" "$src")
     # shellcheck disable=SC2046 # one word per object, none with spaces
-    if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $RT_CFLAGS -I runtime \
-         -pthread -o "$bin" "$WORK/$base.c" $(rt_objs "$cc" "$opt") \
+    if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $hw $RT_CFLAGS -I runtime \
+         -pthread -o "$bin" "$WORK/$base.c" $(rt_objs "$cc" "$opt" "$hw") \
          2>"$WORK/$base.tcc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code"
       trap_ok=0; break
