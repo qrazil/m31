@@ -40,7 +40,7 @@ if [ "$(uname -s)" = Linux ]; then
             l="kernels $arch $cc $opt"
             if ! "$cc" "$opt" "${FREE[@]}" -o "$WORK/k" runtime/tests/ffitest_kernels_test.c \
                  "runtime/ffitest_$arch.S" "runtime/accel_$arch.S" "runtime/crypto_$arch.S" 2>"$WORK/k.err" || [ -s "$WORK/k.err" ]; then
-                bad "$l" "did not build" "$(head -3 "$WORK/k.err")"
+                bad "$l" "did not build" "$(cat "$WORK/k.err")"
             elif [ "$("$WORK/k" 2>&1)" != ok ]; then
                 bad "$l" "$("$WORK/k" 2>&1 | head -3)"
             else
@@ -77,7 +77,7 @@ if [ "$(uname -s)" = Linux ]; then
              runtime/tests/ffitest_kernels_test.c "runtime/ffitest_$target.S" "runtime/accel_$target.S" \
              "runtime/crypto_$target.S" 2>"$WORK/kx.err" \
              || [ -s "$WORK/kx.err" ]; then
-            bad "$l" "did not build" "$(head -3 "$WORK/kx.err")"
+            bad "$l" "did not build" "$(cat "$WORK/kx.err")"
         elif [ "$("$qemu" "$WORK/kx" 2>&1)" != ok ]; then
             bad "$l" "$("$qemu" "$WORK/kx" 2>&1 | head -3)"
         else
@@ -124,13 +124,44 @@ else
             if ! "$cc" "$opt" -Wall -Wextra -DRT_HAVE_KERNELS=0 -I runtime -pthread -o "$WORK/absent" \
                  "$WORK/absent.c" runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" 2>"$WORK/absent.cc" \
                  || [ -s "$WORK/absent.cc" ]; then
-                bad "$l" "did not build" "$(head -3 "$WORK/absent.cc")"
+                bad "$l" "did not build" "$(cat "$WORK/absent.cc")"
             elif [ "$("$WORK/absent")" != "-1" ]; then
                 bad "$l" "an int kernel on a target without kernels must answer -1, got: $("$WORK/absent")"
             else
                 say "$l" ok
             fi
         done
+    done
+fi
+
+# The library on such a target (macOS by default): `accel.features()` must be 0
+# and the m31 code must do the work -- the first version answered "everything"
+# because an absent `int` kernel returns -1, and the first kernel call trapped.
+cat >"$WORK/lib_absent.$LANG_EXT" <<'EOP'
+import crypto.accel;
+import crypto.sha256;
+import crypto.aesgcm;
+print(accel.features());
+print(sha256.hex("abc".to_bytes()));
+EOP
+if ! "$LANGC" -emit-c "$WORK/lib_absent.$LANG_EXT" --out "$WORK/lib_absent.c" 2>"$WORK/lib_absent.err"; then
+    bad "library absent" "compile failed: $(head -1 "$WORK/lib_absent.err")"
+else
+    for cc in gcc clang; do
+        command -v "$cc" >/dev/null || continue
+        l="library absent $cc"
+        if ! "$cc" -O1 -Wall -Wextra -DRT_HAVE_KERNELS=0 -I runtime -pthread -o "$WORK/lib_absent" \
+             "$WORK/lib_absent.c" runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" 2>"$WORK/lib_absent.cc" \
+             || [ -s "$WORK/lib_absent.cc" ]; then
+            bad "$l" "did not build" "$(cat "$WORK/lib_absent.cc")"
+        else
+            got=$("$WORK/lib_absent" 2>&1 | tr '\n' ' ')
+            if [ "$got" = "0 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad " ]; then
+                say "$l" ok
+            else
+                bad "$l" "got: $got"
+            fi
+        fi
     done
 fi
 

@@ -153,3 +153,13 @@ jobs:
       - name: Full gates.sh (compiler build/test/lint, runtime suites above again as part of the gate, formatter, corpus, ASan/UBSan)
         timeout-minutes: 55
         run: bash gates.sh
+
+      # INFORMATIONAL, never blocks a release (continue-on-error): macOS runs
+      # the m31 crypto code by default because the Mach-O spelling of the
+      # assembly kernels had never run on a Mac (docs/ffi-decision.md,
+      # "macOS"). This builds and tests with them through the opt-in
+      # -DRT_DARWIN_KERNELS so the next CI round says whether they work.
+      - name: Assembly kernels on Mach-O arm64 (opt-in -DRT_DARWIN_KERNELS; informational)
+        continue-on-error: true
+        timeout-minutes: 15
+        run: bash runtime/tests/darwin_kernels_test.sh

@@ -238,8 +238,13 @@ C_SYM(rt_ctx_trampoline):
 
 /* Assembly kernels for `prim "c"` (docs/ffi-decision.md). They live in their
  * own files but are assembled as part of this one, so every build script that
- * already links the context switch gets them with no new file to name. */
+ * already links the context switch gets them with no new file to name.
+ *
+ * Not on Darwin unless -DRT_DARWIN_KERNELS (see RT_HAVE_KERNELS in rt.h): the
+ * default macOS build neither assembles nor links them, so a mistake in their
+ * Mach-O spelling cannot break the build of the runtime. */
+#if !defined(__APPLE__) || defined(RT_DARWIN_KERNELS)
 #include "ffitest_aarch64.S"
 #include "accel_aarch64.S"
-
 #include "crypto_aarch64.S"
+#endif

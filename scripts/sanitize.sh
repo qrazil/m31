@@ -56,6 +56,10 @@ done
 
 for src in "${programs[@]}"; do
     stem=${src%.$LANG_EXT}
+    # See runtime/arch.sh: a test of the assembly kernels needs them.
+    if [ -e "$stem.needs-kernels" ] && [ "$RT_KERNELS" != 1 ]; then
+        continue
+    fi
     if ! "$LANGC" -emit-c "$src" --out "$WORK/p.c" 2>/dev/null; then
         echo "does not compile: $src"
         bad=1

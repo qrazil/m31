@@ -19,7 +19,20 @@
 
 #ifndef FFI_FUNC
 #if defined(__APPLE__)
-#define FFI_FUNC(name) .globl C_SYM(name); .p2align 4; C_SYM(name):
+/* On Apple's arm64 assembler `;` starts a comment, it does not separate
+ * statements, so a one-line cpp macro that says `.globl x; .p2align 4; x:`
+ * defines no label at all and every kernel is undefined at link time (the
+ * first macOS CI run found exactly that). An assembler macro puts each
+ * directive on a line of its own. */
+#ifndef M31_ASM_FUNC_DEFINED
+#define M31_ASM_FUNC_DEFINED
+    .macro M31_ASM_FUNC name
+    .globl _\name
+    .p2align 4
+_\name:
+    .endm
+#endif
+#define FFI_FUNC(name) M31_ASM_FUNC name
 #define FFI_END(name)
 #else
 #define FFI_FUNC(name) .globl C_SYM(name); .type C_SYM(name), %function; .p2align 4; C_SYM(name):
@@ -78,3 +91,9 @@ FFI_END(rt_k_cache_store)
 C_SYM(rt_k_cache_word):
     .quad 0
     .text
+
+/* No executable stack. Also needed when this file is assembled on its own
+ * (the kernel tests do), not only when ctx_switch_aarch64.S includes it. */
+#if !defined(__APPLE__)
+    .section .note.GNU-stack,"",%progbits
+#endif

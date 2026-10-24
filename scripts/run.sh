@@ -95,6 +95,14 @@ run_one() {
     fi
   fi
 
+  # `.needs-kernels`: a test of the assembly kernels themselves, which have
+  # nothing to run on a build without them (macOS by default; arch.sh).
+  if [ -e "${src%.$LANG_EXT}.needs-kernels" ] && [ "$RT_KERNELS" != 1 ]; then
+    printf '\033[33mSKIP\033[0m %s (needs the assembly kernels)\n' "$label"
+    skipped=$((skipped + 1))
+    return
+  fi
+
   if ! "$LANGC" -emit-c "$src" --out "$WORK/$base.c" 2>"$WORK/$base.diag"; then
     fail_test "$label" "compile failed: $(head -1 "$WORK/$base.diag")"
     return
@@ -256,6 +264,11 @@ for src in corpus/traps/*."$LANG_EXT"; do
   label="traps/$(basename "$src")"
   base=$(basename "$src" ".$LANG_EXT")
   want=$(cat "${src%.$LANG_EXT}.trap")
+  if [ -e "${src%.$LANG_EXT}.needs-kernels" ] && [ "$RT_KERNELS" != 1 ]; then
+    printf '\033[33mSKIP\033[0m %s (needs the assembly kernels)\n' "$label"
+    skipped=$((skipped + 1))
+    continue
+  fi
 
   if ! "$LANGC" -emit-c "$src" --out "$WORK/$base.c" 2>"$WORK/$base.diag"; then
     fail_test "$label" "compile failed: $(head -1 "$WORK/$base.diag")"

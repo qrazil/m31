@@ -74,6 +74,11 @@ prim "c" nonblocking void __k_cache_store(
 /// on the first call, then one word read.
 pub int features() {
     int cached = __k_cache_load();
+    // -1 is what any `int` kernel answers on a target that has none (macOS
+    // by default, docs/ffi-decision.md): no kernels, and nothing to store.
+    if (cached < 0) {
+        return 0;
+    }
     if (cached != 0) {
         return cached & (COMPUTED - 1);
     }

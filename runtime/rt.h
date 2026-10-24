@@ -25,9 +25,16 @@
  * (runtime/arch.sh selects it); a target not listed gets no call at all from
  * the emitted code: an `int` kernel answers -1 ("absent"), a `void` one traps,
  * and the library, which asks first, runs its m31 code. Defined before the
- * include so a test can force the absent path with -DRT_HAVE_KERNELS=0. */
+ * include so a test can force the absent path with -DRT_HAVE_KERNELS=0.
+ *
+ * Darwin is NOT listed unless -DRT_DARWIN_KERNELS is given, to the C compiler
+ * and the assembler alike (ctx_switch_<arch>.S reads the same define): the
+ * Mach-O spelling of the kernels has never run on a Mac, and the first macOS
+ * CI round found it broken (docs/ffi-decision.md, "macOS"). Until a CI round
+ * with the opt-in is green, macOS runs the m31 code. */
 #ifndef RT_HAVE_KERNELS
-#if defined(__x86_64__) || defined(__amd64__) || defined(__aarch64__)
+#if (defined(__x86_64__) || defined(__amd64__) || defined(__aarch64__)) && \
+    (!defined(__APPLE__) || defined(RT_DARWIN_KERNELS))
 #define RT_HAVE_KERNELS 1
 #else
 #define RT_HAVE_KERNELS 0

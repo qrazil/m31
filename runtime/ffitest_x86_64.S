@@ -111,3 +111,9 @@ FFI_FUNC(rt_k_ffitest_scale)
 2:  imulq %rdi, %rax
     ret
 FFI_END(rt_k_ffitest_scale)
+
+/* No executable stack. Also needed when this file is assembled on its own
+ * (the kernel tests do), not only when ctx_switch_x86_64.S includes it. */
+#if !defined(__APPLE__)
+    .section .note.GNU-stack,"",@progbits
+#endif

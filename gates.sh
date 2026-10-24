@@ -10,6 +10,7 @@ set -uo pipefail
 cd "$(dirname "$0")"
 . ./config.sh
 . ./runtime/arch.sh
+export RT_KERNELS
 
 quick=0
 [ "${1:-}" = "--quick" ] && quick=1
@@ -218,6 +219,11 @@ run "formatter preserves meaning" bash -c '
         # should fail elsewhere just for lacking it.
         skip_file="${f%.'"$LANG_EXT"'}.skip-platform"
         if [ -e "$skip_file" ] && [ "$(uname -s)" != "$(cat "$skip_file")" ]; then
+            continue
+        fi
+        # `.needs-kernels`: a test of the assembly kernels, which a build
+        # without them (macOS by default, runtime/arch.sh) cannot run.
+        if [ -e "${f%.'"$LANG_EXT"'}.needs-kernels" ] && [ "$RT_KERNELS" != 1 ]; then
             continue
         fi
         w=$(mktemp -d)

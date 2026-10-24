@@ -1,0 +1,6 @@
+// On a build with the assembly kernels, `accel.features()` finds the ones every
+// CPU of the architecture has (the integer unit and SSE2 or NEON: ChaCha20,
+// Poly1305, SHA-512, the field kernels), whatever the environment says about
+// the others (docs/ffi-decision.md, "CPU feature detection, in m31").
+import crypto.accel;
+print((accel.features() & 92) == 92);

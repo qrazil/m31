@@ -62,3 +62,9 @@ FFI_END(rt_k_cache_store)
 C_SYM(rt_k_cache_word):
     .quad 0
     .text
+
+/* No executable stack. Also needed when this file is assembled on its own
+ * (the kernel tests do), not only when ctx_switch_x86_64.S includes it. */
+#if !defined(__APPLE__)
+    .section .note.GNU-stack,"",@progbits
+#endif

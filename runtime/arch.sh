@@ -55,3 +55,13 @@ case "$(uname -s)" in
         exit 1
         ;;
 esac
+
+# Whether this build has the assembly kernels `prim "c"` calls
+# (docs/ffi-decision.md; RT_HAVE_KERNELS in runtime/rt.h is the same fact for
+# the C compiler). A corpus program with a `.needs-kernels` sidecar runs only
+# when it is 1. Darwin has them only with -DRT_DARWIN_KERNELS in $RT_CFLAGS.
+RT_KERNELS=1
+case "$(uname -s)" in
+    Darwin) case " ${RT_CFLAGS:-} " in *" -DRT_DARWIN_KERNELS "*) ;; *) RT_KERNELS=0 ;; esac ;;
+esac
+case " ${RT_CFLAGS:-} " in *" -DRT_HAVE_KERNELS=0 "*) RT_KERNELS=0 ;; esac

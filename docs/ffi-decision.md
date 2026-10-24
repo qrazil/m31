@@ -401,6 +401,49 @@ is the glue again.
    buffer by span instead, which is how the Poly1305 and SHA kernels already
    do it.
 
+## macOS: kernels off by default, opt-in to test
+
+The first CI round of 0.12.0 failed on macOS arm64 with every `rt_k_*` symbol
+undefined, and on Linux with a linker warning the kernel gate counted as a
+failure. Both were mistakes in the assembly's spelling, found by CI because
+neither could be reproduced here:
+
+- **Linux:** the standalone-assembled `.S` files had no `.note.GNU-stack`
+  section (only `ctx_switch_*.S` had one), so the CI runner's newer `ld` warned
+  `missing .note.GNU-stack section implies executable stack`, and
+  `ffi_test.sh` treats any compiler/linker output as a failure. Every kernel
+  file now ends with the note (ELF only), and the gate prints the whole
+  output when a build fails.
+- **macOS arm64:** Apple's assembler takes `;` as the start of a comment, not as
+  a statement separator, so `#define FUNC(name) .globl x; .p2align 4; x:` was
+  `.globl x` and a comment: no kernel label was ever defined. (This was
+  reproduced on Linux by `clang --target=arm64-apple-macos13 -c`, which
+  assembles Mach-O without an SDK: before, 0 `rt_k_*` symbols defined and 22
+  undefined; after, 22 defined.) The aarch64 files now define each function
+  with an assembler `.macro`, one directive per line.
+
+Because the Mach-O spelling has still never run on a Mac, **Darwin runs the m31
+code by default**: `RT_HAVE_KERNELS` is 0 on `__APPLE__` unless
+`-DRT_DARWIN_KERNELS` is given (to the C compiler and the assembler alike), and
+`ctx_switch_<arch>.S` does not even include the kernel files then, so a mistake
+in them cannot break the runtime's build. On such a target `accel.features()` is
+0 (an absent `int` kernel answers -1 and `features()` treats a negative cache
+word as "no kernels"), the m31 code does the work, and corpus tests of the
+kernels themselves (`.needs-kernels` sidecar files, `RT_KERNELS` in
+`runtime/arch.sh`) are skipped and said so.
+
+`runtime/tests/darwin_kernels_test.sh`, run by an informational
+(`continue-on-error`) step of `.github/workflows/macos.yml`, builds and runs
+with `-DRT_DARWIN_KERNELS`: every `rt_k_*` the library declares is defined, the
+kernel corpus programs print what they should, and cryptodiff matches OpenSSL.
+When a CI round shows it green, drop the default-off in `rt.h` and the
+`#if` in `ctx_switch_*.S`.
+
+Known and not fixed: x86-64 **Mach-O** (Intel Mac) does not assemble
+`crypto_x86_64.S` with the opt-in, because Darwin's assembler reads `$0`, `$1`
+inside a `.macro` body as positional arguments (`pclmulqdq $0x00`, `pslld $1`);
+only reachable through the opt-in, and no CI job runs an Intel Mac.
+
 ## What still needs C
 
 **Nothing.** `runtime/crypto_glue.c` is deleted, `rt.c` and `rt.h` carry no
@@ -414,6 +457,6 @@ the runtime's hand-written C has gained one macro, `RT_HAVE_KERNELS`, in
 `runtime/rt.h`.
 
 What is **not tested here**, and is written so that CI will exercise it: macOS
-arm64 (the Mach-O spelling of `accel_aarch64.S` and `crypto_aarch64.S`, the
-static feature set), and the m31 library running on aarch64 Linux (the
+arm64 with `-DRT_DARWIN_KERNELS` (the Mach-O spelling of `accel_aarch64.S` and
+`crypto_aarch64.S`, the static feature set; see above), and the m31 library running on aarch64 Linux (the
 `/proc/self/auxv` read; only the kernels are run, under qemu-user).

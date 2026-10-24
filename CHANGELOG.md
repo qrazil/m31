@@ -5,6 +5,19 @@ change landed on master.
 
 ## 0.12.0 (2026-10-22)
 
+### Fixed before release
+
+- The assembly kernel files carry a `.note.GNU-stack` section on their own (the
+  CI linker warned about an executable stack), and the kernel gate prints the
+  full build output on failure.
+- Apple arm64: kernel labels are defined with an assembler `.macro` (Apple's
+  assembler takes `;` as a comment). **macOS builds run the m31 crypto code by
+  default**: `RT_HAVE_KERNELS` is 0 on Darwin unless `-DRT_DARWIN_KERNELS`, the
+  kernel files are not assembled there, and an informational macOS CI step
+  (`runtime/tests/darwin_kernels_test.sh`) tests the opt-in.
+- `accel.features()` is 0, not "everything", on a target without kernels; the
+  emitted absent-kernel branch no longer trips `-Wunused-but-set-variable`.
+
 ### Added
 
 - **`prim "c"`: a compiler-checked call of an assembly or C-ABI function from

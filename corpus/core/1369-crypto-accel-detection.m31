@@ -60,6 +60,3 @@ print(accel.restrict(127, Option<str>.Some("-aes,-sha256,-sha1")));
 print(accel.restrict(127, Option<str>.Some("-chacha,-poly,-fe,-sha512")));
 print(accel.restrict(127, Option<str>.Some("-bogus,-aes")));
 print(accel.restrict(93, Option<str>.Some("-sha256")));
-
-// the always-present kernels are there on every architecture that has kernels
-print((accel.features() & 92) == 92);

@@ -209,6 +209,11 @@ pub(super) fn emit_native_call(
         writeln!(g.o, "        rt_exit_blocking();").unwrap();
     }
     writeln!(g.o, "#else").unwrap();
+    // The arguments are evaluated but nothing reads them on this target; say
+    // so, or clang's -Wunused-but-set-variable fails the warning gate.
+    for a in &g.args {
+        writeln!(g.o, "        (void){a};").unwrap();
+    }
     if sig.returns_int {
         if let Some(d) = dst {
             writeln!(g.o, "        {d} = -1;").unwrap();
