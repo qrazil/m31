@@ -267,6 +267,7 @@ struct Obj {
 /* A destructor body runs at a count of 1 and must leave it there; the
  * emitted drop function sets and checks the count through these, so the
  * birth minute and epoch beside it survive (src/back/emit_c/types.rs). */
+#if RT_HEAPWATCH
 static inline void rt_rc_set_count(Obj *o, long n) {
     o->rc = (o->rc & ~RC_COUNT) | n;
 }
@@ -274,6 +275,13 @@ static inline void rt_rc_set_count(Obj *o, long n) {
 static inline long rt_rc_count(const Obj *o) {
     return o->rc & RC_COUNT;
 }
+#else
+/* Without heap watch the whole word is the count and the flags, and the
+ * drop function is the same text, and so the same code at every -O, as
+ * before heap watch. */
+#define rt_rc_set_count(o, n) ((o)->rc = (n))
+#define rt_rc_count(o) ((o)->rc)
+#endif
 
 /* Strings carry no methods and need no drop. */
 extern const TypeInfo rt_str_type;
