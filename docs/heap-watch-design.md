@@ -1,12 +1,23 @@
 # Heap watch: one ledger for every object
 
-Status: **approved and built.** Revision 7, 2026-10-21. All three parts
+Status: **approved, built and merge-ready.** Revision 8, 2026-11-04. All three parts
 are built, in a **heap watch build** only: a program and runtime compiled
 with `-DRT_HEAPWATCH` (`./build.sh prog.m31 --heapwatch`). The default
 build has none of it. In a heap watch build the ledger is on, by sampling;
 epoch close is on with `M31_HEAPWATCH=full`; trace is on request. "As built"
 under each part says what differs from the proposal, and the cost section
 has measurements in place of the estimates.
+
+Revision 8: merge readiness, after the owner took the feature off hold ("a
+perfect opt-in tool": opt in at build time, debug and test builds, not a
+garbage collector). Rebased on 0.12.0 (`prim "c"`, the assembly kernels);
+the default build is proven to be the same machine code as master's, over
+the whole corpus ("Builds", "Cost"); one more difference found in that proof
+(the `-O0` drop functions' count accessors) is fixed; the cost was
+re-measured, and a round of further optimisation tried and, where it did
+not measurably help, dropped ("Cost", "What was tried in revision 8"); a
+user guide, `docs/heap-watch.md`, was written. Defaults chosen without
+asking are in "Open questions", under "Revision 8 defaults".
 
 Revision 7: the cost. Revision 6 measured +16 % to +68 % on allocation-bound
 benchmarks with heap watch on, and up to +20 % with it off, which could not
@@ -113,7 +124,9 @@ only if asked`) checks that a default build of the
 runtime has no heap watch symbol and that a program using
 `lib/heapwatch.m31` has no heap watch call once preprocessed; with the flag,
 both are there. `rc_inc`, `rc_dec`, `rt_alloc` and the runtime's stores
-compile to the same machine code as before heap watch.
+compile to the same machine code as before heap watch -- and so does every
+program of the corpus, at `-O0` and `-O2` ("Cost": `bench/heapwatch/identity.sh`).
+`docs/heap-watch.md` is the user guide.
 
 The two halves must agree. A program built with the flag and a runtime
 built without it fail to link (`rt_hw_program`); a program built without
@@ -816,43 +829,57 @@ the measurements replace them.
 
 ### CPU
 
-Revision 7, measured 2026-10-22 on the five benchmarks revision 6 was
-measured on: best of 15 runs, interleaved, gcc 14 `-O2`, x86-64 (an
-i7-8750H, 12 threads, load 2-3 from other work), against 0.11.0
-(`a0bd007`, before heap watch). Wall time is the column; the user-mode
-cycles (fewest of the 15) and instructions of each run were counted too,
-with `perf_event_open`. On this machine two builds of identical code differ
-by up to 3 % in wall time and cycles from run to run; instruction counts do
-not vary. `bench/heapwatch/run.sh` repeats the comparison.
+Revision 8, measured 2026-11-04 on the five benchmarks of revision 7: the
+**median of 11 runs**, interleaved, gcc 14 `-O2`, x86-64 (an i7-8750H),
+against 0.12.0 (`origin/master`, `b0668f0`, before heap watch). Instructions
+and cycles are user-mode counts from `perf_event_open` (instructions do not
+vary between runs); wall time is the elapsed time of the same runs. On this
+machine two builds of identical code differ by up to 3-5 % in cycles and wall
+time from run to run. The ratios are against 0.12.0.
 
-| Benchmark | What it does | 0.11.0 | default build | heap watch build, `M31_HEAPWATCH=0` | heap watch build, ledger (its default) | heap watch build, `full` |
+| Benchmark | What it does | 0.12.0 | default build | heap watch build, `M31_HEAPWATCH=0` | heap watch build, ledger (its default) | heap watch build, `full` |
 |---|---|---|---|---|---|---|
-| `bench/trees` | binary trees: allocate and free 16 x 2^19 nodes | 0.561 s | 0.545 s (-2.8 %) | 0.555 s (-1.0 %) | 0.550 s (-1.9 %) | 0.592 s (+5.6 %) |
-| `bench/heapwatch/allocs` | a struct, a str and a 2-element List per iteration, little else | 0.453 s | 0.448 s (-1.2 %) | 0.459 s (+1.4 %) | 0.463 s (+2.2 %) | 0.562 s (+24.0 %) |
-| `bench/heapwatch/stores` | 40 M reference stores into fields and List slots, no allocation | 0.683 s | 0.688 s (+0.8 %) | 0.662 s (-3.0 %) | 0.663 s (-2.9 %) | 0.779 s (+14.1 %) |
-| `bench/valenum/result-boxed` | a boxed `Result` per call, 50 M calls | 1.499 s | 1.483 s (-1.0 %) | 1.503 s (+0.3 %) | 1.494 s (-0.3 %) | 1.686 s (+12.5 %) |
-| `bench/valenum/option-boxed` | a boxed `Option` per call | 0.784 s | 0.786 s (+0.2 %) | 0.779 s (-0.7 %) | 0.788 s (+0.5 %) | 0.877 s (+11.9 %) |
+| `bench/trees` | binary trees: 16 x 2^19 nodes allocated and freed | 0.470 s | 0.480 s (+2.1 %) | 0.470 s (0.0 %) | 0.480 s (+2.1 %) | 0.495 s (+5.4 %) |
+| `bench/heapwatch/allocs` | a struct, a str and a 2-element List per iteration | 0.400 s | 0.403 s (+1.0 %) | 0.409 s (+2.3 %) | 0.418 s (+4.7 %) | 0.490 s (+22.7 %) |
+| `bench/heapwatch/stores` | 40 M reference stores, no allocation | 0.607 s | 0.606 s (-0.2 %) | 0.597 s (-1.6 %) | 0.591 s (-2.6 %) | 0.689 s (+13.5 %) |
+| `bench/valenum/result-boxed` | a boxed `Result` per call, 50 M calls | 1.363 s | 1.352 s (-0.8 %) | 1.413 s (+3.6 %) | 1.351 s (-0.9 %) | 1.568 s (+15.0 %) |
+| `bench/valenum/option-boxed` | a boxed `Option` per call | 0.722 s | 0.734 s (+1.7 %) | 0.709 s (-1.8 %) | 0.703 s (-2.7 %) | 0.804 s (+11.3 %) |
 
-The same runs in cycles and instructions, against 0.11.0:
+The same runs in cycles / instructions:
 
-| Benchmark | default build: cycles / instructions | ledger: cycles / instructions | `full`: cycles / instructions |
-|---|---|---|---|
-| trees | +1.2 % / 0.0 % | +1.1 % / +2.1 % | +8.2 % / +9.6 % |
-| allocs | -0.3 % / 0.0 % | +4.1 % / +4.0 % | +25.3 % / +22.0 % |
-| stores | -0.1 % / 0.0 % | -4.4 % / +5.4 % | +13.1 % / +19.6 % |
-| result-boxed | +0.1 % / 0.0 % | +0.8 % / +3.9 % | +13.8 % / +22.8 % |
-| option-boxed | +0.8 % / 0.0 % | 0.0 % / +3.6 % | +12.3 % / +21.0 % |
+| Benchmark | default build | `M31_HEAPWATCH=0` | ledger | `full` |
+|---|---|---|---|---|
+| trees | +1.1 % / 0.0 % | -0.4 % / +2.2 % | +0.8 % / +2.3 % | +4.2 % / +9.6 % |
+| allocs | +0.1 % / 0.0 % | +4.2 % / +3.9 % | +6.0 % / +4.0 % | +26.1 % / +22.0 % |
+| stores | +1.1 % / 0.0 % | -3.2 % / +5.4 % | -4.5 % / +5.4 % | +11.8 % / +19.6 % |
+| result-boxed | -0.7 % / 0.0 % | +1.5 % / +3.8 % | +1.1 % / +3.9 % | +13.8 % / +22.8 % |
+| option-boxed | +0.5 % / 0.0 % | -5.0 % / +3.5 % | -3.4 % / +3.6 % | +9.6 % / +21.0 % |
 
-- **The default build costs nothing, by construction.** Compiled without
-  `-DRT_HEAPWATCH`, every function of `runtime/rt.c` and
-  `runtime/scheduler.c` is the same machine code as 0.11.0's -- checked
-  function by function, gcc and clang, at `-O0`, `-O1`, `-O2`, `-O3` and
-  `-Os` -- and so is every function of the five benchmarks' emitted C at
-  `-O0` and `-O2`; the instruction counts are equal to the last one. The
-  only difference is static data: a TypeInfo has the fields heap watch
-  reads (+0.7 KB of `.rodata` on `bench/trees`). The time differences in
-  the "default build" column are the machine's noise.
-- **A heap watch build with the ledger** costs 2-5 % in instructions: the
+Against the targets: the **default build is free** (instruction counts equal
+to within a few start-up instructions; the cycle and wall differences are
+noise, as the same-code scatter of +-3-5 % shows). The **ledger** is +2.3 %
+to +5.4 % in instructions -- over the 3 % target on three of the five --
+and within noise in cycles and time on every one (-4.5 % to +6.0 % in
+cycles, -2.7 % to +4.7 % in wall, with `allocs` the only one above the
+scatter). `full` is +9.6 % to +22.8 % in instructions and +5.4 % to +22.7 %
+in time; the 15 % target holds on four of five, and not on `allocs`, which
+does nothing but allocate, free and store.
+
+- **The default build costs nothing, by construction, and it is proved.**
+  Compiled without `-DRT_HEAPWATCH`, `runtime/rt.c` and `runtime/scheduler.c`
+  disassemble to the same instructions as 0.12.0's at `-O0` and `-O2`, and so
+  does the C of **306 programs -- every program of the corpus that compiles,
+  the examples and the benchmarks -- at `-O0` and `-O2`: 612 comparisons, 612
+  identical** (`bench/heapwatch/identity.sh <0.12.0 tree>` repeats it; the
+  comparison ignores the addresses of static data and the names of symbols
+  that merely sit next to it). The only difference is static data: a
+  TypeInfo has the fields heap watch reads (+0.7 KB of `.rodata` on
+  `bench/trees`). Revision 8's proof found one difference revision 7's
+  missed: at `-O0` a destructor's drop function called `rt_rc_set_count`
+  and `rt_rc_count`, inline functions, where 0.12.0 wrote `o->rc = ...`; in a
+  default build they are now macros for exactly that text.
+- **A heap watch build with the ledger** costs 2-5 % in instructions
+  (revision 7 text; revision 8 measured the same): the
   sampling countdown in `rt_alloc` (a subtract and a branch on a
   thread-local), the NOTE test in `rc_release`, one load and a branch per
   reference store, and the line before a runtime call that may allocate.
@@ -877,6 +904,31 @@ The same runs in cycles and instructions, against 0.11.0:
   with it off. A word in front of each object for the site and birth was
   tried on the way: it cost `trees` 14 % on its own, by moving 40-byte
   objects into malloc's next size class, and was dropped for sampling.
+
+### What was tried in revision 8
+
+Asked to squeeze the remaining cost, each idea below was built and measured
+(10 interleaved runs, instructions and cycles, `allocs` and `trees`) and
+**none was kept**, because none helped both the ledger and `full`:
+
+| Idea | Result | Why dropped |
+|---|---|---|
+| epoch bookkeeping first in `hw_alloc_counted`, `hw_sample_left` taken down before `malloc`, the budget never put back | `full` instructions +0.5 % (worse) | the compiler kept `size` in one more callee-saved register; the saving is smaller than the cost |
+| the same without the reorder: only the `hw_budget = HW_ALWAYS` store removed (the budget cannot wrap in 2^63 bytes) | `full` -0.5 % instructions, 0.0 % cycles | below the machine's scatter; not worth a changed invariant |
+| `full`'s fast path (`hw_epoch_fast`) inlined in `rt_alloc`, no call to `hw_alloc_counted` for an unsampled object | `full` -2.2 % instructions, -3.1 % cycles on `allocs`; **ledger +2.0 % instructions** | `rt_alloc` grew a larger frame for the ledger's every allocation |
+| the same as a leaf call `hw_epoch_rc` returning the count word | `full` -1.4 % instructions, +7.6 % cycles; ledger +1.7 % instructions | slower in time |
+| a precomputed epoch field in `HwHot` (saves 3 instructions in an allocation and a release in `full`) | not built | `HwHot` is three words and zero for a task that has not begun; a zero epoch field means "in transit", so a lazily-initialised field is a correctness risk for about 1 % |
+| no store hook for a string literal | not built | trace records edges to immortal values today; the saving is 3 instructions of 60 per store |
+
+What the ledger costs is a floor of this design: `sub %rdi, %fs:hw_budget; js`
+per allocation (two instructions), a bit test per release (rc_release reads
+the count word again after the destructor ran, which it must: a destructor
+may store, and a store may set NOTE), and one load, test and branch per
+reference store; in `allocs` that is about 49 instructions of 1218 per
+iteration. `M31_HEAPWATCH=0` costs the same instructions as the ledger
+(`hw_off` equals `ledger` above): the tests are the cost; the sampling is
+lost in them. Going lower means the hooks are not in the build, which is
+what a default build is.
 
 ### Memory
 
@@ -1018,3 +1070,28 @@ Still open:
     Shipping it in every build would put those tests back in every program;
     it is the owner's call, and a one-line change to `build.sh` and the
     corpus runner.
+
+### Revision 8 defaults
+
+Chosen without asking the owner, each the simplest sound option:
+
+- **Release version: a MINOR, 0.13.0**, the next after the latest tag on
+  origin (v0.12.0). The language session also tags; renumber if it took 0.13.
+- **The tool stays opt in at build time, and only there.** No `m31c` flag
+  builds it (the reader is `m31c -heapwatch`); `./build.sh --heapwatch` and
+  `-DRT_HEAPWATCH` on both `cc` lines are the two ways, as built. Open question
+  13 (should a default build sample too) stays answered no, by the owner's
+  "opt in" and by the cost table: the hooks' tests are the cost.
+- **The identity proof is a script, not a gate.** It needs a pre-heap-watch
+  tree to compare against, which `gates.sh` does not have; the gate
+  `heap watch only if asked` (no symbol, no call) stays, and the proof is
+  re-run by hand before a release (`bench/heapwatch/identity.sh`).
+- **The cost targets were not all met, and the code was not bent to meet
+  them.** Ledger <= 3 % holds on `trees` (+2.3 %) and not on `allocs`
+  (+4.0 %), `stores` (+5.4 %), the two boxed benchmarks (+3.5-3.9 %), all in
+  instructions and all within noise in time; `full` <= 15 % holds on four of
+  five in time. See "What was tried in revision 8".
+- **`m31c -cycles` is described as not yet released** in `docs/heap-watch.md`:
+  the compile-time cycle check exists as a design branch (`design/cycle-check`)
+  and not on master. The guide says heap watch is the run-time companion to
+  it and to `Arena<T>`, and does not claim the flag exists.

@@ -36,7 +36,8 @@ the CHANGELOG cite them by name.
 | `closures-decision.md` | Callbacks, function references, lambdas |
 | `destructors-decision.md` | Destructors |
 | `const-decision.md` | `const` |
-| `heap-watch-design.md` | Heap watch: the leak ledger, trace and epoch close |
+| `heap-watch.md` | Heap watch, a user guide: build with `--heapwatch`, read the report, fix a cycle leak |
+| `heap-watch-design.md` | Heap watch: the leak ledger, trace and epoch close (design, as built, cost) |
 | `text-decision.md` | Text |
 | `regex-decision.md` | Regex |
 | `ssh-decision.md` | The SSH client library |

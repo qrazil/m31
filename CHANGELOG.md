@@ -14,7 +14,7 @@ change landed on master.
   every hook is a macro that is nothing, the runtime's hooks and
   `runtime/heapwatch.c` are compiled out, and `rc_inc`, `rc_dec`,
   `rt_alloc` and the runtime's stores are the same machine code as in
-  0.11.0. `M31_HEAPWATCH` picks a heap watch build's mode at start:
+  0.12.0. `M31_HEAPWATCH` picks a heap watch build's mode at start:
   `ledger` (the default), `full`, or `0`.
 - **The ledger.** A heap watch build samples what it allocates -- by bytes,
   one object in every `M31_HEAPWATCH_SAMPLE` bytes (64 KiB) on average, at a
@@ -67,13 +67,16 @@ change landed on master.
   naming the sites (`M31_HEAPWATCH_TRAP=1` or `0` overrides), so every
   corpus program closing clean is a gate (corpus `1401`, `1405`; traps
   `1402` to `1404`).
-- **What it costs** (docs/heap-watch-design.md, "Cost";
-  `bench/heapwatch/run.sh`), against 0.11.0 on the five allocation- and
-  store-bound benchmarks: the default build nothing -- its runtime and
-  the benchmarks' code are the same machine code as 0.11.0's, function by
-  function; a heap watch build +2 % to +5 % in instructions with the
-  ledger, within noise in time (-4 % to +4 %), and +6 % to +25 % with epoch
-  close as well.
+- **What it costs** (docs/heap-watch-design.md, "Cost"; the user guide is
+  docs/heap-watch.md), against 0.12.0 on the five allocation- and
+  store-bound benchmarks, median of 11 interleaved runs: the default build
+  nothing -- its runtime and the C of all 306 corpus, example and benchmark
+  programs are the same machine code as 0.12.0's, at `-O0` and `-O2` (612
+  of 612; `bench/heapwatch/identity.sh <0.12.0 tree>` repeats the proof); a
+  heap watch build +2 % to +5 % in instructions with the ledger, within
+  noise in time (-3 % to +5 %), and +10 % to +23 % in instructions and +5 %
+  to +23 % in time with epoch close as well. A round of further optimisation
+  was measured and none of it kept (the design doc says why).
 
 ### Changed
 
