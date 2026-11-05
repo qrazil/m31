@@ -99,10 +99,10 @@ run "heap watch only if asked" bash -c '
     trap "rm -rf $w" EXIT
     for hw in "" -DRT_HEAPWATCH; do
         cc -O2 $hw -I runtime -c runtime/rt.c -o "$w/rt.o" || exit 1
-        n=$(nm "$w/rt.o" | grep -cE " [A-Za-z] (rt_)?hw_" || true)
+        n=$(nm "$w/rt.o" | grep -cE " [A-Za-z] _?(rt_)?hw_" || true)
         if [ -z "$hw" ] && [ "$n" -ne 0 ]; then
             echo "heap watch symbols in a runtime built without it:"
-            nm "$w/rt.o" | grep -E " [A-Za-z] (rt_)?hw_" | head
+            nm "$w/rt.o" | grep -E " [A-Za-z] _?(rt_)?hw_" | head
             exit 1
         fi
         if [ -n "$hw" ] && [ "$n" -eq 0 ]; then echo "no heap watch symbols with $hw"; exit 1; fi
