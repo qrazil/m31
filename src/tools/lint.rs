@@ -1,9 +1,12 @@
-//! `m31c lint` -- naming report. docs/naming-decision.md is the rulebook.
+//! `m31c lint` -- naming report. docs/naming-decision.md is the rulebook,
+//! and docs/docstrings-decision.md the one for comments: a comment longer
+//! than one line must be a block comment.
 //!
 //! Parse-only, like `fmt`: it has to work on a program that does not
 //! typecheck, and on a program whose imports are not on disk (an extracted
-//! repo). Report mode only -- it prints findings and an exit code, it never
-//! edits a file and nothing in the gates calls it yet.
+//! repo). It prints findings and an exit code and edits nothing -- except
+//! under `--fix`, which rewrites runs of `//` lines into block comments (the
+//! only rule that has a mechanical fix) and touches nothing else.
 //!
 //! Module names (a finding of kind "module name", on line 1) are checked
 //! from the file's path, since the rule depends on where the file lives:
@@ -39,6 +42,7 @@ pub enum Kind {
     TypeParam,
     ModuleName,
     BooleanName,
+    CommentBlock,
 }
 
 impl Kind {
@@ -57,6 +61,7 @@ impl Kind {
             Kind::TypeParam => "type parameter",
             Kind::ModuleName => "module name",
             Kind::BooleanName => "boolean name",
+            Kind::CommentBlock => "comment block",
         }
     }
 }
@@ -194,6 +199,7 @@ pub fn lint(prog: &Program, src: &str, opts: &Opts) -> Vec<Finding> {
         out: Vec::new(),
     };
     l.run();
+    l.comment_blocks(src);
     l.out.sort_by_key(|f| (f.line, f.col));
     l.out
 }
@@ -208,7 +214,167 @@ pub fn parse(src: &str, module: &str) -> Result<Program, crate::front::diag::Dia
     p.parse_program(module)
 }
 
+/// One run of consecutive own-line single-line comments.
+struct Run {
+    /// 1-based line of the first comment, and how many lines.
+    line: u32,
+    len: usize,
+    /// 1-based column (the indent plus one).
+    col: u32,
+    /// `///` rather than `//`.
+    doc: bool,
+    /// The text of some line holds `*/`, which a block comment cannot carry.
+    closes: bool,
+}
+
+/// A line that is a section divider (`// ---- parsing ----`, `// ====`):
+/// three or more of one rule character right after the `//`. A divider is
+/// layout, not prose; it neither joins a run nor gets absorbed into one.
+/// Only in a plain `//` comment: in a `///` docstring a `---` rule is
+/// markdown, text like the rest, and so is a `###` heading (`#` is not a
+/// rule character here for the same reason).
+fn is_divider(text: &str) -> bool {
+    let body = text.trim_start_matches('/').trim_start();
+    let mut chars = body.chars();
+    match chars.next() {
+        Some(c) if "-=*~_+".contains(c) => body.chars().take_while(|&d| d == c).count() >= 3,
+        _ => false,
+    }
+}
+
+/// Every run of two or more consecutive own-line `//` (or `///`) comments
+/// at one indent. A trailing comment, a divider, a blank line, a change of
+/// indent or a change between `//` and `///` ends a run.
+fn comment_runs(src: &str) -> Vec<Run> {
+    let Ok(lexed) = crate::front::lexer::Lexer::tokenize_for_fmt(src) else {
+        return Vec::new();
+    };
+    let lines: Vec<&str> = src.split('\n').collect();
+    let mut runs: Vec<Run> = Vec::new();
+    let mut open: Option<Run> = None;
+    let mut last = 0u32;
+    for c in &lexed.comments {
+        let line_text = lines.get(c.line as usize - 1).copied().unwrap_or("");
+        let single = c.own_line && c.text.starts_with("//") && !c.text.contains('\n');
+        let doc = c.doc;
+        if !single || (!doc && is_divider(&c.text)) {
+            runs.extend(open.take().filter(|r| r.len >= 2));
+            continue;
+        }
+        let closes = line_text.contains("*/");
+        match open.as_mut() {
+            Some(r) if r.doc == doc && r.col == c.col && c.line == last + 1 => {
+                r.len += 1;
+                r.closes |= closes;
+            }
+            _ => {
+                runs.extend(open.take().filter(|r| r.len >= 2));
+                open = Some(Run {
+                    line: c.line,
+                    len: 1,
+                    col: c.col,
+                    doc,
+                    closes,
+                });
+            }
+        }
+        last = c.line;
+    }
+    runs.extend(open.filter(|r| r.len >= 2));
+    runs
+}
+
+/// Rewrite every fixable run into one block comment, line for line.
+///
+/// `// a` / `// b` becomes `/* a` / ` * b */`: the same number of lines, the
+/// text at the same column, so nothing after the comment moves and no
+/// line:col in a diagnostic or a golden shifts. A `///` run becomes
+/// `/** ... */`, which documents the same declaration the run did. A run
+/// whose text holds `*/` is left alone (and reported as not fixable).
+pub fn fix_comments(src: &str) -> String {
+    let runs = comment_runs(src);
+    if runs.iter().all(|r| r.closes) {
+        return src.to_string();
+    }
+    let mut lines: Vec<String> = src.split('\n').map(String::from).collect();
+    for r in runs.iter().filter(|r| !r.closes) {
+        let indent = (r.col - 1) as usize;
+        let marker = if r.doc { 3 } else { 2 };
+        for k in 0..r.len {
+            let at = r.line as usize - 1 + k;
+            let cr = lines[at].ends_with('\r');
+            let full = lines[at].trim_end_matches('\r').trim_end().to_string();
+            let (head, text) = (full[..indent].to_string(), &full[indent + marker..]);
+            // A comment opener must not turn into `/***` or a doc comment
+            // by accident, and `/*text` reads badly: space the first line.
+            let spaced = if k == 0 && !text.is_empty() && !text.starts_with(' ') {
+                format!(" {text}")
+            } else {
+                text.to_string()
+            };
+            let new = if k == 0 {
+                format!("{head}{}{spaced}", if r.doc { "/**" } else { "/*" })
+            } else if k + 1 == r.len {
+                format!("{head} *{text} */")
+            } else {
+                format!("{head} *{text}")
+            };
+            lines[at] = if cr { format!("{new}\r") } else { new };
+        }
+    }
+    lines.join("\n")
+}
+
 impl Linter<'_> {
+    /// "A comment longer than one line must be a block comment."
+    fn comment_blocks(&mut self, src: &str) {
+        let prog = self.prog;
+        let mut decl_lines: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for t in &prog.types {
+            decl_lines.insert(t.span.line);
+            decl_lines.extend(t.variants.iter().map(|v| v.span.line));
+            decl_lines.extend(t.fields.iter().map(|f| f.span.line));
+            decl_lines.extend(t.methods.iter().map(|m| m.span.line));
+        }
+        decl_lines.extend(prog.funcs.iter().map(|f| f.span.line));
+        decl_lines.extend(prog.consts.iter().map(|c| c.span.line));
+        for s in &prog.toplevel {
+            if let Stmt::Decl { span, .. } = s {
+                decl_lines.insert(span.line);
+            }
+        }
+        for r in comment_runs(src) {
+            let open = if r.doc { "///" } else { "//" };
+            let above_decl = decl_lines.contains(&(r.line + r.len as u32));
+            let suggestion = if r.closes {
+                None
+            } else if r.doc || above_decl {
+                Some("/** ... */".to_string())
+            } else {
+                Some("/* ... */".to_string())
+            };
+            let why = if r.closes {
+                "; it holds `*/`, so `--fix` leaves it"
+            } else if above_decl && !r.doc {
+                "; /** ... */ also documents the declaration below"
+            } else {
+                ""
+            };
+            self.out.push(Finding {
+                line: r.line,
+                col: r.col,
+                kind: Kind::CommentBlock,
+                name: format!("{open} x{}", r.len),
+                reason: format!(
+                    "a comment longer than one line must be a block comment: \
+                     {} consecutive `{open}` lines{why}",
+                    r.len
+                ),
+                suggestion,
+            });
+        }
+    }
+
     fn run(&mut self) {
         let prog = self.prog;
         for t in &prog.types {
@@ -795,6 +961,13 @@ pub static SPEC: cli::Spec = cli::Spec {
             help: "also report the softer findings",
         },
         cli::Opt {
+            long: "fix",
+            short: None,
+            kind: cli::Kind::Flag,
+            placeholder: "",
+            help: "rewrite runs of // comment lines into block comments, in place",
+        },
+        cli::Opt {
             long: "summary",
             short: None,
             kind: cli::Kind::Flag,
@@ -828,6 +1001,13 @@ boolean names (finding kind \"boolean name\"):
   was_, needs_ or will_; suggestion is_<name>. Exempt: main, the
   two-letter function words (at, by, eq, of, ok, up) and --allow names
 
+comment blocks (finding kind \"comment block\"):
+  a comment longer than one line must be a block comment: two or more
+  consecutive own-line `//` lines at one indent are a finding, suggesting
+  /* ... */ (/** ... */ when directly above a declaration, or for a `///`
+  run). One line, a trailing comment and a `// ----` divider are fine.
+  --fix rewrites the runs in place, line for line
+
 --summary prints a count per kind (\"boolean name\" included) and the
 twelve most common names";
 
@@ -841,16 +1021,16 @@ pub fn run(parsed: &cli::Parsed) -> std::process::ExitCode {
     }
     opts.strict = parsed.flag("strict");
     let summary = parsed.flag("summary");
-    check(opts, summary, &parsed.operands)
+    check(opts, summary, parsed.flag("fix"), &parsed.operands)
 }
 
 /// Lint these paths with default options (what a test wants).
 #[cfg(test)]
 pub fn run_paths(paths: &[String]) -> std::process::ExitCode {
-    check(Opts::default(), false, paths)
+    check(Opts::default(), false, false, paths)
 }
 
-fn check(opts: Opts, summary: bool, inputs: &[String]) -> std::process::ExitCode {
+fn check(opts: Opts, summary: bool, fix: bool, inputs: &[String]) -> std::process::ExitCode {
     use std::process::ExitCode;
     let mut files = Vec::new();
     for input in inputs {
@@ -863,11 +1043,22 @@ fn check(opts: Opts, summary: bool, inputs: &[String]) -> std::process::ExitCode
     let mut all: Vec<Finding> = Vec::new();
     let mut unparsed = 0;
     for path in &files {
-        let Ok(src) = std::fs::read_to_string(path) else {
+        let Ok(mut src) = std::fs::read_to_string(path) else {
             eprintln!("cannot read {path}");
             unparsed += 1;
             continue;
         };
+        if fix {
+            let fixed = fix_comments(&src);
+            if fixed != src {
+                if let Err(e) = std::fs::write(path, &fixed) {
+                    eprintln!("cannot write {path}: {e}");
+                    unparsed += 1;
+                    continue;
+                }
+                src = fixed;
+            }
+        }
         let module = crate::resolve::modules::module_name(path);
         let prog = match parse(&src, &module) {
             Ok(p) => p,
@@ -1268,5 +1459,108 @@ mod tests {
         // `is_`/`has_`.
         let src = "int use_it(bool island, bool hash) {\n    return 1;\n}\n";
         assert_eq!(kinds(src, &Opts::default()).len(), 2);
+    }
+
+    // ---- the comment rule -------------------------------------------------
+
+    fn comment_findings(src: &str) -> Vec<String> {
+        let prog = parse(src, "sample").expect("parses");
+        lint(&prog, src, &Opts::default())
+            .into_iter()
+            .filter(|f| f.kind == Kind::CommentBlock)
+            .map(|f| format!("{}:{} {}", f.line, f.col, f.suggestion.unwrap_or_default()))
+            .collect()
+    }
+
+    #[test]
+    fn a_run_of_line_comments_is_a_finding_and_one_line_is_not() {
+        assert!(comment_findings("// one\nint answer = 1;\n").is_empty());
+        assert_eq!(
+            comment_findings("// one\n// two\nint answer = 1;\n"),
+            ["1:1 /** ... */"]
+        );
+        assert_eq!(
+            comment_findings("int answer = 1;\n// one\n// two\nprint(answer);\n"),
+            ["2:1 /* ... */"]
+        );
+        assert_eq!(
+            comment_findings("/// one\n/// two\nint answer = 1;\n"),
+            ["1:1 /** ... */"]
+        );
+    }
+
+    #[test]
+    fn trailing_dividers_blank_lines_and_indent_changes_end_a_run() {
+        // trailing comments never count, even stacked under a line of code
+        assert!(comment_findings("int a_b = 1;  // x\n// y\nint c_d = 2;  // z\n").is_empty());
+        // a divider is its own line, and so is what follows it
+        assert!(comment_findings("// ---- parts ----\n// text\nint answer = 1;\n").is_empty());
+        assert!(comment_findings("// ==== a\n// ---- b\nint answer = 1;\n").is_empty());
+        // a blank line, a different indent, `//` against `///`
+        assert!(comment_findings("// a\n\n// b\nint answer = 1;\n").is_empty());
+        assert!(comment_findings("// a\n/// b\nint answer = 1;\n").is_empty());
+        let src = "void work() {\n    int value = 1;\n    // a\n  // b\n}\n";
+        assert!(comment_findings(src).is_empty());
+        // a block comment is already what is asked for
+        assert!(comment_findings("/* a\n * b */\nint answer = 1;\n").is_empty());
+    }
+
+    #[test]
+    fn markdown_rules_and_headings_in_a_docstring_are_text_not_dividers() {
+        let src = "/// intro\n///\n/// ### Heading\n///\n/// ---\n/// text\nint answer = 1;\n";
+        assert_eq!(comment_findings(src).len(), 1);
+        assert_eq!(
+            fix_comments(src),
+            "/** intro\n *\n * ### Heading\n *\n * ---\n * text */\nint answer = 1;\n"
+        );
+        // but a `//` divider is layout
+        assert!(comment_findings("// ### one\n// two\nint answer = 1;\n").len() == 1);
+    }
+
+    #[test]
+    fn fix_turns_a_run_into_one_block_line_for_line() {
+        let src = "// a\n// b\n//\n// c\nint answer = 1;\n";
+        assert_eq!(
+            fix_comments(src),
+            "/* a\n * b\n *\n * c */\nint answer = 1;\n"
+        );
+        let doc = "/// a\n/// b\nint answer = 1;\n";
+        assert_eq!(fix_comments(doc), "/** a\n * b */\nint answer = 1;\n");
+        // indentation, CRLF, text with no space after the slashes
+        let nested = "void work() {\r\n    //x\r\n    //  y\r\n}\r\n";
+        assert_eq!(
+            fix_comments(nested),
+            "void work() {\r\n    /* x\r\n     *  y */\r\n}\r\n"
+        );
+        // a first line that starts with `*` must not open a doc comment
+        assert_eq!(
+            fix_comments("//* a\n// b\nint answer = 1;\n"),
+            "/* * a\n * b */\nint answer = 1;\n"
+        );
+    }
+
+    #[test]
+    fn fix_leaves_a_closer_dividers_and_single_lines_alone_and_is_idempotent() {
+        let src = "// has */ in it\n// second\nint answer = 1;\n";
+        assert_eq!(fix_comments(src), src);
+        assert_eq!(comment_findings(src).len(), 1);
+        let divided = "// ---- x ----\n// text\n// ====\nint answer = 1;\n";
+        assert_eq!(fix_comments(divided), divided);
+        let once = fix_comments("// a\n// b\nint answer = 1;\n");
+        assert_eq!(fix_comments(&once), once);
+        assert!(comment_findings(&once).is_empty());
+    }
+
+    #[test]
+    fn a_doc_run_and_its_fix_say_the_same_text() {
+        use crate::front::lexer::Lexer;
+        let run = "/// a\n///   b\n///\n/// c\nint answer = 1;\n";
+        let text = |s: &str| {
+            Lexer::new(s).tokenize().unwrap()[0]
+                .doc
+                .clone()
+                .map(|d| d.text)
+        };
+        assert_eq!(text(run), text(&fix_comments(run)));
     }
 }

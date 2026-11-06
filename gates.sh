@@ -401,6 +401,8 @@ run "stdlib source is formatted" ./target/debug/"$LANG_BIN" -fmt --check --recur
 # name of three characters or more, snake_case, no abbreviations from the
 # closed table, a `is_`/`has_`/... prefix on a bool, one lowercase word per
 # stdlib module and PREFIX_name for a module that is not an entry point.
+# The same gate enforces the comment rule: a comment longer than one line is
+# a block comment (docs/docstrings-decision.md).
 # Every source tree that ships or documents the language must be clean.
 # corpus/ is exempt on purpose: its programs are compiler test inputs, many
 # of them written to be wrong.
@@ -477,6 +479,45 @@ run "formatter fixtures" bash -c '
             bad=1
         fi
         ./target/debug/'"$LANG_BIN"' -fmt --check "$w/w.'"$LANG_EXT"'" || bad=1
+        rm -rf "$w"
+    done
+    exit $bad'
+
+# The comment rule (docs/docstrings-decision.md): a comment longer than one
+# line must be a block comment. Each `corpus/lint/*.m31` must report exactly
+# its `.lint`; `lint --fix` must turn it into its `.fixed` with the SAME
+# number of lines (so no line:col below it moves), the result must be
+# formatted, compile, be clean of everything the fix can fix, and be a fixed
+# point of `--fix`.
+run "comment lint fixtures" bash -c '
+    bad=0
+    bin=./target/debug/'"$LANG_BIN"'
+    for f in corpus/lint/*.'"$LANG_EXT"'; do
+        [ -e "$f" ] || continue
+        base="${f%.'"$LANG_EXT"'}"
+        got=$($bin -lint "$f" 2>/dev/null)
+        if [ "$got" != "$(cat "$base.lint")" ]; then
+            echo "lint report differs from $base.lint:"
+            echo "$got" | diff "$base.lint" - | head -10
+            bad=1
+        fi
+        w=$(mktemp -d)
+        cp "$f" "$w/t.'"$LANG_EXT"'"
+        $bin -lint "$w/t.'"$LANG_EXT"'" --fix >/dev/null 2>&1
+        if ! diff -q "$base.fixed" "$w/t.'"$LANG_EXT"'" >/dev/null; then
+            echo "--fix differs from $base.fixed:"
+            diff "$base.fixed" "$w/t.'"$LANG_EXT"'" | head -10
+            bad=1
+        fi
+        if [ "$(wc -l < "$f")" != "$(wc -l < "$w/t.'"$LANG_EXT"'")" ]; then
+            echo "--fix changed the number of lines: $f"
+            bad=1
+        fi
+        cp "$w/t.'"$LANG_EXT"'" "$w/again.'"$LANG_EXT"'"
+        $bin -lint "$w/again.'"$LANG_EXT"'" --fix >/dev/null 2>&1
+        diff -q "$w/t.'"$LANG_EXT"'" "$w/again.'"$LANG_EXT"'" >/dev/null || { echo "--fix is not idempotent: $f"; bad=1; }
+        $bin -fmt --check "$w/t.'"$LANG_EXT"'" || bad=1
+        $bin -emit-c "$w/t.'"$LANG_EXT"'" --out "$w/t.c" || bad=1
         rm -rf "$w"
     done
     exit $bad'

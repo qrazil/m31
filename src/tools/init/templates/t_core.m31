@@ -1,6 +1,6 @@
-// Unit tests for @@PREFIX@@_core.
-//
-// Output: one `ok`/`FAIL` line per check and a last line `N passed, M failed`.
+/* Unit tests for @@PREFIX@@_core.
+ *
+ * Output: one `ok`/`FAIL` line per check and a last line `N passed, M failed`. */
 
 import core.@@PREFIX@@_core;
 

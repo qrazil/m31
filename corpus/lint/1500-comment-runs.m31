@@ -1,0 +1,37 @@
+// A fixture for `m31c -lint`: a comment longer than one line must be a block
+// comment. `1500-comment-runs.lint` is the report it must give, and
+// `1500-comment-runs.fixed` what `--fix` must turn it into, line for line.
+
+// One line is fine.
+int single = 1;
+// Two lines
+// are not.
+int plain = 2;
+int trailing = 3;  // a trailing comment is never flagged
+// and a line under it is a single line
+
+// ---- a divider is layout, not prose ----
+// the line under a divider is one line
+// ======================================
+// but two
+// together are a run
+int dividers = 4;
+
+/// A doc run
+/// is the same error.
+pub int documented(int value) {
+    // Inside a body,
+    // indentation is kept,
+    //   and so is the layout of the text.
+    return value;
+}
+
+// This one holds a closer */ and cannot be a block comment,
+// so --fix leaves it and the lint keeps reporting it.
+int closer = 5;
+///  Blank doc lines are kept:
+///
+/// the second paragraph.
+int paragraphs = 6;
+print(single + plain + trailing + dividers + closer + paragraphs);
+print(documented(1));

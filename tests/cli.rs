@@ -287,6 +287,32 @@ fn lint_options() {
 }
 
 #[test]
+fn lint_fix_rewrites_comment_runs_and_is_idempotent() {
+    let d = scratch("lintfix");
+    let src = d.join("sample.m31");
+    let before = "// one\n// two\nint answer = 3;\n\n/// doc a\n/// doc b\npub int twice(int value) {\n    return value * 2;\n}\n";
+    std::fs::write(&src, before).unwrap();
+    let path = src.to_str().unwrap();
+    let o = m31c(&["-lint", path]);
+    assert_eq!(code(&o), 1);
+    assert!(out(&o).contains(
+        "a comment longer than one line must be a block comment: 2 consecutive `//` lines"
+    ));
+    assert!(out(&o).contains("(try `/** ... */`)"), "{}", out(&o));
+    let o = m31c(&["-lint", path, "--fix"]);
+    assert_eq!(code(&o), 0, "{}", out(&o));
+    let after = std::fs::read_to_string(&src).unwrap();
+    assert_eq!(
+        after,
+        "/* one\n * two */\nint answer = 3;\n\n/** doc a\n * doc b */\npub int twice(int value) {\n    return value * 2;\n}\n"
+    );
+    assert_eq!(after.lines().count(), before.lines().count());
+    assert_eq!(code(&m31c(&["-fmt", "--check", path])), 0);
+    assert_eq!(code(&m31c(&["-lint", path, "--fix"])), 0);
+    assert_eq!(std::fs::read_to_string(&src).unwrap(), after);
+}
+
+#[test]
 fn doc_prints_public_items_with_their_docstrings() {
     let d = scratch("doc");
     let src = d.join("shapes.m31");

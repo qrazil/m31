@@ -1,0 +1,7 @@
+corpus/lint/1500-comment-runs.m31:1:1: a comment longer than one line must be a block comment: 3 consecutive `//` lines (try `/* ... */`)
+corpus/lint/1500-comment-runs.m31:7:1: a comment longer than one line must be a block comment: 2 consecutive `//` lines; /** ... */ also documents the declaration below (try `/** ... */`)
+corpus/lint/1500-comment-runs.m31:16:1: a comment longer than one line must be a block comment: 2 consecutive `//` lines; /** ... */ also documents the declaration below (try `/** ... */`)
+corpus/lint/1500-comment-runs.m31:20:1: a comment longer than one line must be a block comment: 2 consecutive `///` lines (try `/** ... */`)
+corpus/lint/1500-comment-runs.m31:23:5: a comment longer than one line must be a block comment: 3 consecutive `//` lines (try `/* ... */`)
+corpus/lint/1500-comment-runs.m31:29:1: a comment longer than one line must be a block comment: 2 consecutive `//` lines; it holds `*/`, so `--fix` leaves it
+corpus/lint/1500-comment-runs.m31:32:1: a comment longer than one line must be a block comment: 3 consecutive `///` lines (try `/** ... */`)

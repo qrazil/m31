@@ -5,7 +5,7 @@
 //!     m31c -emit-c  <source> [--out <out.c>]
 //!     m31c -emit-ir <source> [--out <out.ir>]
 //!     m31c -fmt [--check] [--recursive] <file|dir>...
-//!     m31c -lint <file|dir>... [--allow NAME...] [--strict] [--summary]
+//!     m31c -lint <file|dir>... [--allow NAME...] [--strict] [--summary] [--fix]
 //!     m31c -doc <file|dir>...
 //!     m31c -init [--lib] [--name N] [--prefix P] [dir]
 //!     m31c -heapwatch <ledger|pid> [--all] [--trace T...] [--untrace T...] [--depth N] [--paths]
