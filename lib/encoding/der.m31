@@ -1,48 +1,48 @@
-// A strict DER reader (ITU-T X.690, the Distinguished Encoding Rules): the
-// encoding every X.509 certificate (RFC 5280) is written in. Built for
-// `lib/pki/x509.m31`, usable on its own.
-//
-// API
+/* A strict DER reader (ITU-T X.690, the Distinguished Encoding Rules): the
+ * encoding every X.509 certificate (RFC 5280) is written in. Built for
+ * `lib/pki/x509.m31`, usable on its own.
+ *
+ * API */
 // ---
-//   der.parse(data)               -> Result<Element, Error>      one element, nothing after it
-//   der.read_at(data, at, limit)  -> Result<Element, Error>      one element inside a window
-//   der.validate(data, max_depth) -> Result<Element, Error>      the whole tree, iteratively
-//   e.children()                  -> Result<List<Element>, Error>
-//   e.integer_bytes() / e.unsigned_magnitude() / e.integer_value()
-//   e.boolean() / e.bit_string() / e.octet_string() / e.oid() / e.time()
-//   e.raw() / e.content() / e.is_constructed() / e.is_null()
-//
-// An `Element` is a *view*: the buffer it was read from plus four offsets.
-// Reading a tree copies nothing until `raw()` or `content()` asks for bytes,
-// which is what lets `x509` keep the exact `tbsCertificate` bytes a
-// signature was made over.
-//
+/*   der.parse(data)               -> Result<Element, Error>      one element, nothing after it
+ *   der.read_at(data, at, limit)  -> Result<Element, Error>      one element inside a window
+ *   der.validate(data, max_depth) -> Result<Element, Error>      the whole tree, iteratively
+ *   e.children()                  -> Result<List<Element>, Error>
+ *   e.integer_bytes() / e.unsigned_magnitude() / e.integer_value()
+ *   e.boolean() / e.bit_string() / e.octet_string() / e.oid() / e.time()
+ *   e.raw() / e.content() / e.is_constructed() / e.is_null()
+ *
+ * An `Element` is a *view*: the buffer it was read from plus four offsets.
+ * Reading a tree copies nothing until `raw()` or `content()` asks for bytes,
+ * which is what lets `x509` keep the exact `tbsCertificate` bytes a
+ * signature was made over.
+ * */
 // --- what "strict" refuses ---------------------------------------------------
-//
-// A certificate's signature covers the bytes as sent, so a reader that
-// accepts two encodings of one value can be handed a different value than
-// the signer saw. Everything BER allows and DER does not is an `Error`:
-//
-//   - indefinite length (`0x80`) and the reserved length octet `0xFF`;
-//   - a length that is not minimal: long form for a value under 128, or a
-//     long form with a leading zero octet;
-//   - a high tag number (`0x1F` in the low five bits) -- X.509 has none;
-//   - a content length that runs past the buffer, or past its parent;
-//   - a constructed string or integer, or a primitive SEQUENCE/SET;
-//   - bytes left over after the one element `parse` was asked for;
-//   - an INTEGER with a redundant leading `0x00`/`0xFF`;
-//   - a BOOLEAN that is neither `0x00` nor `0xFF`;
-//   - a BIT STRING whose unused bits are not zero, or an OID that is empty,
-//     has a non-minimal arc, or ends inside one;
-//   - a time that is not `YYMMDDHHMMSSZ` / `YYYYMMDDHHMMSSZ` exactly.
-//
-// Nothing here traps on its input: a bad certificate is the world, not a
-// bug in the program (`docs/errors-decision.md`). Nesting is bounded
-// explicitly (`validate`) and never walked recursively, so a hostile
-// 10,000-deep SEQUENCE cannot exhaust the stack.
-//
-// SET OF ordering (X.690 §11.6) is not checked: no field this library reads
-// depends on it.
+/*
+ * A certificate's signature covers the bytes as sent, so a reader that
+ * accepts two encodings of one value can be handed a different value than
+ * the signer saw. Everything BER allows and DER does not is an `Error`:
+ *
+ *   - indefinite length (`0x80`) and the reserved length octet `0xFF`;
+ *   - a length that is not minimal: long form for a value under 128, or a
+ *     long form with a leading zero octet;
+ *   - a high tag number (`0x1F` in the low five bits) -- X.509 has none;
+ *   - a content length that runs past the buffer, or past its parent;
+ *   - a constructed string or integer, or a primitive SEQUENCE/SET;
+ *   - bytes left over after the one element `parse` was asked for;
+ *   - an INTEGER with a redundant leading `0x00`/`0xFF`;
+ *   - a BOOLEAN that is neither `0x00` nor `0xFF`;
+ *   - a BIT STRING whose unused bits are not zero, or an OID that is empty,
+ *     has a non-minimal arc, or ends inside one;
+ *   - a time that is not `YYMMDDHHMMSSZ` / `YYYYMMDDHHMMSSZ` exactly.
+ *
+ * Nothing here traps on its input: a bad certificate is the world, not a
+ * bug in the program (`docs/errors-decision.md`). Nesting is bounded
+ * explicitly (`validate`) and never walked recursively, so a hostile
+ * 10,000-deep SEQUENCE cannot exhaust the stack.
+ *
+ * SET OF ordering (X.690 §11.6) is not checked: no field this library reads
+ * depends on it. */
 
 import date;
 
@@ -59,13 +59,13 @@ pub const int TAG_UTC_TIME = 0x17;
 pub const int TAG_GENERALIZED_TIME = 0x18;
 pub const int TAG_SEQUENCE = 0x30;
 pub const int TAG_SET = 0x31;
-/// The context-specific class bits: `[n]` primitive is `CONTEXT_PRIMITIVE |
-/// n`, `[n]` constructed is `CONTEXT_CONSTRUCTED | n`.
+/** The context-specific class bits: `[n]` primitive is `CONTEXT_PRIMITIVE |
+ * n`, `[n]` constructed is `CONTEXT_CONSTRUCTED | n`. */
 pub const int CONTEXT_PRIMITIVE = 0x80;
 pub const int CONTEXT_CONSTRUCTED = 0xA0;
-/// The deepest nesting `x509` accepts. A certificate nests about eight
-/// levels (Certificate > tbs > extensions > extension > value > ...), so 32
-/// is generous and still far from any stack limit.
+/** The deepest nesting `x509` accepts. A certificate nests about eight
+ * levels (Certificate > tbs > extensions > extension > value > ...), so 32
+ * is generous and still far from any stack limit. */
 pub const int MAX_NESTING_DEPTH = 32;
 const int CONSTRUCTED_BIT = 0x20;
 const int CLASS_MASK = 0xC0;
@@ -74,11 +74,11 @@ const int LONGEST_LENGTH_OCTETS = 7;
 const int LONGEST_ARC_OCTETS = 8;
 const int LONGEST_INTEGER_OCTETS = 7;
 
-/// Why a byte string is not valid DER, or not the type that was asked for.
-/// Payload-free (`docs/errors-decision.md` §4).
+/** Why a byte string is not valid DER, or not the type that was asked for.
+ * Payload-free (`docs/errors-decision.md` §4). */
 pub enum Error {
-    /// An element's header or content runs past the end of its buffer (or of
-    /// the constructed element that holds it).
+    /** An element's header or content runs past the end of its buffer (or of
+     * the constructed element that holds it). */
     Truncated;
     /// A length of `0x80`: BER's "ends at an end-of-contents marker".
     IndefiniteLength;
@@ -92,8 +92,8 @@ pub enum Error {
     TrailingData;
     /// Constructed elements nest deeper than the bound given.
     NestingTooDeep;
-    /// The tag is not the type asked for, or its constructed bit is wrong
-    /// for it.
+    /** The tag is not the type asked for, or its constructed bit is wrong
+     * for it. */
     BadTag;
     /// An INTEGER with a redundant leading `0x00` or `0xFF`, or no octets.
     NonMinimalInteger;
@@ -103,13 +103,13 @@ pub enum Error {
     IntegerTooLarge;
     /// A BOOLEAN that is not exactly one octet of `0x00` or `0xFF`.
     BadBoolean;
-    /// A BIT STRING with no unused-bits octet, more than seven unused bits,
-    /// or non-zero unused bits.
+    /** A BIT STRING with no unused-bits octet, more than seven unused bits,
+     * or non-zero unused bits. */
     BadBitString;
     /// An OBJECT IDENTIFIER that is empty, non-minimal, too large or cut off.
     BadOid;
-    /// A UTCTime or GeneralizedTime that is not the exact DER form, or not a
-    /// real calendar time.
+    /** A UTCTime or GeneralizedTime that is not the exact DER form, or not a
+     * real calendar time. */
     BadTime;
 }
 
@@ -163,9 +163,9 @@ pub str Error.to_str() {
     }
 }
 
-/// One DER element: the buffer, and where in it the element sits. `offset`
-/// is the first octet of the tag, `body_start` the first octet of the
-/// content, `stop` one past the last.
+/** One DER element: the buffer, and where in it the element sits. `offset`
+ * is the first octet of the tag, `body_start` the first octet of the
+ * content, `stop` one past the last. */
 pub type Element {
     pub bytes source;
     pub int tag;
@@ -192,8 +192,8 @@ pub bool Element.is_null() {
     return tag == TAG_NULL && body_start == stop;
 }
 
-/// The elements directly inside a constructed element, in order, each read
-/// strictly and none allowed to run past its parent.
+/** The elements directly inside a constructed element, in order, each read
+ * strictly and none allowed to run past its parent. */
 pub Result<List<Element>, Error> Element.children() {
     if (!is_constructed()) {
         return Result<List<Element>, Error>.Err(Error.BadTag);
@@ -227,8 +227,8 @@ pub Result<bytes, Error> Element.integer_bytes() {
     return Result<bytes, Error>.Ok(body);
 }
 
-/// A non-negative INTEGER's magnitude: big-endian, with the one `0x00`
-/// that keeps the top bit clear removed. An RSA modulus is this.
+/** A non-negative INTEGER's magnitude: big-endian, with the one `0x00`
+ * that keeps the top bit clear removed. An RSA modulus is this. */
 pub Result<bytes, Error> Element.unsigned_magnitude() {
     bytes body = integer_bytes()?;
     if ((body[0] & 0x80) != 0) {
@@ -301,9 +301,9 @@ pub Result<bytes, Error> Element.octet_string() {
     return Result<bytes, Error>.Ok(content());
 }
 
-/// An OBJECT IDENTIFIER as dotted decimal text, `"1.2.840.113549.1.1.11"`.
-/// Each arc is at most eight base-128 octets (56 bits), which no assigned
-/// OID approaches.
+/** An OBJECT IDENTIFIER as dotted decimal text, `"1.2.840.113549.1.1.11"`.
+ * Each arc is at most eight base-128 octets (56 bits), which no assigned
+ * OID approaches. */
 pub Result<str, Error> Element.object_id() {
     if (tag != TAG_OBJECT_ID) {
         return Result<str, Error>.Err(Error.BadTag);
@@ -348,9 +348,9 @@ pub Result<str, Error> Element.object_id() {
     return Result<str, Error>.Ok(dotted);
 }
 
-/// A UTCTime (`YYMMDDHHMMSSZ`, years 1950 to 2049) or GeneralizedTime
-/// (`YYYYMMDDHHMMSSZ`) as epoch seconds. DER's form only: seconds present,
-/// no fraction, no offset, `Z` last; a leap second (`60`) is refused.
+/** A UTCTime (`YYMMDDHHMMSSZ`, years 1950 to 2049) or GeneralizedTime
+ * (`YYYYMMDDHHMMSSZ`) as epoch seconds. DER's form only: seconds present,
+ * no fraction, no offset, `Z` last; a leap second (`60`) is refused. */
 pub Result<int, Error> Element.time() {
     bytes text = content();
     int year = 0;
@@ -404,19 +404,19 @@ pub Result<int, Error> Element.time() {
     }
 }
 
-/// A BIT STRING's bits, as whole octets plus how many trailing bits of the
-/// last octet are padding.
+/** A BIT STRING's bits, as whole octets plus how many trailing bits of the
+ * last octet are padding. */
 pub type BitString {
     pub bytes octets;
     pub int unused_bits;
 }
 
-/// The one element that starts at `position` and ends at or before `limit`.
-/// `limit` is an offset into `data`, and bounds the element's content: this
-/// is how a child is kept inside its parent.
-///
-/// Traps if the window itself is not inside `data`: that is a caller's
-/// bug. Everything about the bytes is an `Error`.
+/** The one element that starts at `position` and ends at or before `limit`.
+ * `limit` is an offset into `data`, and bounds the element's content: this
+ * is how a child is kept inside its parent.
+ *
+ * Traps if the window itself is not inside `data`: that is a caller's
+ * bug. Everything about the bytes is an `Error`. */
 pub Result<Element, Error> read_at(bytes data, int position, int limit) {
     if (position < 0 || limit > data.size() || position > limit) {
         trap("der.read_at: the window is not inside the buffer");
@@ -482,10 +482,10 @@ pub Result<Element, Error> parse(bytes data) {
     return Result<Element, Error>.Ok(element);
 }
 
-/// `data` as one element, and every element inside it checked too, down to
-/// `max_depth` levels (the root is level 1). Walked with an explicit stack,
-/// not recursion, so depth costs memory proportional to the bound and not to
-/// the input.
+/** `data` as one element, and every element inside it checked too, down to
+ * `max_depth` levels (the root is level 1). Walked with an explicit stack,
+ * not recursion, so depth costs memory proportional to the bound and not to
+ * the input. */
 pub Result<Element, Error> validate(bytes data, int max_depth) {
     Element root = parse(data)?;
     if (!root.is_constructed()) {

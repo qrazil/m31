@@ -1,11 +1,11 @@
-// A tour of everything the language does today.
-//
-// Run it:   ./build.sh examples/tour.m31 && ./tour
-// This file is also in the corpus, so it cannot rot.
+/* A tour of everything the language does today.
+ *
+ * Run it:   ./build.sh examples/tour.m31 && ./tour
+ * This file is also in the corpus, so it cannot rot. */
 
 // ---- user types --------------------------------------------------------
-// Reference types: heap allocated, refcounted, aliased by assignment.
-// A field with no default is positional; one with a default is named.
+/* Reference types: heap allocated, refcounted, aliased by assignment.
+ * A field with no default is positional; one with a default is named. */
 
 type Point {
     int x;
@@ -32,8 +32,8 @@ bool Rect.is_square() {
 }
 
 // ---- generics ----------------------------------------------------------
-// Java-shaped angle brackets. Monomorphised, so Cell<int> and Cell<str>
-// become two separate concrete types at compile time.
+/* Java-shaped angle brackets. Monomorphised, so Cell<int> and Cell<str>
+ * become two separate concrete types at compile time. */
 
 type Cell<T> {
     T value;
@@ -45,13 +45,13 @@ type Pair<A, B> {
 }
 
 // ---- methods -----------------------------------------------------------
-// Declared by qualified name, outside the type body, so they can be added to
-// any type. Fields are reached by BARE NAME -- there is no `this`, because
-// nothing shadows anything anywhere, so a bare name means one thing.
+/* Declared by qualified name, outside the type body, so they can be added to
+ * any type. Fields are reached by BARE NAME -- there is no `this`, because
+ * nothing shadows anything anywhere, so a bare name means one thing. */
 
 // ---- functions ---------------------------------------------------------
-// Type-first, like C and Java. Type arguments on a generic function are
-// inferred from the call, never written.
+/* Type-first, like C and Java. Type arguments on a generic function are
+ * inferred from the call, never written. */
 
 T unwrap<T>(Cell<T> cell) {
     return cell.value;
@@ -98,8 +98,8 @@ print(rect.origin.x);
 rect.width = 10;  // field assignment
 print(rect.area());
 // ---- aliasing ----------------------------------------------------------
-// Assignment aliases; both names see the change. `clone` is the explicit
-// way to get a second object.
+/* Assignment aliases; both names see the change. `clone` is the explicit
+ * way to get a second object. */
 Rect same = rect;
 same.height = 1;
 print(rect.area());
@@ -127,9 +127,9 @@ Sized shape = rect;
 print(shape.area());
 
 // ---- collections ---------------------------------------------------
-// Array is fixed length with its elements stored inline -- one allocation,
-// one pointer chase. List is growable, with a separate buffer. An array
-// needs a fill value because there is no null.
+/* Array is fixed length with its elements stored inline -- one allocation,
+ * one pointer chase. List is growable, with a separate buffer. An array
+ * needs a fill value because there is no null. */
 
 Array<int> squares = [0; 5];
 int square_index = 0;
@@ -155,17 +155,17 @@ for (str word in words) {
 }
 print(sentence);
 print(words.size());
-// `=` aliases, because user types are reference types; clone is the
-// explicit copy.
+/* `=` aliases, because user types are reference types; clone is the
+ * explicit copy. */
 List<str> copy = clone(words);
 copy.push("more");
 print(words.size());
 print(copy.size());
 
 // ---- concurrency ---------------------------------------------------
-// Threads and channels. A reference sent to another thread is MOVED, which
-// is what keeps refcounts non-atomic. A channel is exempt -- it is how
-// threads share.
+/* Threads and channels. A reference sent to another thread is MOVED, which
+ * is what keeps refcounts non-atomic. A channel is exempt -- it is how
+ * threads share. */
 
 void adder(Chan<int> out, int from, int last) {
     int number = from;

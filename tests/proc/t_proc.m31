@@ -4,24 +4,24 @@ import os;
 import timer;
 import encoding.hexcodec;
 
-// The program tests/proc/test_proc.sh drives. Every mode prints something
-// Python's subprocess module is asked for too, and the script compares.
-//
-//   copy IN OUT          IN -> `cat` -> OUT through io.copy, one thread
-//                        feeding while this one drains, constant memory
-//   run-input IN OUT     proc.run(["cat"], input: the contents of IN) -> OUT
-//   run SPEC             proc.run, then one line: rc, stdout hex, stderr hex
-//   start SPEC           the same through proc.start and its three streams
-//   timeout MS           proc.run(["sleep", "30"], timeout_ms: MS)
-//   cap                  70 MB of output through run: kept to the 64 MiB cap
-//   pty [rows=R] [columns=C] [until=TEXT] [type=HEX] -- PROGRAM ARGUMENT...
-//                        a child on a pseudo-terminal: wait for TEXT to be
-//                        printed, type HEX, read to the end; prints the exit
-//                        code and the output in hex
-//   pty-resize           stty size, resize, stty size
-//   write-after-exit     a write after the child has gone
-//
-// SPEC is: [cwd=DIR] [env=NAME=VALUE]... -- PROGRAM ARGUMENT...
+/* The program tests/proc/test_proc.sh drives. Every mode prints something
+ * Python's subprocess module is asked for too, and the script compares.
+ *
+ *   copy IN OUT          IN -> `cat` -> OUT through io.copy, one thread
+ *                        feeding while this one drains, constant memory
+ *   run-input IN OUT     proc.run(["cat"], input: the contents of IN) -> OUT
+ *   run SPEC             proc.run, then one line: rc, stdout hex, stderr hex
+ *   start SPEC           the same through proc.start and its three streams
+ *   timeout MS           proc.run(["sleep", "30"], timeout_ms: MS)
+ *   cap                  70 MB of output through run: kept to the 64 MiB cap
+ *   pty [rows=R] [columns=C] [until=TEXT] [type=HEX] -- PROGRAM ARGUMENT...
+ *                        a child on a pseudo-terminal: wait for TEXT to be
+ *                        printed, type HEX, read to the end; prints the exit
+ *                        code and the output in hex
+ *   pty-resize           stty size, resize, stty size
+ *   write-after-exit     a write after the child has gone
+ *
+ * SPEC is: [cwd=DIR] [env=NAME=VALUE]... -- PROGRAM ARGUMENT... */
 
 void fail(str message) {
     io.eprint(message);
@@ -43,9 +43,9 @@ void pump(io.File source, proc.Pipe sink, Chan<int> done) {
     send(done, moved);
 }
 
-// Everything that moves to the feeding thread -- the source file and the
-// pipe -- is bound in the innermost case body, which is the only place a
-// value may be moved from.
+/* Everything that moves to the feeding thread -- the source file and the
+ * pipe -- is bound in the innermost case body, which is the only place a
+ * value may be moved from. */
 void copy_mode(str input_path, str output_path) {
     match (proc.start(["cat"])) {
         case Ok(proc.Proc child): {
@@ -115,8 +115,8 @@ void run_input_mode(str input_path, str output_path) {
     }
 }
 
-// SPEC: the working directory, the environment (None if no env= was given)
-// and the command.
+/* SPEC: the working directory, the environment (None if no env= was given)
+ * and the command. */
 type Spec {
     str cwd = "";
     Option<Map<str, str>> env = Option<Map<str, str>>.None;
@@ -184,9 +184,9 @@ void collect(proc.Pipe source, Chan<bytes> out) {
     }
 }
 
-// Standard error is read on another thread, as it has to be: a child that
-// fills it while this one waits for the end of standard output would never
-// finish either.
+/* Standard error is read on another thread, as it has to be: a child that
+ * fills it while this one waits for the end of standard output would never
+ * finish either. */
 void start_mode(List<str> words) {
     Spec spec = parse_spec(words);
     match (proc.start(spec.argv, cwd: spec.cwd, env: spec.env)) {
@@ -253,9 +253,9 @@ void cap_mode() {
     }
 }
 
-// A terminal conversation, as the tests drive it: optionally wait until the
-// child has printed `until` (so that a mode it sets is set before typing),
-// then type, then read everything the terminal says until the child is gone.
+/* A terminal conversation, as the tests drive it: optionally wait until the
+ * child has printed `until` (so that a mode it sets is set before typing),
+ * then type, then read everything the terminal says until the child is gone. */
 void pty_mode(List<str> words) {
     int rows = 24;
     int columns = 80;

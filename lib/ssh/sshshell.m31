@@ -1,35 +1,35 @@
-// The interactive half of an SSH session: moving bytes between the local
-// terminal (or pipes) and an open `sshexec.Channel` until the remote side
-// ends, with window-size changes, `~.`, keepalives and terminal restoration.
-//
-// API
+/* The interactive half of an SSH session: moving bytes between the local
+ * terminal (or pipes) and an open `sshexec.Channel` until the remote side
+ * ends, with window-size changes, `~.`, keepalives and terminal restoration.
+ *
+ * API */
 // ---
-//   sshshell.run(transport, channel, options)   -> Result<Ending, str>
-//   sshshell.default_modes()                    -> bytes   (pty-req modes)
-//   sshshell.EscapeFilter(escape)               pure `~.` state machine
-//
+/*   sshshell.run(transport, channel, options)   -> Result<Ending, str>
+ *   sshshell.default_modes()                    -> bytes   (pty-req modes)
+ *   sshshell.EscapeFilter(escape)               pure `~.` state machine
+ * */
 // --- how it waits -------------------------------------------------------------
-//
-// One thread, one loop, and `poll(2)` over the socket and the keyboard
-// (`__poll`: a real poll on the OS thread, which is exactly what a program
-// with nothing else to run wants). Each turn: (1) take everything the
-// network already has, at most `DRAIN_PACKETS` packets, writing received data
-// to the terminal after every packet so memory stays bounded by one packet
-// plus the window; (2) send held-back keyboard input if the server's window
-// has opened; (3) poll for the socket, the keyboard (not while input is held
-// back for lack of window: that is the backpressure) and the next tick;
-// (4) read the keyboard; (5) clock-driven work -- window-size changes and
-// keepalives. A server flooding output cannot starve the keyboard (Ctrl-C,
-// `~.` still get through), and a command that is not reading its stdin
-// cannot stall the output.
-//
+/*
+ * One thread, one loop, and `poll(2)` over the socket and the keyboard
+ * (`__poll`: a real poll on the OS thread, which is exactly what a program
+ * with nothing else to run wants). Each turn: (1) take everything the
+ * network already has, at most `DRAIN_PACKETS` packets, writing received data
+ * to the terminal after every packet so memory stays bounded by one packet
+ * plus the window; (2) send held-back keyboard input if the server's window
+ * has opened; (3) poll for the socket, the keyboard (not while input is held
+ * back for lack of window: that is the backpressure) and the next tick;
+ * (4) read the keyboard; (5) clock-driven work -- window-size changes and
+ * keepalives. A server flooding output cannot starve the keyboard (Ctrl-C,
+ * `~.` still get through), and a command that is not reading its stdin
+ * cannot stall the output.
+ * */
 // --- what is not here -------------------------------------------------------
-//
-// There is no SIGWINCH handler in the language (docs/sys-layer.md §2): a
-// resize is noticed by polling the terminal's size on each tick, so it
-// reaches the server within ~100 ms, not instantly. A signal that kills the
-// process outright (SIGKILL, SIGHUP) cannot restore the terminal; every
-// other way out -- return, `?`, trap, exit -- does (`term.raw`).
+/*
+ * There is no SIGWINCH handler in the language (docs/sys-layer.md §2): a
+ * resize is noticed by polling the terminal's size on each tick, so it
+ * reaches the server within ~100 ms, not instantly. A signal that kills the
+ * process outright (SIGKILL, SIGHUP) cannot restore the terminal; every
+ * other way out -- return, `?`, trap, exit -- does (`term.raw`). */
 
 import io;
 import term;
@@ -84,12 +84,12 @@ pub type Options {
 
 // --- the escape filter (pure) --------------------------------------------
 
-/// The `~.` recogniser. Feed it keyboard bytes in order; it returns what to
-/// forward and whether the person asked to disconnect. An escape is only
-/// recognised at the start of a line (the start of the session counts, and
-/// so does the byte after a CR or LF); `~~` sends one `~`; `~?` is swallowed
-/// and sets `is_help_requested`; `~` followed by anything else is forwarded
-/// unchanged, both bytes.
+/** The `~.` recogniser. Feed it keyboard bytes in order; it returns what to
+ * forward and whether the person asked to disconnect. An escape is only
+ * recognised at the start of a line (the start of the session counts, and
+ * so does the byte after a CR or LF); `~~` sends one `~`; `~?` is swallowed
+ * and sets `is_help_requested`; `~` followed by anything else is forwarded
+ * unchanged, both bytes. */
 pub type EscapeFilter {
     pub int escape;
     bool is_line_start = true;
@@ -142,12 +142,12 @@ void mode(bytes out, int opcode, int value) {
     out.push(value & 0xFF);
 }
 
-/// The RFC 4254 §8 terminal-modes string this client sends with `pty-req`: the
-/// usual interactive set (signals, canonical input, echo, CR to NL, NL to
-/// CRNL on output, UTF-8 input) and 38400 baud. The remote tty is a normal
-/// cooked terminal; the *local* one is raw, so Ctrl-C reaches the remote
-/// line discipline as a byte and interrupts the remote command, as with
-/// OpenSSH.
+/** The RFC 4254 §8 terminal-modes string this client sends with `pty-req`: the
+ * usual interactive set (signals, canonical input, echo, CR to NL, NL to
+ * CRNL on output, UTF-8 input) and 38400 baud. The remote tty is a normal
+ * cooked terminal; the *local* one is raw, so Ctrl-C reaches the remote
+ * line discipline as a byte and interrupts the remote command, as with
+ * OpenSSH. */
 pub bytes default_modes() {
     bytes out = [];
     mode(out, 1, 3);
@@ -175,9 +175,9 @@ pub bytes default_modes() {
     return out;
 }
 
-/// Runs the session until it ends. `session` holds the interactive channel
-/// (shell or command), or nothing for a connection that only carries
-/// forwards (`-N`); `mux` is the forwarding layer, possibly with no rules.
+/** Runs the session until it ends. `session` holds the interactive channel
+ * (shell or command), or nothing for a connection that only carries
+ * forwards (`-N`); `mux` is the forwarding layer, possibly with no rules. */
 pub Result<Ending, str> run(ssh.Transport transport, List<sshexec.Channel> session, Options options, sshforward.Mux mux) {
     if (options.is_raw) {
         match (term.raw(in_fd: options.input_fd, out_fd: options.output_fd)) {
@@ -194,8 +194,8 @@ pub Result<Ending, str> run(ssh.Transport transport, List<sshexec.Channel> sessi
     return run_loop(transport, session, options, mux);
 }
 
-// Writes whatever the channel has buffered to local stdout/stderr. `false`
-// means local output is gone.
+/* Writes whatever the channel has buffered to local stdout/stderr. `false`
+ * means local output is gone. */
 bool has_flushed_output(sshexec.Channel channel, int output_fd) {
     while (channel.has_pending()) {
         bytes out = channel.take_output(OUTPUT_CHUNK);
@@ -288,10 +288,10 @@ Result<Ending, str> run_loop(ssh.Transport transport, List<sshexec.Channel> sess
         tick_ms = TICK_MS;
     }
     while (!has_session || !session[0].is_closed()) {
-        // 1. The network: everything already here, a bounded number of
-        //    packets at a time so the keyboard is never starved. Each
-        //    message goes to the forwarding layer first, which takes
-        //    everything not addressed to the session.
+        /* 1. The network: everything already here, a bounded number of
+         *    packets at a time so the keyboard is never starved. Each
+         *    message goes to the forwarding layer first, which takes
+         *    everything not addressed to the session. */
         int packets = 0;
         bool is_more = false;
         while (packets < DRAIN_PACKETS && (!has_session || !session[0].is_closed())) {
@@ -310,9 +310,9 @@ Result<Ending, str> run_loop(ssh.Transport transport, List<sshexec.Channel> sess
                     return Result<Ending, str>.Err(error.to_str());
                 }
                 case Ok(bytes payload): {
-                    // An empty payload is a housekeeping packet (IGNORE...):
-                    // it was readable, it is consumed, and it counts as the
-                    // server being alive; there is nothing to route.
+                    /* An empty payload is a housekeeping packet (IGNORE...):
+                     * it was readable, it is consumed, and it counts as the
+                     * server being alive; there is nothing to route. */
                     if (payload.size() == 0) {
                         packets = packets + 1;
                         last_heard_ns = timer.monotonic_ns();
@@ -364,8 +364,8 @@ Result<Ending, str> run_loop(ssh.Transport transport, List<sshexec.Channel> sess
                 return Result<Ending, str>.Err(reason);
             }
         }
-        // 2. Keyboard input that was held back for lack of window goes out
-        //    now if the window has opened, and the EOF follows it.
+        /* 2. Keyboard input that was held back for lack of window goes out
+         *    now if the window has opened, and the EOF follows it. */
         if (has_session && pending.size() > 0) {
             match (session[0].write_available(pending)) {
                 case Ok(int sent): {
@@ -390,8 +390,8 @@ Result<Ending, str> run_loop(ssh.Transport transport, List<sshexec.Channel> sess
                 }
             }
         }
-        // 3. Wait for the socket, the keyboard, a forwarded socket (or the
-        //    next tick).
+        /* 3. Wait for the socket, the keyboard, a forwarded socket (or the
+         *    next tick). */
         List<int> fds = [socket_fd];
         List<int> events = [POLL_IN];
         bool is_watching_input = is_stdin_open && pending.size() == 0 && !is_eof_pending;

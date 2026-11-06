@@ -3,18 +3,18 @@ import ssh.sshclient;
 import ssh.sshexec;
 import os;
 
-// The program half of tests/ssh/test_client_failure.sh: `connect_detailed`
-// and `resolve`, everything from the environment (HOME, ~/.ssh/config).
-//
-//   connect HOST PORT USER silent|loud|quiet
-//                                        one connection attempt (quiet: is_quiet)
-//   approve HOST PORT USER               connect; on UnknownHost record the
-//                                        key (a person said yes) and connect
-//                                        again
-//   twice HOST PORT USER                 two attempts in one program
-//   resolve HOST PORT USER               what the destination resolves to
-//
-// "-" for USER means the configuration's.
+/* The program half of tests/ssh/test_client_failure.sh: `connect_detailed`
+ * and `resolve`, everything from the environment (HOME, ~/.ssh/config).
+ *
+ *   connect HOST PORT USER silent|loud|quiet
+ *                                        one connection attempt (quiet: is_quiet)
+ *   approve HOST PORT USER               connect; on UnknownHost record the
+ *                                        key (a person said yes) and connect
+ *                                        again
+ *   twice HOST PORT USER                 two attempts in one program
+ *   resolve HOST PORT USER               what the destination resolves to
+ *
+ * "-" for USER means the configuration's. */
 
 void show_failure(sshclient.ConnectFailure failure) {
     match (failure) {

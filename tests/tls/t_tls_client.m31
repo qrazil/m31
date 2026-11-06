@@ -1,15 +1,15 @@
-// The TLS client under test, driven from `test_tls.sh`.
-//
-//   t_tls_client <mode> <host> <port> <pin as 64 hex digits> [argument]
-//
-// Modes, each printing what it saw and exiting 0 on success, or printing
-// `error: <reason>` and exiting 1 when the connection failed:
-//   handshake          connect, then close
-//   get <path>         GET over `lib/net/http.m31`'s own request and response code
-//   echo <text>        send `text` and a newline, print the line that comes back
-//   read_all [text]    send `text` (if any), then read to the server's close
-//   read_line          print the first line the server sends
-//   twice <text>       echo `text`, then once more, then print what `last_error` says
+/* The TLS client under test, driven from `test_tls.sh`.
+ *
+ *   t_tls_client <mode> <host> <port> <pin as 64 hex digits> [argument]
+ *
+ * Modes, each printing what it saw and exiting 0 on success, or printing
+ * `error: <reason>` and exiting 1 when the connection failed:
+ *   handshake          connect, then close
+ *   get <path>         GET over `lib/net/http.m31`'s own request and response code
+ *   echo <text>        send `text` and a newline, print the line that comes back
+ *   read_all [text]    send `text` (if any), then read to the server's close
+ *   read_line          print the first line the server sends
+ *   twice <text>       echo `text`, then once more, then print what `last_error` says */
 
 import net.http;
 import io;

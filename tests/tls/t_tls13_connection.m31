@@ -1,19 +1,19 @@
-// The TLS 1.3 record layer's `Connection` (`lib/tls/tls13record.m31`): handshake
-// messages across records, application data, KeyUpdate, alerts, close_notify
-// against truncation, and the refusals. Every line this prints is printed
-// again by `oracle_tls13_connection.py`, which builds the peer's records with
-// the `cryptography` package and holds the expected outcome of each refusal.
-//
-// Three parts:
-//   1. a scripted peer: `test_tls13.sh` passes the records the oracle built
-//      (argument 1, hex); the connection reads them, sends a sequence of its
-//      own, and the program prints what it read and what it wrote;
-//   2. one line per refusal: a crafted byte stream, what `Connection` did
-//      with it, and the alert it sent;
-//   3. two `Connection`s over a loopback socket.
-//
-//   ./build.sh tests/tls/t_tls13_connection.m31 -o t_tls13_connection
-//   ./t_tls13_connection <hex>
+/* The TLS 1.3 record layer's `Connection` (`lib/tls/tls13record.m31`): handshake
+ * messages across records, application data, KeyUpdate, alerts, close_notify
+ * against truncation, and the refusals. Every line this prints is printed
+ * again by `oracle_tls13_connection.py`, which builds the peer's records with
+ * the `cryptography` package and holds the expected outcome of each refusal.
+ *
+ * Three parts:
+ *   1. a scripted peer: `test_tls13.sh` passes the records the oracle built
+ *      (argument 1, hex); the connection reads them, sends a sequence of its
+ *      own, and the program prints what it read and what it wrote;
+ *   2. one line per refusal: a crafted byte stream, what `Connection` did
+ *      with it, and the alert it sent;
+ *   3. two `Connection`s over a loopback socket.
+ *
+ *   ./build.sh tests/tls/t_tls13_connection.m31 -o t_tls13_connection
+ *   ./t_tls13_connection <hex> */
 
 import crypto.chacha20poly1305;
 import io;
@@ -88,8 +88,8 @@ str error_name(tls13record.Error error) {
     }
 }
 
-// An in-memory peer: reads come from `inbound` at most CHUNK octets at a time,
-// writes pile up in `outbound` for the program to look at.
+/* An in-memory peer: reads come from `inbound` at most CHUNK octets at a time,
+ * writes pile up in `outbound` for the program to look at. */
 type Pipe {
     io.Buffer inbound;
     io.Buffer outbound;
@@ -238,8 +238,8 @@ bytes protected_record(int sequence, int content_type, bytes content) {
     }
 }
 
-// The AEAD applied to `inner` under `outer_type`'s header, as the library
-// itself would refuse to build it.
+/* The AEAD applied to `inner` under `outer_type`'s header, as the library
+ * itself would refuse to build it. */
 bytes forged(int outer_type, bytes inner, int sequence) {
     tls13schedule.TrafficKeys keys = tls13schedule.traffic_keys(tls13schedule.Suite.ChaCha20Poly1305Sha256, read_secret());
     bytes wire = [outer_type, 3, 3, (inner.size() + 16) >> 8, (inner.size() + 16) & 0xFF];

@@ -1,16 +1,16 @@
-// The TLS client under chain validation, driven from `test_chain.sh`.
-//
-//   t_chain_client <mode> <host> <port> <trust> <now> [argument]
-//
-// `trust` is `system` (`Trust.SystemRoots`) or the path of a PEM file of
-// roots (`Trust.CaFile`). `now` is epoch seconds, or `real` for the machine's
-// clock. Modes:
-//   handshake       connect, then close
-//   get <path>      an HTTPS HEAD over `lib/net/http.m31`'s own request and response
-//                   code; prints the status code
-//
-// Prints `connected` and what the mode saw, exiting 0, or `error <Name>`
-// (the `tls.Error` variant) and exits 1.
+/* The TLS client under chain validation, driven from `test_chain.sh`.
+ *
+ *   t_chain_client <mode> <host> <port> <trust> <now> [argument]
+ *
+ * `trust` is `system` (`Trust.SystemRoots`) or the path of a PEM file of
+ * roots (`Trust.CaFile`). `now` is epoch seconds, or `real` for the machine's
+ * clock. Modes:
+ *   handshake       connect, then close
+ *   get <path>      an HTTPS HEAD over `lib/net/http.m31`'s own request and response
+ *                   code; prints the status code
+ *
+ * Prints `connected` and what the mode saw, exiting 0, or `error <Name>`
+ * (the `tls.Error` variant) and exits 1. */
 
 import date;
 import net.http;

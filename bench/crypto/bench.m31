@@ -1,7 +1,7 @@
-// One micro-benchmark per run: `bench OP SIZE ITERS [HEX...]`.
-// Prints `RESULT OP SIZE ITERS TOTAL_NS` on stdout. `run.py` drives it.
-// Inputs are deterministic filler bytes; only timing matters here, the
-// correctness checks live in tests/crypto25519 and tests/ssh.
+/* One micro-benchmark per run: `bench OP SIZE ITERS [HEX...]`.
+ * Prints `RESULT OP SIZE ITERS TOTAL_NS` on stdout. `run.py` drives it.
+ * Inputs are deterministic filler bytes; only timing matters here, the
+ * correctness checks live in tests/crypto25519 and tests/ssh. */
 import os;
 import timer;
 import encoding.hexcodec;

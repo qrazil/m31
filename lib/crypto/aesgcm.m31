@@ -1,63 +1,63 @@
-// AES-128-GCM and AES-256-GCM (NIST SP 800-38D), the AEAD of TLS 1.3's
-// `TLS_AES_128_GCM_SHA256` and `TLS_AES_256_GCM_SHA384` (RFC 8446 §B.4) and of
-// TLS 1.2's GCM suites (RFC 5288).
-//
-//   import aesgcm;
-//   bytes sealed = aesgcm.seal(key, nonce, plaintext, aad);   // ciphertext || tag
-//   match (aesgcm.open(key, nonce, sealed, aad)) { ... }      // Result<bytes, Error>
-//
-// `key` is 16 octets (AES-128) or 32 (AES-256); `nonce` is 12 octets, the
-// only length TLS uses and the only one this module accepts. A wrong length
-// is a bug in the caller and **traps**, as in `lib/crypto/chacha20poly1305.m31`; a
-// forged or corrupted `sealed` is the world a network parser expects and is a
-// `Result`'s `Err`, with a payload-free `Error` (docs/errors-decision.md §4).
-// The tag is 16 octets, never truncated. `open` checks the tag with
-// `consttime.is_equal` before decrypting anything.
-//
+/* AES-128-GCM and AES-256-GCM (NIST SP 800-38D), the AEAD of TLS 1.3's
+ * `TLS_AES_128_GCM_SHA256` and `TLS_AES_256_GCM_SHA384` (RFC 8446 §B.4) and of
+ * TLS 1.2's GCM suites (RFC 5288).
+ *
+ *   import aesgcm;
+ *   bytes sealed = aesgcm.seal(key, nonce, plaintext, aad);   // ciphertext || tag
+ *   match (aesgcm.open(key, nonce, sealed, aad)) { ... }      // Result<bytes, Error>
+ *
+ * `key` is 16 octets (AES-128) or 32 (AES-256); `nonce` is 12 octets, the
+ * only length TLS uses and the only one this module accepts. A wrong length
+ * is a bug in the caller and **traps**, as in `lib/crypto/chacha20poly1305.m31`; a
+ * forged or corrupted `sealed` is the world a network parser expects and is a
+ * `Result`'s `Err`, with a payload-free `Error` (docs/errors-decision.md §4).
+ * The tag is 16 octets, never truncated. `open` checks the tag with
+ * `consttime.is_equal` before decrypting anything.
+ * */
 // --- Limits ---------------------------------------------------------------
-//
-// SP 800-38D caps one invocation at 2^36 - 32 octets of plaintext; this
-// module caps it far lower, at 2^24 octets (16 MiB), and traps above that --
-// a TLS record is at most 2^14 + 256. The 32-bit block counter therefore
-// cannot wrap. Reusing a (key, nonce) pair is catastrophic for GCM (it leaks
-// the authentication key); TLS never does, because the nonce is the record
-// sequence number XOR a per-connection IV, and `lib/tls/tls13record.m31` stops
-// at sequence 2^63 - 1. A caller that picks its own nonces owns that rule.
-//
+/*
+ * SP 800-38D caps one invocation at 2^36 - 32 octets of plaintext; this
+ * module caps it far lower, at 2^24 octets (16 MiB), and traps above that --
+ * a TLS record is at most 2^14 + 256. The 32-bit block counter therefore
+ * cannot wrap. Reusing a (key, nonce) pair is catastrophic for GCM (it leaks
+ * the authentication key); TLS never does, because the nonce is the record
+ * sequence number XOR a per-connection IV, and `lib/tls/tls13record.m31` stops
+ * at sequence 2^63 - 1. A caller that picks its own nonces owns that rule.
+ * */
 // --- Side channels ----------------------------------------------------------
-//
-// The block cipher is `lib/crypto/aes.m31`'s table-free bitsliced one; its
-// header documents what that does and does not guarantee. GHASH is the other
-// secret-dependent part, and the usual fast implementations (Shoup's 4-bit or
-// 8-bit tables of multiples of H) index a table by data, which is what a
-// cache-timing attacker reads. This one is a carry-less multiply built from
-// ordinary integer multiplications with "holes" (Thomas Pornin's BearSSL
-// `ghash_ctmul`): each 32-bit operand is split into four masks that select
-// every fourth bit, so the sums of partial products never carry into the bit
-// being kept, and the XOR of four such products is the carry-less product.
-// Karatsuba over 32-bit limbs makes a 128x128 multiply nine of those. No
-// table, no branch, no index that depends on H or on the data: the only
-// operations are `&`, `^`, shifts and `wrapping_mul`. The same source-level-only
-// caveat as `lib/crypto/aes.m31` applies (integer multiplication is
-// constant-time on the CPUs this runs on, but that too is not verified here).
-//
-// GHASH values are four 32-bit limbs in *natural* bit order: the 128 bits of a
-// block are reversed, so GCM's "bit 0" (the top bit of the first octet) is bit
-// 0 of limb 0 and a field element is an ordinary polynomial in x with
-// coefficient i at bit i. The GCM field is then the product of two such
-// polynomials reduced by x^128 = x^7 + x^2 + x + 1, a few shifts. Limbs are
-// kept non-negative and below 2^32, the way `lib/crypto/chacha20poly1305.m31`
-// keeps its words.
+/*
+ * The block cipher is `lib/crypto/aes.m31`'s table-free bitsliced one; its
+ * header documents what that does and does not guarantee. GHASH is the other
+ * secret-dependent part, and the usual fast implementations (Shoup's 4-bit or
+ * 8-bit tables of multiples of H) index a table by data, which is what a
+ * cache-timing attacker reads. This one is a carry-less multiply built from
+ * ordinary integer multiplications with "holes" (Thomas Pornin's BearSSL
+ * `ghash_ctmul`): each 32-bit operand is split into four masks that select
+ * every fourth bit, so the sums of partial products never carry into the bit
+ * being kept, and the XOR of four such products is the carry-less product.
+ * Karatsuba over 32-bit limbs makes a 128x128 multiply nine of those. No
+ * table, no branch, no index that depends on H or on the data: the only
+ * operations are `&`, `^`, shifts and `wrapping_mul`. The same source-level-only
+ * caveat as `lib/crypto/aes.m31` applies (integer multiplication is
+ * constant-time on the CPUs this runs on, but that too is not verified here).
+ *
+ * GHASH values are four 32-bit limbs in *natural* bit order: the 128 bits of a
+ * block are reversed, so GCM's "bit 0" (the top bit of the first octet) is bit
+ * 0 of limb 0 and a field element is an ordinary polynomial in x with
+ * coefficient i at bit i. The GCM field is then the product of two such
+ * polynomials reduced by x^128 = x^7 + x^2 + x + 1, a few shifts. Limbs are
+ * kept non-negative and below 2^32, the way `lib/crypto/chacha20poly1305.m31`
+ * keeps its words. */
 
 import crypto.accel;
 import crypto.aes;
 import crypto.consttime;
 
-// The hardware GHASH kernel (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md):
-// assembly in runtime/crypto_*.S, called with spans the compiler range-checks,
-// and only when the CPU has PCLMULQDQ (or ARMv8 PMULL) and `M31_CRYPTO_ACCEL`
-// has not switched it off (`accel.features()`). `acc` becomes
-// `((acc ^ block) * subkey)` for each of `count` blocks of `data`.
+/* The hardware GHASH kernel (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md):
+ * assembly in runtime/crypto_*.S, called with spans the compiler range-checks,
+ * and only when the CPU has PCLMULQDQ (or ARMv8 PMULL) and `M31_CRYPTO_ACCEL`
+ * has not switched it off (`accel.features()`). `acc` becomes
+ * `((acc ^ block) * subkey)` for each of `count` blocks of `data`. */
 prim "c" nonblocking void __k_ghash(
     in bytes subkey[0 .. 16],
     inout bytes accumulator[0 .. 16],
@@ -67,11 +67,11 @@ prim "c" nonblocking void __k_ghash(
 
 /// Why `open` refused.
 pub enum Error {
-    /// `sealed` is shorter than the 16-octet tag, so there is nothing to
-    /// check.
+    /** `sealed` is shorter than the 16-octet tag, so there is nothing to
+     * check. */
     Short;
-    /// The tag does not match: `sealed`, `aad`, `key` or `nonce` is not what
-    /// it was sealed with.
+    /** The tag does not match: `sealed`, `aad`, `key` or `nonce` is not what
+     * it was sealed with. */
     Tag;
 }
 
@@ -120,16 +120,16 @@ int clmul32(int x, int y) {
     return (z_0 & 0x1111_1111_1111_1111) | (z_1 & 0x2222_2222_2222_2222) | (z_2 & 0x4444_4444_4444_4444) | (z_3 & 0x8888_8888_8888_8888);
 }
 
-// `h` is 6 ints: the four limbs of H and, after them, `h0 ^ h2` and `h1 ^ h3`
-// (the Karatsuba middle operands, computed once per key). `acc` (four limbs)
-// becomes `acc * H` in the GCM field.
+/* `h` is 6 ints: the four limbs of H and, after them, `h0 ^ h2` and `h1 ^ h3`
+ * (the Karatsuba middle operands, computed once per key). `acc` (four limbs)
+ * becomes `acc * H` in the GCM field. */
 void gf_multiply(Array<int> acc, Array<int> subkey) {
     int a_0 = acc[0];
     int a_1 = acc[1];
     int a_2 = acc[2];
     int a_3 = acc[3];
-    // Low halves (limbs 0,1), high halves (limbs 2,3) and their sum, each a
-    // 64x64 product by Karatsuba over 32-bit limbs.
+    /* Low halves (limbs 0,1), high halves (limbs 2,3) and their sum, each a
+     * 64x64 product by Karatsuba over 32-bit limbs. */
     int l_0 = clmul32(a_0, subkey[0]);
     int l_2 = clmul32(a_1, subkey[1]);
     int l_1 = clmul32(a_0 ^ a_1, subkey[0] ^ subkey[1]) ^ l_0 ^ l_2;
@@ -139,8 +139,8 @@ void gf_multiply(Array<int> acc, Array<int> subkey) {
     int m_0 = clmul32(a_0 ^ a_2, subkey[4]);
     int m_2 = clmul32(a_1 ^ a_3, subkey[5]);
     int m_1 = clmul32((a_0 ^ a_2) ^ (a_1 ^ a_3), subkey[4] ^ subkey[5]) ^ m_0 ^ m_2;
-    // Z0 = low * low, Z2 = high * high, Z1 = (low ^ high) * (low ^ high) ^ Z0 ^ Z2,
-    // each as four 32-bit limbs.
+    /* Z0 = low * low, Z2 = high * high, Z1 = (low ^ high) * (low ^ high) ^ Z0 ^ Z2,
+     * each as four 32-bit limbs. */
     int z0_0 = l_0 & 0xFFFF_FFFF;
     int z0_1 = (l_0 >> 32 & 0xFFFF_FFFF) ^ (l_1 & 0xFFFF_FFFF);
     int z0_2 = (l_1 >> 32 & 0xFFFF_FFFF) ^ (l_2 & 0xFFFF_FFFF);
@@ -166,9 +166,9 @@ void gf_multiply(Array<int> acc, Array<int> subkey) {
     int p_5 = z1_3 ^ z2_1;
     int p_6 = z2_2;
     int p_7 = z2_3;
-    // Reduce by x^128 = x^7 + x^2 + x + 1, high limb first: limb i + 4's
-    // bits land at limb i (shifted by 0, 1, 2, 7) and what the shifts push
-    // out of the top lands at limb i + 1.
+    /* Reduce by x^128 = x^7 + x^2 + x + 1, high limb first: limb i + 4's
+     * bits land at limb i (shifted by 0, 1, 2, 7) and what the shifts push
+     * out of the top lands at limb i + 1. */
     p_4 = p_4 ^ (p_7 >> 31) ^ (p_7 >> 30) ^ (p_7 >> 25);
     p_3 = p_3 ^ ((p_7 ^ p_7 << 1 ^ p_7 << 2 ^ p_7 << 7) & 0xFFFF_FFFF) ^ (p_6 >> 31) ^ (p_6 >> 30) ^ (p_6 >> 25);
     p_2 = p_2 ^ ((p_6 ^ p_6 << 1 ^ p_6 << 2 ^ p_6 << 7) & 0xFFFF_FFFF) ^ (p_5 >> 31) ^ (p_5 >> 30) ^ (p_5 >> 25);
@@ -180,8 +180,8 @@ void gf_multiply(Array<int> acc, Array<int> subkey) {
     acc[3] = p_3 & 0xFFFF_FFFF;
 }
 
-// `h`'s six ints for a key: GHASH's H (the AES encryption of the zero block)
-// as four natural-order limbs, then `h0 ^ h2` and `h1 ^ h3`.
+/* `h`'s six ints for a key: GHASH's H (the AES encryption of the zero block)
+ * as four natural-order limbs, then `h0 ^ h2` and `h1 ^ h3`. */
 Array<int> hash_key(aes.Cipher cipher) {
     bytes h_block = cipher.encrypt_block([0; 16]);
     Array<int> hash_words = [0; 6];
@@ -193,8 +193,8 @@ Array<int> hash_key(aes.Cipher cipher) {
     return hash_words;
 }
 
-// `data[start .. end)` folded into the GHASH accumulator `acc`, zero-padded to
-// a whole block at the end (§6.4).
+/* `data[start .. end)` folded into the GHASH accumulator `acc`, zero-padded to
+ * a whole block at the end (§6.4). */
 void ghash_feed(Array<int> acc, Array<int> subkey, bytes data, int start, int end) {
     int position = start;
     while (position + 16 <= end) {
@@ -217,8 +217,8 @@ void ghash_feed(Array<int> acc, Array<int> subkey, bytes data, int start, int en
     }
 }
 
-// `data[start .. end)` folded into the kernel's accumulator `acc`, zero-padded
-// to a whole block at the end (§6.4). `h` is H in GCM byte order.
+/* `data[start .. end)` folded into the kernel's accumulator `acc`, zero-padded
+ * to a whole block at the end (§6.4). `h` is H in GCM byte order. */
 void ghash_feed_hardware(bytes subkey, bytes acc, bytes data, int start, int end) {
     int whole = (end - start) / 16;
     if (whole > 0) {
@@ -234,9 +234,9 @@ void ghash_feed_hardware(bytes subkey, bytes acc, bytes data, int start, int end
     }
 }
 
-// The 16-octet tag for `aad` and `ciphertext[0 .. length)`: GHASH over the
-// padded AAD, the padded ciphertext and the length block, XOR E(K, J0) with
-// J0 = nonce || 1 (§7.1, 96-bit IV).
+/* The 16-octet tag for `aad` and `ciphertext[0 .. length)`: GHASH over the
+ * padded AAD, the padded ciphertext and the length block, XOR E(K, J0) with
+ * J0 = nonce || 1 (§7.1, 96-bit IV). */
 bytes compute_tag(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciphertext, int length) {
     if ((accel.features() & accel.AES) != 0) {
         return compute_tag_hardware(cipher, nonce, aad, ciphertext, length);
@@ -293,14 +293,14 @@ bytes compute_tag_hardware(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciph
     return tag;
 }
 
-// CTR mode from block counter 2 on (counter 1 is the tag mask), SP 800-38D
-// §6.5: `data[0 .. length)` XOR the keystream into `out[0 .. length)`.
-// Symmetric. The counter blocks of one chunk (at most 256 blocks) are built
-// together and encrypted in one bitsliced call.
+/* CTR mode from block counter 2 on (counter 1 is the tag mask), SP 800-38D
+ * §6.5: `data[0 .. length)` XOR the keystream into `out[0 .. length)`.
+ * Symmetric. The counter blocks of one chunk (at most 256 blocks) are built
+ * together and encrypted in one bitsliced call. */
 void ctr_xor(aes.Cipher cipher, bytes nonce, bytes data, int length, bytes out) {
-    // The kernel's counter is the whole 16-octet block counted over all 128
-    // bits; with word_start most MAX_MESSAGE (2^24) octets after counter 2 the low 32
-    // bits cannot wrap, so that is the same stream.
+    /* The kernel's counter is the whole 16-octet block counted over all 128
+     * bits; with word_start most MAX_MESSAGE (2^24) octets after counter 2 the low 32
+     * bits cannot wrap, so that is the same stream. */
     bytes counter_two = clone(nonce);
     bytes two = [0, 0, 0, 2];
     counter_two.extend(two);
@@ -355,10 +355,10 @@ void check_arguments(bytes key, bytes nonce, int message_size) {
     }
 }
 
-/// Encrypt and authenticate: SP 800-38D §7.1. The result is `plaintext`'s
-/// length plus 16 -- ciphertext, then the tag. `aad` may be empty. A `key`
-/// not 16 or 32 octets, a `nonce` not 12, or a `plaintext` over `MAX_MESSAGE`
-/// traps.
+/** Encrypt and authenticate: SP 800-38D §7.1. The result is `plaintext`'s
+ * length plus 16 -- ciphertext, then the tag. `aad` may be empty. A `key`
+ * not 16 or 32 octets, a `nonce` not 12, or a `plaintext` over `MAX_MESSAGE`
+ * traps. */
 pub bytes seal(bytes key, bytes nonce, bytes plaintext, bytes aad) {
     check_arguments(key, nonce, plaintext.size());
     aes.Cipher cipher = aes.cipher(key);
@@ -372,11 +372,11 @@ pub bytes seal(bytes key, bytes nonce, bytes plaintext, bytes aad) {
     return out;
 }
 
-/// Verify and decrypt: SP 800-38D §7.2. `Err(Short)` if `sealed` cannot
-/// hold a tag, `Err(Tag)` if the tag does not verify -- in which case
-/// nothing about `sealed` should be trusted, `aad` included, and this returns
-/// before decrypting anything. `key` and `nonce` follow `seal`'s rule about
-/// length.
+/** Verify and decrypt: SP 800-38D §7.2. `Err(Short)` if `sealed` cannot
+ * hold a tag, `Err(Tag)` if the tag does not verify -- in which case
+ * nothing about `sealed` should be trusted, `aad` included, and this returns
+ * before decrypting anything. `key` and `nonce` follow `seal`'s rule about
+ * length. */
 pub Result<bytes, Error> open(bytes key, bytes nonce, bytes sealed, bytes aad) {
     check_arguments(key, nonce, 0);
     if (sealed.size() < TAG_SIZE) {

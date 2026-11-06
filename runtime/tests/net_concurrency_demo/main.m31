@@ -1,23 +1,23 @@
 import net;
 import io;
 
-// N real TCP connections to one local listener, all at once, each its own
-// `spawn`ed green thread on both ends (a server-side accept loop spawning
-// one handler per connection, and N independent client green threads) --
-// proving that real socket I/O through the reactor (lib/net.m31's
-// non-blocking sockets, `__wait_io`) does not serialize on a carrier the
-// way a blocking `read`/`write`/`accept`/`connect` would.
-//
-// Every connection does a full round trip (write, read the echo back,
-// check it matches byte for byte) so a bug that crossed wires between two
-// connections -- the reactor waking the wrong green thread for a ready fd,
-// say -- would show up as a mismatch, not just a slow or missing one.
-// Run under a small, explicit LANG_NUM_CARRIERS by the dedicated
-// concurrency test script (not this ordinary corpus run), the same way
-// corpus/core's 1303/1304 test `Chan` contention: if a parked green thread
-// blocked its carrier instead of freeing it, N connections on a handful of
-// carriers would not merely be slow, several of them would never even be
-// accepted, because the accept loop itself needs a carrier turn.
+/* N real TCP connections to one local listener, all at once, each its own
+ * `spawn`ed green thread on both ends (a server-side accept loop spawning
+ * one handler per connection, and N independent client green threads) --
+ * proving that real socket I/O through the reactor (lib/net.m31's
+ * non-blocking sockets, `__wait_io`) does not serialize on a carrier the
+ * way a blocking `read`/`write`/`accept`/`connect` would.
+ *
+ * Every connection does a full round trip (write, read the echo back,
+ * check it matches byte for byte) so a bug that crossed wires between two
+ * connections -- the reactor waking the wrong green thread for a ready fd,
+ * say -- would show up as a mismatch, not just a slow or missing one.
+ * Run under a small, explicit LANG_NUM_CARRIERS by the dedicated
+ * concurrency test script (not this ordinary corpus run), the same way
+ * corpus/core's 1303/1304 test `Chan` contention: if a parked green thread
+ * blocked its carrier instead of freeing it, N connections on a handful of
+ * carriers would not merely be slow, several of them would never even be
+ * accepted, because the accept loop itself needs a carrier turn. */
 
 const int CONNECTION_COUNT = 200;
 
@@ -55,31 +55,31 @@ void serve(net.Listener listener, int connection_count) {
     Result<bool, net.Error> closed = listener.close();
 }
 
-// listen()'s backlog argument is a request, not a guarantee: the kernel
-// clamps it to its own ceiling (somaxconn) regardless of what this program
-// asks for, and a real macOS CI run showed the N+56 backlog above making
-// no difference at all -- byte-for-byte the same "connection was broken by
-// the peer" as the unmodified default, which only makes sense if both
-// requests were silently clamped to the same real kernel ceiling. This is
-// standard BSD/POSIX behavior under a genuine connection burst, not a bug
-// in this runtime's reactor: once N real connect()s fire at once on a
-// single carrier, some will race ahead of the accept loop's own turn and
-// land on a backlog the kernel has already decided is full, and BSD
-// kernels are documented to answer that with a RST (ECONNRESET) rather
-// than Linux's more common silent-drop-and-let-the-client's-own-SYN-retry
-// handle it. A production TCP client retries exactly this the same way.
-//
-// No stdlib sleep/yield primitive exists to wait between attempts.
-// connect() IS a blocking FFI call (every call site already goes through
-// enter_blocking/exit_blocking, see the compiler's own warnings above),
-// but that only yields the carrier when the syscall actually blocks --
-// confirmed locally (artificially set backlog: 1 to force every
-// connection past the first to be refused synchronously) that a
-// same-carrier RST-and-immediate-retry loop with no real wait in it can
-// come back so fast it never actually parks, starving the accept loop of
-// a turn forever on a single carrier. yield_once() below forces a real
-// scheduling round trip the same way: park on a channel recv, let a
-// spawned green thread (necessarily a separate scheduling turn) wake it.
+/* listen()'s backlog argument is a request, not a guarantee: the kernel
+ * clamps it to its own ceiling (somaxconn) regardless of what this program
+ * asks for, and a real macOS CI run showed the N+56 backlog above making
+ * no difference at all -- byte-for-byte the same "connection was broken by
+ * the peer" as the unmodified default, which only makes sense if both
+ * requests were silently clamped to the same real kernel ceiling. This is
+ * standard BSD/POSIX behavior under a genuine connection burst, not a bug
+ * in this runtime's reactor: once N real connect()s fire at once on a
+ * single carrier, some will race ahead of the accept loop's own turn and
+ * land on a backlog the kernel has already decided is full, and BSD
+ * kernels are documented to answer that with a RST (ECONNRESET) rather
+ * than Linux's more common silent-drop-and-let-the-client's-own-SYN-retry
+ * handle it. A production TCP client retries exactly this the same way.
+ *
+ * No stdlib sleep/yield primitive exists to wait between attempts.
+ * connect() IS a blocking FFI call (every call site already goes through
+ * enter_blocking/exit_blocking, see the compiler's own warnings above),
+ * but that only yields the carrier when the syscall actually blocks --
+ * confirmed locally (artificially set backlog: 1 to force every
+ * connection past the first to be refused synchronously) that a
+ * same-carrier RST-and-immediate-retry loop with no real wait in it can
+ * come back so fast it never actually parks, starving the accept loop of
+ * a turn forever on a single carrier. yield_once() below forces a real
+ * scheduling round trip the same way: park on a channel recv, let a
+ * spawned green thread (necessarily a separate scheduling turn) wake it. */
 const int CONNECT_RETRIES = 20;
 
 void send_tick(Chan<int> tick) {
@@ -92,18 +92,18 @@ void yield_once() {
     int ignored = recv(tick);
 }
 
-// ECONNRESET, however it is found: the accept-queue-overflow-after-the-
-// handshake-completed race this file's own backlog comment describes is
-// not only a connect()-time failure. A real macOS CI run found it can
-// equally surface as the client's OWN write or read on an already-
-// connect()ed socket failing with this, if the server-side kernel drops an
-// already-established-but-not-yet-accept()ed connection AFTER connect()
-// returned Ok -- BSD kernels are documented to RST a completed connection
-// that overflows the accept queue, not only refuse a new one. io.Error has
-// no dedicated "reset" variant (docs/stdlib-decision.md's no-blessed-error-
-// type reasoning), so this is Other(104) -- 104 because every io.Error's
-// Other code is a Linux errno regardless of host (docs/sys-layer.md §1),
-// not whatever this platform's own ECONNRESET constant happens to be.
+/* ECONNRESET, however it is found: the accept-queue-overflow-after-the-
+ * handshake-completed race this file's own backlog comment describes is
+ * not only a connect()-time failure. A real macOS CI run found it can
+ * equally surface as the client's OWN write or read on an already-
+ * connect()ed socket failing with this, if the server-side kernel drops an
+ * already-established-but-not-yet-accept()ed connection AFTER connect()
+ * returned Ok -- BSD kernels are documented to RST a completed connection
+ * that overflows the accept queue, not only refuse a new one. io.Error has
+ * no dedicated "reset" variant (docs/stdlib-decision.md's no-blessed-error-
+ * type reasoning), so this is Other(104) -- 104 because every io.Error's
+ * Other code is a Linux errno regardless of host (docs/sys-layer.md §1),
+ * not whatever this platform's own ECONNRESET constant happens to be. */
 bool is_reset(io.Error error) {
     match (error) {
         case NotFound: {
@@ -216,11 +216,11 @@ void client(int id, int port, Chan<int> results) {
     }
 }
 
-// N + 56, comfortably above N, so this demo tests the concurrency claim
-// rather than a backlog size nobody chose on purpose -- though client()'s
-// own comment above is why this alone does not make the demo bulletproof
-// on every kernel: the real ceiling is somaxconn, which this argument
-// cannot raise past.
+/* N + 56, comfortably above N, so this demo tests the concurrency claim
+ * rather than a backlog size nobody chose on purpose -- though client()'s
+ * own comment above is why this alone does not make the demo bulletproof
+ * on every kernel: the real ceiling is somaxconn, which this argument
+ * cannot raise past. */
 match (net.listen("127.0.0.1", 0, backlog: CONNECTION_COUNT + 56)) {
     case Ok(net.Listener listener): {
         int port = listener.local().port();

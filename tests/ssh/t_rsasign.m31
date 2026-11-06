@@ -1,9 +1,9 @@
-// `lib/crypto/rsasign.m31`, driven by `oracle_rsasign.py` (which generates
-// RSA keys with `cryptography`, feeds them here on stdin and compares the
-// signatures with OpenSSL's, which for PKCS#1 v1.5 must be byte-identical).
-//
-//   sign HASH N E D IQMP P Q DIGEST     -> signature HEX | refused
-// All big-endian hex; HASH is sha256 or sha512.
+/* `lib/crypto/rsasign.m31`, driven by `oracle_rsasign.py` (which generates
+ * RSA keys with `cryptography`, feeds them here on stdin and compares the
+ * signatures with OpenSSL's, which for PKCS#1 v1.5 must be byte-identical).
+ *
+ *   sign HASH N E D IQMP P Q DIGEST     -> signature HEX | refused
+ * All big-endian hex; HASH is sha256 or sha512. */
 import io;
 import encoding.hexcodec;
 import crypto.rsa;

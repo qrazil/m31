@@ -1,44 +1,44 @@
-// An SFTP client, protocol version 3 (draft-ietf-secsh-filexfer-02, what
-// OpenSSH's `sftp-server` speaks), over a `subsystem` channel.
-//
-// API
+/* An SFTP client, protocol version 3 (draft-ietf-secsh-filexfer-02, what
+ * OpenSSH's `sftp-server` speaks), over a `subsystem` channel.
+ *
+ * API */
 // ---
-//   sshsftp.open(link)               -> Result<Session, str>
-//   s.realpath(path)                 -> Result<str, str>
-//   s.stat(path) / s.lstat(path)     -> Result<Attrs, str>
-//   s.list(path)                     -> Result<List<Entry>, str>     "." and ".." dropped
-//   s.mkdir(path, mode) / s.rmdir(path) / s.remove(path)
-//   s.rename(from, to)
-//   s.set_permissions(path, mode) / s.set_times(path, atime, mtime)
-//   s.download(remote, local, progress)  -> Result<int, str>   bytes
-//   s.upload(local, remote, mode, progress) -> Result<int, str>
-//   s.close()
-//
-// Errors are one line: `remote: <server's words> (status N): <path>` for a
-// server refusal, or what the channel said for a transport failure.
-//
+/*   sshsftp.open(link)               -> Result<Session, str>
+ *   s.realpath(path)                 -> Result<str, str>
+ *   s.stat(path) / s.lstat(path)     -> Result<Attrs, str>
+ *   s.list(path)                     -> Result<List<Entry>, str>     "." and ".." dropped
+ *   s.mkdir(path, mode) / s.rmdir(path) / s.remove(path)
+ *   s.rename(from, to)
+ *   s.set_permissions(path, mode) / s.set_times(path, atime, mtime)
+ *   s.download(remote, local, progress)  -> Result<int, str>   bytes
+ *   s.upload(local, remote, mode, progress) -> Result<int, str>
+ *   s.close()
+ *
+ * Errors are one line: `remote: <server's words> (status N): <path>` for a
+ * server refusal, or what the channel said for a transport failure.
+ * */
 // --- transfers -------------------------------------------------------------
-//
-// Reads and writes are pipelined: up to 16 requests of 32 KiB are in flight,
-// responses matched by id, so a 20 MB file crosses at the link's speed and not
-// at one round trip per 32 KiB. A short read (the server returned fewer
-// bytes than asked, which a server may) is re-requested for the gap; a file
-// is complete on the server's EOF; an upload is complete when every WRITE
-// has been answered `OK` and the handle's CLOSE too.
-//
-// A `Progress` is told after each chunk (`done` of `total`, total 0 when
-// unknown); it is how the program draws its meter and nothing here prints.
-//
+/*
+ * Reads and writes are pipelined: up to 16 requests of 32 KiB are in flight,
+ * responses matched by id, so a 20 MB file crosses at the link's speed and not
+ * at one round trip per 32 KiB. A short read (the server returned fewer
+ * bytes than asked, which a server may) is re-requested for the gap; a file
+ * is complete on the server's EOF; an upload is complete when every WRITE
+ * has been answered `OK` and the handle's CLOSE too.
+ *
+ * A `Progress` is told after each chunk (`done` of `total`, total 0 when
+ * unknown); it is how the program draws its meter and nothing here prints.
+ * */
 // --- hostile server ---------------------------------------------------------
-//
-// Every length is bounded before it is used: a packet over 1 MiB is refused
-// before it is read, a name list over 65536 entries or a string past its
-// packet is `Err`, a response with the wrong id or type for the request is
-// `Err`, a READ answer longer than was asked is `Err`. Nothing is written
-// to a local path the caller did not name: names the *server* returns
-// (`list`) are returned as text for the caller to treat as untrusted (a
-// recursive download must check each against `/` and `..`; `download`
-// itself takes the local path from the caller).
+/*
+ * Every length is bounded before it is used: a packet over 1 MiB is refused
+ * before it is read, a name list over 65536 entries or a string past its
+ * packet is `Err`, a response with the wrong id or type for the request is
+ * `Err`, a READ answer longer than was asked is `Err`. Nothing is written
+ * to a local path the caller did not name: names the *server* returns
+ * (`list`) are returned as text for the caller to treat as untrusted (a
+ * recursive download must check each against `/` and `..`; `download`
+ * itself takes the local path from the caller). */
 
 import io;
 import fs;
@@ -86,8 +86,8 @@ const int TYPE_DIRECTORY = 0o040000;
 const int TYPE_FILE = 0o100000;
 const int TYPE_LINK = 0o120000;
 
-/// File attributes (SFTP v3 `ATTRS`); a field is meaningful only when its
-/// `has_` flag is true.
+/** File attributes (SFTP v3 `ATTRS`); a field is meaningful only when its
+ * `has_` flag is true. */
 pub type Attrs {
     pub bool has_size;
     pub int size;
@@ -119,10 +119,10 @@ pub type Entry {
     pub Attrs attrs;
 }
 
-/// What a transfer reports to: `begin`/`end` bracket one file, `update` is
-/// told after each chunk (`total` is 0 when unknown), `note` carries a
-/// warning (a name skipped). It is how a program draws its meter; nothing
-/// in this module prints.
+/** What a transfer reports to: `begin`/`end` bracket one file, `update` is
+ * told after each chunk (`total` is 0 when unknown), `note` carries a
+ * warning (a name skipped). It is how a program draws its meter; nothing
+ * in this module prints. */
 pub interface Reporter {
     void begin(str name);
     void update(int done, int total);
@@ -189,8 +189,8 @@ pub type AttrsAt {
     pub int next;
 }
 
-/// Parses an `ATTRS` at `offset`; `Err` for any field that runs past the
-/// buffer or an absurd extended-pair count.
+/** Parses an `ATTRS` at `offset`; `Err` for any field that runs past the
+ * buffer or an absurd extended-pair count. */
 pub Result<AttrsAt, str> parse_attrs(bytes buffer, int offset) {
     if (offset < 0 || offset + 4 > buffer.size()) {
         return Result<AttrsAt, str>.Err("truncated attributes");
@@ -370,8 +370,8 @@ Result<bytes, str> Session.receive() {
     return take(length);
 }
 
-// Sends a request whose body (after the type and id) is `payload` and
-// returns the response body, checking it answers this request.
+/* Sends a request whose body (after the type and id) is `payload` and
+ * returns the response body, checking it answers this request. */
 Result<bytes, str> Session.call(int packet_type, bytes payload) {
     int id = next_id;
     next_id = next_id + 1;
@@ -539,9 +539,9 @@ pub Result<void, str> Session.set_times(str path, int access_time, int modify_ti
     return expect_ok(reply, path);
 }
 
-/// Copies the remote file `remote` to the local path `local` (created or
-/// truncated, with permissions `mode` before the process umask). Returns the
-/// byte count.
+/** Copies the remote file `remote` to the local path `local` (created or
+ * truncated, with permissions `mode` before the process umask). Returns the
+ * byte count. */
 pub Result<int, str> Session.download(str remote, str local, int mode, Reporter progress) {
     int total = 0;
     match (stat(remote)) {
@@ -572,9 +572,9 @@ pub Result<int, str> Session.download(str remote, str local, int mode, Reporter 
             bool is_eof = false;
             List<Pending> queue = [];
             List<Pending> gaps = [];
-            // Done when the server has said end-of-file, nothing is in flight
-            // and no range that came back short is still owed: a gap is
-            // re-requested even after another request has seen the end.
+            /* Done when the server has said end-of-file, nothing is in flight
+             * and no range that came back short is still owed: a gap is
+             * re-requested even after another request has seen the end. */
             while (queue.size() > 0 || gaps.size() > 0 || !is_eof) {
                 while (queue.size() < PIPELINE && (gaps.size() > 0 || !is_eof)) {
                     int offset = issued;
@@ -649,10 +649,10 @@ pub Result<int, str> Session.download(str remote, str local, int mode, Reporter 
             Result<bool, io.Error> finished = file.close();
             close_handle(handle)?;
             if (total > 0 && written != total) {
-                // Every byte below the end of the file was asked for; getting
-                // a different count than the server's own size means the file
-                // changed under us or the server misbehaved. Never report
-                // success for a file that is not the one that was asked for.
+                /* Every byte below the end of the file was asked for; getting
+                 * a different count than the server's own size means the file
+                 * changed under us or the server misbehaved. Never report
+                 * success for a file that is not the one that was asked for. */
                 Result<bool, io.Error> removed = fs.remove(local);
                 return Result<int, str>.Err("remote: " + remote + ": received " + written.to_str() + " bytes but the server's size is " + total.to_str() + "; the partial file was removed");
             }
@@ -661,8 +661,8 @@ pub Result<int, str> Session.download(str remote, str local, int mode, Reporter 
     }
 }
 
-/// Copies the local file `local` to `remote` (created or truncated, with
-/// permissions `mode`). Returns the byte count.
+/** Copies the local file `local` to `remote` (created or truncated, with
+ * permissions `mode`). Returns the byte count. */
 pub Result<int, str> Session.upload(str local, str remote, int mode, Reporter progress) {
     match (io.open(local, mode: io.Mode.Read)) {
         case Err(io.Error error): {
@@ -736,10 +736,10 @@ pub void Session.finish() {
     Result<void, sshexec.Error> closed = channel.close();
 }
 
-/// Copies `remote` (a file, or with `is_recursive` a directory tree) to
-/// `local`. A directory's entries are named by the server and each name is
-/// checked (`is_safe_name`) before it is used; one that fails is reported
-/// through `note` and skipped.
+/** Copies `remote` (a file, or with `is_recursive` a directory tree) to
+ * `local`. A directory's entries are named by the server and each name is
+ * checked (`is_safe_name`) before it is used; one that fails is reported
+ * through `note` and skipped. */
 pub Result<void, str> Session.get_tree(str remote, str local, bool is_recursive, Reporter reporter) {
     return get_tree_at(remote, local, is_recursive, reporter, 0);
 }
@@ -782,8 +782,8 @@ Result<void, str> Session.get_tree_at(str remote, str local, bool is_recursive, 
     return Result<void, str>.Ok;
 }
 
-/// Copies `local` (a file, or with `is_recursive` a directory tree) to
-/// `remote`. With `is_preserving` the modification time is set afterwards.
+/** Copies `local` (a file, or with `is_recursive` a directory tree) to
+ * `remote`. With `is_preserving` the modification time is set afterwards. */
 pub Result<void, str> Session.put_tree(str local, str remote, bool is_recursive, bool is_preserving, Reporter reporter) {
     return put_tree_at(local, remote, is_recursive, is_preserving, reporter, 0);
 }
@@ -793,8 +793,8 @@ Result<void, str> Session.put_tree_at(str local, str remote, bool is_recursive, 
         return Result<void, str>.Err("local: " + local + ": directories nested more than " + MAX_TREE_DEPTH.to_str() + " deep; giving up");
     }
     if (depth > 0 && fs.is_link(local) && fs.is_directory(local)) {
-        // A symlink to a directory inside a tree is not followed: it could
-        // point back up and loop, or out of the tree.
+        /* A symlink to a directory inside a tree is not followed: it could
+         * point back up and loop, or out of the tree. */
         reporter.note("skipping symbolic link to a directory: " + local);
         return Result<void, str>.Ok;
     }
@@ -840,8 +840,8 @@ Result<void, str> Session.put_tree_at(str local, str remote, bool is_recursive, 
     return Result<void, str>.Ok;
 }
 
-/// How deep a recursive copy goes before it is refused as a loop or a
-/// hostile tree (a server can answer every listing with another directory).
+/** How deep a recursive copy goes before it is refused as a loop or a
+ * hostile tree (a server can answer every listing with another directory). */
 const int MAX_TREE_DEPTH = 64;
 
 /// Starts the `sftp` subsystem on `link` and negotiates version 3.
@@ -912,16 +912,16 @@ type Pending {
 
 // --- whole files and trees ----------------------------------------------------------
 
-/// Whether a name a server returned can be one path component: not empty,
-/// `.`, `..`, and without `/` or NUL. A recursive download refuses the rest,
-/// so a server cannot place files outside the directory the user named.
+/** Whether a name a server returned can be one path component: not empty,
+ * `.`, `..`, and without `/` or NUL. A recursive download refuses the rest,
+ * so a server cannot place files outside the directory the user named. */
 pub bool is_safe_name(str name) {
     if (name == "" || name == "." || name == "..") {
         return false;
     }
     for (int code in name.chars()) {
-        // `/` and NUL would leave the directory; control characters would
-        // reach the terminal in a progress line or a listing.
+        /* `/` and NUL would leave the directory; control characters would
+         * reach the terminal in a progress line or a listing. */
         if (code == 47 || code < 32 || code == 127 || (code >= 128 && code < 160)) {
             return false;
         }

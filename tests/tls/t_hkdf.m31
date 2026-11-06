@@ -1,9 +1,9 @@
-// HKDF and the TLS 1.3 labelled forms against an independent Python
-// implementation. Every line this prints on stdout is printed again by
-// `oracle_hkdf.py`, and `test.sh` diffs the two. Structured like
-// `tests/ssh/t_sha256.m31`.
-//
-//   ./build.sh tests/tls/t_hkdf.m31 -o t_hkdf && ./t_hkdf
+/* HKDF and the TLS 1.3 labelled forms against an independent Python
+ * implementation. Every line this prints on stdout is printed again by
+ * `oracle_hkdf.py`, and `test.sh` diffs the two. Structured like
+ * `tests/ssh/t_sha256.m31`.
+ *
+ *   ./build.sh tests/tls/t_hkdf.m31 -o t_hkdf && ./t_hkdf */
 
 import crypto.hkdf;
 import crypto.sha256;
@@ -19,10 +19,10 @@ bytes pattern(int length, int multiplier, int offset) {
 }
 
 // --- RFC 5869 Appendix A.1 to A.3: the SHA-256 test cases -----------------------
-//
-// The RFC's inputs are counting sequences and repeats, so they are generated
-// here rather than pasted as hex; `oracle_hkdf.py` generates the same ones and
-// asserts the RFC's published PRK and OKM against its own result.
+/*
+ * The RFC's inputs are counting sequences and repeats, so they are generated
+ * here rather than pasted as hex; `oracle_hkdf.py` generates the same ones and
+ * asserts the RFC's published PRK and OKM against its own result. */
 
 bytes ikm1 = [0x0B; 22];
 bytes salt1 = pattern(13, 1, 0);
@@ -42,9 +42,9 @@ print("rfc5869-3 prk " + prk3.hex());
 print("rfc5869-3 okm " + hkdf.sha256_expand(prk3, [], 42).hex());
 
 // --- RFC 8448 §3: the start of the TLS 1.3 key schedule -------------------------
-//
-// Early Secret = Extract(0, 0), then Derive-Secret(., "derived", "") with the
-// SHA-256 of the empty string, then Extract of that with the (EC)DHE secret.
+/*
+ * Early Secret = Extract(0, 0), then Derive-Secret(., "derived", "") with the
+ * SHA-256 of the empty string, then Extract of that with the (EC)DHE secret. */
 
 bytes zero_key = [0; 32];
 bytes empty_hash = sha256.sum([]);
@@ -106,9 +106,9 @@ for (int i in 0 .. 249) {
 print("longest-label " + hkdf.sha256_expand_label(label_secret, longest_label, [], 16).hex());
 
 // --- the SHA-384 flavour (TLS_AES_256_GCM_SHA384's key schedule) -------------------
-//
-// The same sweeps over a 48-octet key, with the 255 * 48 = 12240-octet maximum
-// and the 48-octet transcript hash of SHA-384.
+/*
+ * The same sweeps over a 48-octet key, with the 255 * 48 = 12240-octet maximum
+ * and the 48-octet transcript hash of SHA-384. */
 
 for (int salt_size in SALT_SIZES) {
     for (int ikm_size in IKM_SIZES) {

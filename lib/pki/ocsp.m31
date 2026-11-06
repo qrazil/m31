@@ -1,72 +1,72 @@
-// OCSP responses (RFC 6960) as a TLS client receives them, stapled by the
-// server (RFC 6066 §8, RFC 8446 §4.4.2.1): is this response a fresh, genuine
-// statement from the certificate's issuer about this certificate, and what
-// does it say? Nothing is fetched here; `lib/tls.m31` hands over the bytes
-// the server stapled.
-//
-// API
+/* OCSP responses (RFC 6960) as a TLS client receives them, stapled by the
+ * server (RFC 6066 §8, RFC 8446 §4.4.2.1): is this response a fresh, genuine
+ * statement from the certificate's issuer about this certificate, and what
+ * does it say? Nothing is fetched here; `lib/tls.m31` hands over the bytes
+ * the server stapled.
+ *
+ * API */
 // ---
-//   ocsp.check(response, leaf, issuer, now)  -> Result<Verdict, Error>
-//   verdict.this_update, verdict.next_update, verdict.produced_at   epoch seconds
-//
-// `Ok` means all of: the response is a well-formed, successful BasicOCSPResponse;
-// its signature verifies under the issuer's key or under a delegated
-// responder's; it has a single response whose CertID is `leaf` as issued by
-// `issuer`; `now` lies in [thisUpdate - 5 min, nextUpdate]; and the status is
-// *good*. Every other outcome is an `Err` that names the first thing wrong.
-// `leaf` and `issuer` come from the path the caller already validated; this
-// module does not validate them.
-//
+/*   ocsp.check(response, leaf, issuer, now)  -> Result<Verdict, Error>
+ *   verdict.this_update, verdict.next_update, verdict.produced_at   epoch seconds
+ *
+ * `Ok` means all of: the response is a well-formed, successful BasicOCSPResponse;
+ * its signature verifies under the issuer's key or under a delegated
+ * responder's; it has a single response whose CertID is `leaf` as issued by
+ * `issuer`; `now` lies in [thisUpdate - 5 min, nextUpdate]; and the status is
+ * *good*. Every other outcome is an `Err` that names the first thing wrong.
+ * `leaf` and `issuer` come from the path the caller already validated; this
+ * module does not validate them.
+ * */
 // --- what is checked ---------------------------------------------------------
-//
-//   Structure   Strict DER (`lib/encoding/der.m31`), including trailing bytes after the
-//               response, DEFAULT values that DER says to omit (an explicit
-//               v1), and every time as a GeneralizedTime. Anything else is
-//               `Malformed`. A well-formed response whose responseStatus is not
-//               `successful` (tryLater, unauthorized, ...) carries no answer and
-//               is `Unsuccessful`: unsigned and forgeable by anyone, it is treated
-//               by the TLS layer as *no staple*, not as evidence either way.
-//   Type        id-pkix-ocsp-basic only.
-//   Signer      Either the issuer itself, or a responder certificate carried in
-//               the response that (a) the issuer signed, (b) is valid at `now`,
-//               (c) has id-kp-OCSPSigning in its extendedKeyUsage -- and
-//               anyExtendedKeyUsage does not count --, (d) has digitalSignature
-//               if it has a keyUsage. The response's responderID (by name or by
-//               SHA-1 of the key) must name the signer. A responder certificate
-//               with an unknown critical extension does not parse and the
-//               response fails. No other certificate is considered, and the TLS
-//               server's own certificates are not a source of signers.
-//   Signature   Through the same `x509chain.check_signature` as certificates:
-//               ECDSA P-256/P-384 and RSA (PKCS#1 v1.5 and PSS) with SHA-2.
-//               SHA-1 signatures are refused (`UnsupportedAlgorithm`), though
-//               real responders signed with them for years; that is the same
-//               stance as for certificates.
-//   CertID      hashAlgorithm SHA-1, SHA-256, SHA-384 or SHA-512 (others never
-//               match); issuerNameHash over the leaf's issuer name as encoded in
-//               the leaf; issuerKeyHash over the issuer's subjectPublicKey; the
-//               serial equal to the leaf's. Responses about other certificates are
-//               skipped; none about ours is `WrongCertificate`. SHA-1 is used here
-//               only to *find* the entry; the signature is what authenticates it.
-//   Freshness   thisUpdate no later than `now` + 300 s (clock skew), and a
-//               nextUpdate that exists, is not before thisUpdate, and is not
-//               before `now`. **A response without nextUpdate is `Stale`**: it
-//               claims newer information is always available, which bounds
-//               nothing, and a replayed one would never expire.
-//   Status      good is `Ok`; revoked is `Revoked`; unknown is `UnknownCertificate`
-//               (the responder does not know the certificate, which for a
-//               certificate its issuer issued is not a reassurance).
-//   Extensions  A critical extension in the response data or in a single
-//               response is `UnknownCriticalExtension`: none is implemented. A
-//               non-critical one (nonce, extended revoke, ...) is ignored.
-//
+/*
+ *   Structure   Strict DER (`lib/encoding/der.m31`), including trailing bytes after the
+ *               response, DEFAULT values that DER says to omit (an explicit
+ *               v1), and every time as a GeneralizedTime. Anything else is
+ *               `Malformed`. A well-formed response whose responseStatus is not
+ *               `successful` (tryLater, unauthorized, ...) carries no answer and
+ *               is `Unsuccessful`: unsigned and forgeable by anyone, it is treated
+ *               by the TLS layer as *no staple*, not as evidence either way.
+ *   Type        id-pkix-ocsp-basic only.
+ *   Signer      Either the issuer itself, or a responder certificate carried in
+ *               the response that (a) the issuer signed, (b) is valid at `now`,
+ *               (c) has id-kp-OCSPSigning in its extendedKeyUsage -- and
+ *               anyExtendedKeyUsage does not count --, (d) has digitalSignature
+ *               if it has a keyUsage. The response's responderID (by name or by
+ *               SHA-1 of the key) must name the signer. A responder certificate
+ *               with an unknown critical extension does not parse and the
+ *               response fails. No other certificate is considered, and the TLS
+ *               server's own certificates are not a source of signers.
+ *   Signature   Through the same `x509chain.check_signature` as certificates:
+ *               ECDSA P-256/P-384 and RSA (PKCS#1 v1.5 and PSS) with SHA-2.
+ *               SHA-1 signatures are refused (`UnsupportedAlgorithm`), though
+ *               real responders signed with them for years; that is the same
+ *               stance as for certificates.
+ *   CertID      hashAlgorithm SHA-1, SHA-256, SHA-384 or SHA-512 (others never
+ *               match); issuerNameHash over the leaf's issuer name as encoded in
+ *               the leaf; issuerKeyHash over the issuer's subjectPublicKey; the
+ *               serial equal to the leaf's. Responses about other certificates are
+ *               skipped; none about ours is `WrongCertificate`. SHA-1 is used here
+ *               only to *find* the entry; the signature is what authenticates it.
+ *   Freshness   thisUpdate no later than `now` + 300 s (clock skew), and a
+ *               nextUpdate that exists, is not before thisUpdate, and is not
+ *               before `now`. **A response without nextUpdate is `Stale`**: it
+ *               claims newer information is always available, which bounds
+ *               nothing, and a replayed one would never expire.
+ *   Status      good is `Ok`; revoked is `Revoked`; unknown is `UnknownCertificate`
+ *               (the responder does not know the certificate, which for a
+ *               certificate its issuer issued is not a reassurance).
+ *   Extensions  A critical extension in the response data or in a single
+ *               response is `UnknownCriticalExtension`: none is implemented. A
+ *               non-critical one (nonce, extended revoke, ...) is ignored.
+ * */
 // --- what is NOT here ---------------------------------------------------------
-//
-//   - Fetching: no request is built and no responder URL is contacted; the
-//     authorityInfoAccess extension is not read. CRLs are not fetched either.
-//   - Nonces: the client sends none, so none is checked.
-//   - A revoked response's reason and time are validated for shape and then
-//     dropped.
-//   - Checking more than the leaf: intermediates' revocation is not looked at.
+/*
+ *   - Fetching: no request is built and no responder URL is contacted; the
+ *     authorityInfoAccess extension is not read. CRLs are not fetched either.
+ *   - Nonces: the client sends none, so none is checked.
+ *   - A revoked response's reason and time are validated for shape and then
+ *     dropped.
+ *   - Checking more than the leaf: intermediates' revocation is not looked at. */
 
 import encoding.der;
 import crypto.sha1digest;
@@ -91,8 +91,8 @@ const int TAG_STATUS_UNKNOWN = 0x82;
 /// How far in the future a thisUpdate may be and still count, in seconds.
 pub const int CLOCK_SKEW = 300;
 
-/// Why a response is not an assurance that the certificate is good.
-/// Payload-free.
+/** Why a response is not an assurance that the certificate is good.
+ * Payload-free. */
 pub enum Error {
     /// Not a well-formed OCSPResponse / BasicOCSPResponse, or the wrong type.
     Malformed;
@@ -102,8 +102,8 @@ pub enum Error {
     UnknownCriticalExtension;
     /// A signature algorithm that is not accepted (unknown, or SHA-1/MD5).
     UnsupportedAlgorithm;
-    /// No acceptable signer: the responderID names nothing usable, or the
-    /// delegated responder is not authorised by the issuer.
+    /** No acceptable signer: the responderID names nothing usable, or the
+     * delegated responder is not authorised by the issuer. */
     UnauthorizedResponder;
     /// The signature does not verify.
     BadSignature;
@@ -252,8 +252,8 @@ Result<x509.AlgorithmIdentifier, Error> algorithm_of(der.Element element) {
     return Result<x509.AlgorithmIdentifier, Error>.Ok(x509.AlgorithmIdentifier(object_id, parameters));
 }
 
-// Whether `element` is `SEQUENCE OF Extension` with a critical one in it.
-// Everything about its shape is checked either way.
+/* Whether `element` is `SEQUENCE OF Extension` with a critical one in it.
+ * Everything about its shape is checked either way. */
 Result<void, Error> reject_critical_extensions(der.Element wrapper) {
     der.Element sequence = inside(wrapper, wrapper.tag)?;
     List<der.Element> extensions = kids(sequence, der.TAG_SEQUENCE)?;
@@ -303,8 +303,8 @@ Option<bytes> digest_by_object_id(str object_id, bytes message) {
     return Option<bytes>.None;
 }
 
-// The subjectPublicKey BIT STRING's octets of a certificate: what a key hash
-// (CertID, ResponderID) is taken over.
+/* The subjectPublicKey BIT STRING's octets of a certificate: what a key hash
+ * (CertID, ResponderID) is taken over. */
 Result<bytes, Error> key_octets(x509.Certificate certificate) {
     der.Element info = whole(certificate.subject_public_key_info)?;
     List<der.Element> parts = kids(info, der.TAG_SEQUENCE)?;
@@ -357,8 +357,8 @@ bool is_authorised_responder(x509.Certificate candidate, x509.Certificate issuer
     }
 }
 
-// The certificate whose key signed the response: the issuer if the
-// responderID names it, else a delegated responder from `[0] certs`.
+/* The certificate whose key signed the response: the issuer if the
+ * responderID names it, else a delegated responder from `[0] certs`. */
 Result<x509.Certificate, Error> find_signer(der.Element responder, Option<der.Element> carried, x509.Certificate issuer, int now) {
     if (names_responder(responder, issuer)?) {
         return Result<x509.Certificate, Error>.Ok(issuer);
@@ -437,8 +437,8 @@ Result<bool, Error> certid_matches(der.Element certid, x509.Certificate leaf, x5
     }
 }
 
-// `SingleResponse ::= SEQUENCE { certID, certStatus, thisUpdate, nextUpdate [0] OPTIONAL, singleExtensions [1] OPTIONAL }`.
-// Every single response must be well-formed, ours or not.
+/* `SingleResponse ::= SEQUENCE { certID, certStatus, thisUpdate, nextUpdate [0] OPTIONAL, singleExtensions [1] OPTIONAL }`.
+ * Every single response must be well-formed, ours or not. */
 Result<Single, Error> read_single(der.Element element) {
     List<der.Element> parts = kids(element, der.TAG_SEQUENCE)?;
     if (parts.size() < 3 || parts.size() > 5) {
@@ -487,9 +487,9 @@ Result<Single, Error> read_single(der.Element element) {
 
 // --- the response ------------------------------------------------------------------------
 
-/// Whether `response` (the DER OCSPResponse a server stapled) proves, at
-/// `now`, that `leaf` -- issued by `issuer` -- is not revoked. See the header
-/// for each check.
+/** Whether `response` (the DER OCSPResponse a server stapled) proves, at
+ * `now`, that `leaf` -- issued by `issuer` -- is not revoked. See the header
+ * for each check. */
 pub Result<Verdict, Error> check(bytes response, x509.Certificate leaf, x509.Certificate issuer, int now) {
     der.Element root = whole(response)?;
     List<der.Element> outer = kids(root, der.TAG_SEQUENCE)?;

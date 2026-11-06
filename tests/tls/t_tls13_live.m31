@@ -1,11 +1,11 @@
-// A real server's bytes through `tls13record`: what `openssl s_server
-// -tls1_3 -ciphersuites <suite>` sent a client, with the
-// server's traffic secrets from its key log. `live_tls13.py` captures the
-// bytes and checks what this prints; `test_tls13.sh` runs it and skips it,
-// without failing, if OpenSSL is not there or does not cooperate.
-//
-//   t_tls13_live <server bytes> <server_handshake_traffic_secret>
-//                <server_traffic_secret_0> <IANA suite name>      (hex, hex, hex, name)
+/* A real server's bytes through `tls13record`: what `openssl s_server
+ * -tls1_3 -ciphersuites <suite>` sent a client, with the
+ * server's traffic secrets from its key log. `live_tls13.py` captures the
+ * bytes and checks what this prints; `test_tls13.sh` runs it and skips it,
+ * without failing, if OpenSSL is not there or does not cooperate.
+ *
+ *   t_tls13_live <server bytes> <server_handshake_traffic_secret>
+ *                <server_traffic_secret_0> <IANA suite name>      (hex, hex, hex, name) */
 
 import io;
 import os;

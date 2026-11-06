@@ -1,14 +1,14 @@
-// RSA verification (`lib/crypto/rsa.m31`) against the cases `rsa_oracle.py` makes with
-// the `cryptography` package and Python integers. Reads the vector file named
-// on the command line and prints one `name verdict` line per case;
-// `test_rsa.sh` diffs that against the oracle's own expected list, so no
-// expectation is written down in this program.
-//
-//   python3 tests/tls/rsa_oracle.py vectors.txt expected.txt
-//   ./build.sh tests/tls/t_rsa_verify.m31 -o t_rsa_verify && ./t_rsa_verify vectors.txt
-//
-// Timing goes to stderr: the average of parse plus verify over the accepted
-// signatures of each modulus size.
+/* RSA verification (`lib/crypto/rsa.m31`) against the cases `rsa_oracle.py` makes with
+ * the `cryptography` package and Python integers. Reads the vector file named
+ * on the command line and prints one `name verdict` line per case;
+ * `test_rsa.sh` diffs that against the oracle's own expected list, so no
+ * expectation is written down in this program.
+ *
+ *   python3 tests/tls/rsa_oracle.py vectors.txt expected.txt
+ *   ./build.sh tests/tls/t_rsa_verify.m31 -o t_rsa_verify && ./t_rsa_verify vectors.txt
+ *
+ * Timing goes to stderr: the average of parse plus verify over the accepted
+ * signatures of each modulus size. */
 
 import crypto.rsa;
 import encoding.hexcodec;

@@ -1,13 +1,13 @@
-// `lib/ssh/sshhosts.m31`, self-checked: the known_hosts rules (plain names,
-// `[host]:port`, wildcards, negation, markers, comments, odd whitespace),
-// one fixture per `sshhosts.Error` variant, and hashed entries -- both three
-// lines written by a real `ssh-keygen -H` (pinned below) and, when `test.sh`
-// passes two paths, a plain file and the `ssh-keygen -H` copy of it made at
-// test time, which must answer identically for every name asked.
-//
-//     t_ssh_hosts [<plain known_hosts> <hashed copy>]
-//
-// A `trap` means a check failed.
+/* `lib/ssh/sshhosts.m31`, self-checked: the known_hosts rules (plain names,
+ * `[host]:port`, wildcards, negation, markers, comments, odd whitespace),
+ * one fixture per `sshhosts.Error` variant, and hashed entries -- both three
+ * lines written by a real `ssh-keygen -H` (pinned below) and, when `test.sh`
+ * passes two paths, a plain file and the `ssh-keygen -H` copy of it made at
+ * test time, which must answer identically for every name asked.
+ *
+ *     t_ssh_hosts [<plain known_hosts> <hashed copy>]
+ *
+ * A `trap` means a check failed. */
 import io;
 import os;
 import encoding.base64;
@@ -64,8 +64,8 @@ bytes key_of(int fill) {
     return out;
 }
 
-// The base64 of `string "ssh-ed25519" || string key`, as a known_hosts line
-// carries it.
+/* The base64 of `string "ssh-ed25519" || string key`, as a known_hosts line
+ * carries it. */
 str b64_of(bytes key) {
     bytes blob = [];
     ssh.push_string(blob, "ssh-ed25519".to_bytes());
@@ -89,9 +89,9 @@ int parse_refusal(str text) {
     }
 }
 
-// The keys `text` trusts for `host:port`, as one hex string of each key's
-// first byte joined with commas ("" for a refusal); `code` receives -1 for a
-// hit, or the refusal's code.
+/* The keys `text` trusts for `host:port`, as one hex string of each key's
+ * first byte joined with commas ("" for a refusal); `code` receives -1 for a
+ * hit, or the refusal's code. */
 bytes ed25519_blob(bytes raw) {
     bytes out = [];
     ssh.push_string(out, "ssh-ed25519".to_bytes());
@@ -121,8 +121,8 @@ sshhosts.KnownHosts must_parse(str text) {
     }
 }
 
-// The first byte of every key returned for `host:port`, comma-joined, or
-// "!<code>" for a refusal.
+/* The first byte of every key returned for `host:port`, comma-joined, or
+ * "!<code>" for a refusal. */
 str answer(sshhosts.KnownHosts known_hosts, str host, int port) {
     match (known_hosts.keys_for(host, port)) {
         case Ok(List<bytes> keys): {
@@ -231,10 +231,10 @@ checks = check(checks, answer(hashed, "other.org", 22) == "!3", "a hashed [host]
 checks = check(checks, answer(hashed, "example.com", 2222) == "!3", "a hashed plain entry does not match another port");
 checks = check(checks, answer(hashed, "nope.example", 22) == "!3", "an unlisted host is unknown beside hashed entries");
 // --- 7. writing a line: the presented key, its fingerprint, `line`, `hashed_line` ---
-//
-// Vectors computed with Python's hashlib/hmac (the same HMAC-SHA1 and SHA-256
-// OpenSSH uses). The live half -- `add` writing real files, read back by the
-// real ssh-keygen and ssh -- is in `test_auth_exec.sh`.
+/*
+ * Vectors computed with Python's hashlib/hmac (the same HMAC-SHA1 and SHA-256
+ * OpenSSH uses). The live half -- `add` writing real files, read back by the
+ * real ssh-keygen and ssh -- is in `test_auth_exec.sh`. */
 
 bytes blob7 = [];
 ssh.push_string(blob7, "ssh-ed25519".to_bytes());

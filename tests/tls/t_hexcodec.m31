@@ -1,10 +1,10 @@
-// `lib/encoding/hexcodec.m31` against Python's `bytes.hex()` and a strict reading of
-// what `bytes.fromhex` would accept (it also takes whitespace, which
-// `hexcodec.decode` refuses, so the oracle checks the digits itself first).
-// Every line this prints is printed again by `oracle_hexcodec.py`, and
-// `test.sh` diffs the two.
-//
-//   ./build.sh tests/tls/t_hexcodec.m31 -o t_hexcodec && ./t_hexcodec
+/* `lib/encoding/hexcodec.m31` against Python's `bytes.hex()` and a strict reading of
+ * what `bytes.fromhex` would accept (it also takes whitespace, which
+ * `hexcodec.decode` refuses, so the oracle checks the digits itself first).
+ * Every line this prints is printed again by `oracle_hexcodec.py`, and
+ * `test.sh` diffs the two.
+ *
+ *   ./build.sh tests/tls/t_hexcodec.m31 -o t_hexcodec && ./t_hexcodec */
 
 import encoding.hexcodec;
 
@@ -17,8 +17,8 @@ bytes pattern(int count, int multiplier, int offset) {
     return out;
 }
 
-// What `decode` made of `text`: the octets it spells, re-encoded, or the name
-// of the refusal.
+/* What `decode` made of `text`: the octets it spells, re-encoded, or the name
+ * of the refusal. */
 str outcome(str text) {
     match (hexcodec.decode(text)) {
         case Ok(bytes octets): {

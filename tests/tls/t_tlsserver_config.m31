@@ -1,14 +1,14 @@
-// Key and chain loading for `lib/tls/tlsserver.m31`, driven from
-// `test_tlsserver.sh`.
-//
-//   t_tlsserver_config CHAIN KEY [NAME ...]
-//
-// With TLSSERVER_CONFIG_API=der in the environment the files are read as bytes
-// and handed to `load_config_der` (CHAIN as one certificate) instead.
-//
-// Prints `ok` and, for each NAME, `serves NAME yes|no`; or `error: REASON` and
-// exits 1. Whatever the files hold, nothing printed here may contain a byte of
-// the key: the driver greps this output for the key's base64 text.
+/* Key and chain loading for `lib/tls/tlsserver.m31`, driven from
+ * `test_tlsserver.sh`.
+ *
+ *   t_tlsserver_config CHAIN KEY [NAME ...]
+ *
+ * With TLSSERVER_CONFIG_API=der in the environment the files are read as bytes
+ * and handed to `load_config_der` (CHAIN as one certificate) instead.
+ *
+ * Prints `ok` and, for each NAME, `serves NAME yes|no`; or `error: REASON` and
+ * exits 1. Whatever the files hold, nothing printed here may contain a byte of
+ * the key: the driver greps this output for the key's base64 text. */
 
 import io;
 import os;

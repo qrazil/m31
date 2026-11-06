@@ -1,10 +1,10 @@
-// `lib/ssh/sshforward.m31`: forwarding-spec parsing and the routing of
-// server messages, against a scripted link that only records what is sent
-// (the live behaviour is `test_m31ssh.sh`'s forwarding section).
-//
-// Hostile input: every proper prefix of a server CHANNEL_OPEN, and
-// messages for channels that do not exist, must be refused or ignored
-// without a trap and without opening anything.
+/* `lib/ssh/sshforward.m31`: forwarding-spec parsing and the routing of
+ * server messages, against a scripted link that only records what is sent
+ * (the live behaviour is `test_m31ssh.sh`'s forwarding section).
+ *
+ * Hostile input: every proper prefix of a server CHANNEL_OPEN, and
+ * messages for channels that do not exist, must be refused or ignored
+ * without a trap and without opening anything. */
 import ssh;
 import ssh.sshexec;
 import ssh.sshforward;

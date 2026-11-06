@@ -1,310 +1,310 @@
-// A TLS 1.3 client (RFC 8446), with a TLS 1.2 fallback (RFC 5246) that the
-// server alone can pick, that checks who it is talking to, by pinned key or by
-// certificate chain, and has no way not to.
-//
-// API
+/* A TLS 1.3 client (RFC 8446), with a TLS 1.2 fallback (RFC 5246) that the
+ * server alone can pick, that checks who it is talking to, by pinned key or by
+ * certificate chain, and has no way not to.
+ *
+ * API */
 // ---
-//   tls.connect(host, port, trust)   -> Result<Conn, Error>
-//   tls.connect_at(host, port, trust, now) -> Result<Conn, Error>   the clock given, in epoch seconds
-//   tls.connect_over(socket, host, trust)  -> Result<Conn, Error>   over a net.Conn already open
-//   tls.connect_over_at(socket, host, trust, now)                   the same, the clock given
-//   tls.connect_over_deadline(socket, host, trust, deadline_ms, timeout_ms: 0)
-//                                         a total bound on the handshake (see below)
-//   tls.pinned_key(sha256)           -> Trust            from 32 octets
-//   tls.pinned_key_hex(text)         -> Option<Trust>    from 64 hex digits
-//   tls.Trust.SystemRoots            the operating system's CA bundle
-//   tls.Trust.CaFile(path)           the roots in this PEM file
-//
-//   c.read(n), c.read_all(), c.read_until(delimiter, limit)
-//   c.write(data), c.close()                  `io.Stream`'s five methods
-//   c.last_error()                   -> Option<Error>    why the connection died
-//   c.peer_alert()                   -> int              the alert it sent, or -1
-//
-// A `Conn` is an `io.Stream`, so everything written against that protocol
-// runs on it unchanged: `http.write_request(conn, ...)` and
-// `http.read_response(conn, ...)` need no `https` branch.
-//
+/*   tls.connect(host, port, trust)   -> Result<Conn, Error>
+ *   tls.connect_at(host, port, trust, now) -> Result<Conn, Error>   the clock given, in epoch seconds
+ *   tls.connect_over(socket, host, trust)  -> Result<Conn, Error>   over a net.Conn already open
+ *   tls.connect_over_at(socket, host, trust, now)                   the same, the clock given
+ *   tls.connect_over_deadline(socket, host, trust, deadline_ms, timeout_ms: 0)
+ *                                         a total bound on the handshake (see below)
+ *   tls.pinned_key(sha256)           -> Trust            from 32 octets
+ *   tls.pinned_key_hex(text)         -> Option<Trust>    from 64 hex digits
+ *   tls.Trust.SystemRoots            the operating system's CA bundle
+ *   tls.Trust.CaFile(path)           the roots in this PEM file
+ *
+ *   c.read(n), c.read_all(), c.read_until(delimiter, limit)
+ *   c.write(data), c.close()                  `io.Stream`'s five methods
+ *   c.last_error()                   -> Option<Error>    why the connection died
+ *   c.peer_alert()                   -> int              the alert it sent, or -1
+ *
+ * A `Conn` is an `io.Stream`, so everything written against that protocol
+ * runs on it unchanged: `http.write_request(conn, ...)` and
+ * `http.read_response(conn, ...)` need no `https` branch.
+ * */
 // --- trust --------------------------------------------------------------------
-//
-// `Trust` says whom the server must prove it is. It has three variants:
-//
-// `PinnedKey` is the SHA-256 of the leaf certificate's DER
-// SubjectPublicKeyInfo -- what `openssl x509 -pubkey -noout | openssl pkey
-// -pubin -outform DER | openssl dgst -sha256` prints, and what HPKP and
-// curl's `--pinnedpubkey` call a pin. The certificate is *not* otherwise
-// examined under a pin: no chain, no expiry, no host name. The pin names the
-// key, `host` is only where to connect and what to put in SNI, and a
-// certificate that is expired or issued to another name is accepted if its
-// key is the one pinned.
-//
-// `SystemRoots` and `CaFile(path)` validate the whole chain
-// (`lib/pki/x509chain.m31` has the rules): a path from the server's certificate
-// through whatever intermediates it sent to a root in the bundle, every
-// signature verified, every validity period holding at connection time, the
-// CA and path-length constraints, serverAuth, and the leaf's subjectAltName
-// covering `host`. `CaFile` reads the roots from one PEM file. `SystemRoots`
-// reads the first of these that can be read:
-//
-//   $SSL_CERT_FILE                      when set, and then only this one: an
-//                                       override that names an unreadable
-//                                       file is an error, not a reason to
-//                                       trust something else
-//   /etc/pki/tls/certs/ca-bundle.crt    Fedora, Red Hat
-//   /etc/ssl/certs/ca-certificates.crt  Debian, Ubuntu, Alpine
-//   /etc/ssl/cert.pem                   macOS, LibreSSL, Alpine
-//
-// `$SSL_CERT_DIR` and per-user stores are not read. A bundle that cannot be
-// read, or holds no usable root, is `TrustStore`, reported before any
-// connection is made. A root that does not parse is skipped (it can only
-// narrow what is trusted).
-//
-// **There is no way to skip verification**, and none will be added: every
-// connection checks a pin or a chain, the CertificateVerify signature over the
-// transcript, and the server's Finished MAC, or it does not exist. There is
-// no insecure `Trust` variant, no option, no environment variable.
-//
-// Server certificates may be RSA, ECDSA (P-256, P-384) or Ed25519 (RFC 8410),
-// and so may the signatures in the chain above them. A host that is an IP
-// literal is matched against the certificate's iPAddress entries only (never
-// a dNSName), and sends no server_name (RFC 6066 §3).
-//
-// Not done: CRLs (and fetching anything: see "revocation" below), name
-// constraints, and a public suffix list (`*.co.uk` is accepted as a wildcard).
-//
+/*
+ * `Trust` says whom the server must prove it is. It has three variants:
+ *
+ * `PinnedKey` is the SHA-256 of the leaf certificate's DER
+ * SubjectPublicKeyInfo -- what `openssl x509 -pubkey -noout | openssl pkey
+ * -pubin -outform DER | openssl dgst -sha256` prints, and what HPKP and
+ * curl's `--pinnedpubkey` call a pin. The certificate is *not* otherwise
+ * examined under a pin: no chain, no expiry, no host name. The pin names the
+ * key, `host` is only where to connect and what to put in SNI, and a
+ * certificate that is expired or issued to another name is accepted if its
+ * key is the one pinned.
+ *
+ * `SystemRoots` and `CaFile(path)` validate the whole chain
+ * (`lib/pki/x509chain.m31` has the rules): a path from the server's certificate
+ * through whatever intermediates it sent to a root in the bundle, every
+ * signature verified, every validity period holding at connection time, the
+ * CA and path-length constraints, serverAuth, and the leaf's subjectAltName
+ * covering `host`. `CaFile` reads the roots from one PEM file. `SystemRoots`
+ * reads the first of these that can be read:
+ *
+ *   $SSL_CERT_FILE                      when set, and then only this one: an
+ *                                       override that names an unreadable
+ *                                       file is an error, not a reason to
+ *                                       trust something else
+ *   /etc/pki/tls/certs/ca-bundle.crt    Fedora, Red Hat
+ *   /etc/ssl/certs/ca-certificates.crt  Debian, Ubuntu, Alpine
+ *   /etc/ssl/cert.pem                   macOS, LibreSSL, Alpine
+ *
+ * `$SSL_CERT_DIR` and per-user stores are not read. A bundle that cannot be
+ * read, or holds no usable root, is `TrustStore`, reported before any
+ * connection is made. A root that does not parse is skipped (it can only
+ * narrow what is trusted).
+ *
+ * **There is no way to skip verification**, and none will be added: every
+ * connection checks a pin or a chain, the CertificateVerify signature over the
+ * transcript, and the server's Finished MAC, or it does not exist. There is
+ * no insecure `Trust` variant, no option, no environment variable.
+ *
+ * Server certificates may be RSA, ECDSA (P-256, P-384) or Ed25519 (RFC 8410),
+ * and so may the signatures in the chain above them. A host that is an IP
+ * literal is matched against the certificate's iPAddress entries only (never
+ * a dNSName), and sends no server_name (RFC 6066 §3).
+ *
+ * Not done: CRLs (and fetching anything: see "revocation" below), name
+ * constraints, and a public suffix list (`*.co.uk` is accepted as a wildcard).
+ * */
 // --- revocation: stapled OCSP only -------------------------------------------
-//
-// The client sends `status_request` (RFC 6066 §8: type ocsp, no responder IDs,
-// no request extensions) and checks the BasicOCSPResponse a server staples for
-// its leaf: in TLS 1.3 the `status_request` extension of the leaf's
-// CertificateEntry, in TLS 1.2 the CertificateStatus message (type 22) that
-// follows the Certificate when the ServerHello promised one with an empty
-// `status_request`. `lib/pki/ocsp.m31` does the checking: signature (the issuer's,
-// or a delegated id-kp-OCSPSigning responder's certificate carried in the
-// response), CertID, thisUpdate/nextUpdate against the client's clock (five
-// minutes of skew; a response with no nextUpdate is stale), status, and no
-// unknown critical extension. Its header lists exactly what it accepts.
-//
-// The policy, which is the whole of it:
-//
-//   a staple that checks out and says good     accepted
-//   a staple that says revoked                 `CertificateRevoked`, alert 44
-//   a staple that is malformed, unsigned by
-//     the issuer or an authorised responder,
-//     for another certificate, expired or not
-//     yet valid, "unknown", signed with SHA-1,
-//     or has an unknown critical extension     `BadStapledResponse`, alert 42:
-//                                              **fail closed**
-//   a staple whose TLS framing is malformed
-//     (duplicate, trailing octets, a status
-//     type other than ocsp, ...)               `Malformed`, alert 50
-//   a status message that was not promised, or
-//     is not directly after the Certificate    `UnexpectedMessage`, alert 10
-//   no staple at all (also an OCSPResponse
-//     whose status is tryLater, unauthorized,
-//     ... which carries no answer)             **soft-fail**: accepted -- unless
-//                                              the leaf has the TLS Feature
-//                                              extension with status_request
-//                                              (RFC 7633 "must-staple"), or the
-//                                              trust is `require_stapled(...)`:
-//                                              then `StapleRequired`, alert 42
-//
-// A server can strip a staple, so soft-fail without must-staple buys a
-// network attacker who can also present a revoked certificate nothing; it
-// is the default because most servers do not staple and a client that fails
-// on every one of them is unusable. `tls.require_stapled(trust)` is for a
-// client that knows its server staples: it turns "no staple" into an error
-// for every certificate. A must-staple certificate is hard-fail always, with
-// no option to turn that off.
-//
-// Only the leaf is checked, against the certificate above it in the path.
-// A pinned key (`PinnedKey`) skips the whole check, as it skips everything
-// about the certificate; `require_stapled` over a pin is a trap, not a silent
-// no-op. The client never fetches: no OCSP responder URL is contacted, no CRL
-// is downloaded -- **CRL checking and OCSP fetching are out of scope** --, and
-// no nonce is sent, so a staple can be replayed until its nextUpdate (that is
-// what stapling is). A resumed session carries no new staple, but its
-// lifetime is capped by the nextUpdate of the staple it was made under (as it
-// is by the earliest certificate `not_after` and by seven days): it cannot
-// outlive the freshness of the evidence for the certificate. `Conn.stapled()`
-// says whether a staple was checked on this handshake.
-//
+/*
+ * The client sends `status_request` (RFC 6066 §8: type ocsp, no responder IDs,
+ * no request extensions) and checks the BasicOCSPResponse a server staples for
+ * its leaf: in TLS 1.3 the `status_request` extension of the leaf's
+ * CertificateEntry, in TLS 1.2 the CertificateStatus message (type 22) that
+ * follows the Certificate when the ServerHello promised one with an empty
+ * `status_request`. `lib/pki/ocsp.m31` does the checking: signature (the issuer's,
+ * or a delegated id-kp-OCSPSigning responder's certificate carried in the
+ * response), CertID, thisUpdate/nextUpdate against the client's clock (five
+ * minutes of skew; a response with no nextUpdate is stale), status, and no
+ * unknown critical extension. Its header lists exactly what it accepts.
+ *
+ * The policy, which is the whole of it:
+ *
+ *   a staple that checks out and says good     accepted
+ *   a staple that says revoked                 `CertificateRevoked`, alert 44
+ *   a staple that is malformed, unsigned by
+ *     the issuer or an authorised responder,
+ *     for another certificate, expired or not
+ *     yet valid, "unknown", signed with SHA-1,
+ *     or has an unknown critical extension     `BadStapledResponse`, alert 42:
+ *                                              **fail closed**
+ *   a staple whose TLS framing is malformed
+ *     (duplicate, trailing octets, a status
+ *     type other than ocsp, ...)               `Malformed`, alert 50
+ *   a status message that was not promised, or
+ *     is not directly after the Certificate    `UnexpectedMessage`, alert 10
+ *   no staple at all (also an OCSPResponse
+ *     whose status is tryLater, unauthorized,
+ *     ... which carries no answer)             **soft-fail**: accepted -- unless
+ *                                              the leaf has the TLS Feature
+ *                                              extension with status_request
+ *                                              (RFC 7633 "must-staple"), or the
+ *                                              trust is `require_stapled(...)`:
+ *                                              then `StapleRequired`, alert 42
+ *
+ * A server can strip a staple, so soft-fail without must-staple buys a
+ * network attacker who can also present a revoked certificate nothing; it
+ * is the default because most servers do not staple and a client that fails
+ * on every one of them is unusable. `tls.require_stapled(trust)` is for a
+ * client that knows its server staples: it turns "no staple" into an error
+ * for every certificate. A must-staple certificate is hard-fail always, with
+ * no option to turn that off.
+ *
+ * Only the leaf is checked, against the certificate above it in the path.
+ * A pinned key (`PinnedKey`) skips the whole check, as it skips everything
+ * about the certificate; `require_stapled` over a pin is a trap, not a silent
+ * no-op. The client never fetches: no OCSP responder URL is contacted, no CRL
+ * is downloaded -- **CRL checking and OCSP fetching are out of scope** --, and
+ * no nonce is sent, so a staple can be replayed until its nextUpdate (that is
+ * what stapling is). A resumed session carries no new staple, but its
+ * lifetime is capped by the nextUpdate of the staple it was made under (as it
+ * is by the earliest certificate `not_after` and by seven days): it cannot
+ * outlive the freshness of the evidence for the certificate. `Conn.stapled()`
+ * says whether a staple was checked on this handshake.
+ * */
 // --- what is offered, and so what is accepted ---------------------------------
-//
-//   versions             TLS 1.3 and TLS 1.2, via supported_versions. The
-//                        client never offers 1.1 or below, and a server that
-//                        answers with them is refused. It falls back to 1.2
-//                        only when the server itself picks 1.2 in its
-//                        ServerHello; a 1.3-capable server that answers 1.2 is
-//                        caught by the downgrade sentinel in its random
-//   cipher suites        TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256 and
-//                        TLS_AES_256_GCM_SHA384 for 1.3, offered in that order,
-//                        then for 1.2 ECDHE_ECDSA/ECDHE_RSA with
-//                        CHACHA20_POLY1305 (0xCCA9, 0xCCA8), AES_128_GCM
-//                        (0xC02B, 0xC02F) and AES_256_GCM (0xC02C, 0xC030).
-//                        The server picks. ChaCha20 leads because the AES-GCM
-//                        in lib/crypto/aes.m31 is constant-time at the source level
-//                        and so about twelve times slower (see its header).
-//                        No CBC, no RC4, no static RSA key exchange, no
-//                        compression, no renegotiation
-//   key exchange         x25519 and secp256r1 are advertised; the 1.3
-//                        key_share is x25519 only, so a 1.3 server that
-//                        insists on P-256 needs a HelloRetryRequest, which is
-//                        refused. In 1.2 the server picks either group from
-//                        supported_groups. One fresh key per connection
-//   signatures           ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384,
-//                        rsa_pss_rsae_sha256/384/512 for the handshake
-//                        signature (CertificateVerify); the same plus RSA
-//                        PKCS#1 v1.5 with SHA-256/384/512 for the
-//                        certificates (`signature_algorithms_cert`). TLS 1.2
-//                        additionally accepts rsa_pkcs1_sha256/384/512 on the
-//                        ServerKeyExchange; in 1.2 the ECDSA scheme names only
-//                        the hash and the leaf key gives the curve
-//   extensions           server_name (not for an IP address), status_request
-//                        (OCSP, below), supported_groups
-//                        (which RFC 8446 §4.2.7 requires beside a key_share),
-//                        signature_algorithms, signature_algorithms_cert,
-//                        supported_versions, key_share, and for 1.2
-//                        ec_point_formats (uncompressed only),
-//                        extended_master_secret and renegotiation_info
-//
-// `psk_key_exchange_modes` (psk_dhe_ke only) and, when the cache holds a
-// session, `pre_shared_key` are added for resumption (below). There is no ALPN
-// and **never any early data**. An
-// extension the client did not offer, in ServerHello or EncryptedExtensions,
-// is refused (RFC 8446 §4.2).
-//
-// A server that answers with HelloRetryRequest, with a ServerHello for TLS 1.1
-// or older, or with RFC 8446 §4.1.3's downgrade sentinel in its random, is
-// told no, each with an error of its own.
-//
+/*
+ *   versions             TLS 1.3 and TLS 1.2, via supported_versions. The
+ *                        client never offers 1.1 or below, and a server that
+ *                        answers with them is refused. It falls back to 1.2
+ *                        only when the server itself picks 1.2 in its
+ *                        ServerHello; a 1.3-capable server that answers 1.2 is
+ *                        caught by the downgrade sentinel in its random
+ *   cipher suites        TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256 and
+ *                        TLS_AES_256_GCM_SHA384 for 1.3, offered in that order,
+ *                        then for 1.2 ECDHE_ECDSA/ECDHE_RSA with
+ *                        CHACHA20_POLY1305 (0xCCA9, 0xCCA8), AES_128_GCM
+ *                        (0xC02B, 0xC02F) and AES_256_GCM (0xC02C, 0xC030).
+ *                        The server picks. ChaCha20 leads because the AES-GCM
+ *                        in lib/crypto/aes.m31 is constant-time at the source level
+ *                        and so about twelve times slower (see its header).
+ *                        No CBC, no RC4, no static RSA key exchange, no
+ *                        compression, no renegotiation
+ *   key exchange         x25519 and secp256r1 are advertised; the 1.3
+ *                        key_share is x25519 only, so a 1.3 server that
+ *                        insists on P-256 needs a HelloRetryRequest, which is
+ *                        refused. In 1.2 the server picks either group from
+ *                        supported_groups. One fresh key per connection
+ *   signatures           ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384,
+ *                        rsa_pss_rsae_sha256/384/512 for the handshake
+ *                        signature (CertificateVerify); the same plus RSA
+ *                        PKCS#1 v1.5 with SHA-256/384/512 for the
+ *                        certificates (`signature_algorithms_cert`). TLS 1.2
+ *                        additionally accepts rsa_pkcs1_sha256/384/512 on the
+ *                        ServerKeyExchange; in 1.2 the ECDSA scheme names only
+ *                        the hash and the leaf key gives the curve
+ *   extensions           server_name (not for an IP address), status_request
+ *                        (OCSP, below), supported_groups
+ *                        (which RFC 8446 §4.2.7 requires beside a key_share),
+ *                        signature_algorithms, signature_algorithms_cert,
+ *                        supported_versions, key_share, and for 1.2
+ *                        ec_point_formats (uncompressed only),
+ *                        extended_master_secret and renegotiation_info
+ *
+ * `psk_key_exchange_modes` (psk_dhe_ke only) and, when the cache holds a
+ * session, `pre_shared_key` are added for resumption (below). There is no ALPN
+ * and **never any early data**. An
+ * extension the client did not offer, in ServerHello or EncryptedExtensions,
+ * is refused (RFC 8446 §4.2).
+ *
+ * A server that answers with HelloRetryRequest, with a ServerHello for TLS 1.1
+ * or older, or with RFC 8446 §4.1.3's downgrade sentinel in its random, is
+ * told no, each with an error of its own.
+ * */
 // --- TLS 1.2: the rules ---------------------------------------------------------
-//
-// `extended_master_secret` (RFC 7627) is **required**: a 1.2 server without it
-// is refused with alert 40 (`MissingExtendedMasterSecret`), because without it
-// the master secret does not bind the handshake and the triple-handshake
-// attack applies. This turns away servers that are still on a pre-2015
-// OpenSSL, such as the badssl.com test hosts. `renegotiation_info` (RFC 5746)
-// may be absent from the ServerHello, but if present it must be exactly the
-// empty first-handshake value. Renegotiation is never accepted: a HelloRequest
-// after the handshake is answered with the warning alert `no_renegotiation`
-// and the connection goes on; any other handshake message after the Finished
-// is `UnexpectedMessage`. Every alert except `close_notify` is fatal, warnings
-// included, as in 1.3. The explicit nonce of an AES-GCM record is taken from
-// the record (RFC 5288 allows it), not forced to equal the sequence number.
-// A zero-length handshake record is refused.
-//
-// `secp384r1` is not advertised, so an OpenSSL server whose only certificate
-// is a P-384 key refuses us; a P-384 leaf is accepted (and tested) when the
-// server has some other group to agree on. The ECDH for secp256r1 uses
-// `lib/crypto/ecdsa.m31`'s non-constant-time arithmetic, which is acceptable only
-// because the scalar is ephemeral and used once (see that header).
-//
+/*
+ * `extended_master_secret` (RFC 7627) is **required**: a 1.2 server without it
+ * is refused with alert 40 (`MissingExtendedMasterSecret`), because without it
+ * the master secret does not bind the handshake and the triple-handshake
+ * attack applies. This turns away servers that are still on a pre-2015
+ * OpenSSL, such as the badssl.com test hosts. `renegotiation_info` (RFC 5746)
+ * may be absent from the ServerHello, but if present it must be exactly the
+ * empty first-handshake value. Renegotiation is never accepted: a HelloRequest
+ * after the handshake is answered with the warning alert `no_renegotiation`
+ * and the connection goes on; any other handshake message after the Finished
+ * is `UnexpectedMessage`. Every alert except `close_notify` is fatal, warnings
+ * included, as in 1.3. The explicit nonce of an AES-GCM record is taken from
+ * the record (RFC 5288 allows it), not forced to equal the sequence number.
+ * A zero-length handshake record is refused.
+ *
+ * `secp384r1` is not advertised, so an OpenSSL server whose only certificate
+ * is a P-384 key refuses us; a P-384 leaf is accepted (and tested) when the
+ * server has some other group to agree on. The ECDH for secp256r1 uses
+ * `lib/crypto/ecdsa.m31`'s non-constant-time arithmetic, which is acceptable only
+ * because the scalar is ephemeral and used once (see that header).
+ * */
 // --- the connection after the handshake ----------------------------------------
-//
-// **A connection that ends without the server's `close_notify` is an error**,
-// `Truncated`, never a quiet end of data: otherwise whoever sits on the wire
-// can cut a response short and it reads as complete. `read_all` returns only
-// for a `close_notify`. A `KeyUpdate` is followed (and answered, when asked),
-// and a `NewSessionTicket` is filed in the session cache (below).
-//
+/*
+ * **A connection that ends without the server's `close_notify` is an error**,
+ * `Truncated`, never a quiet end of data: otherwise whoever sits on the wire
+ * can cut a response short and it reads as complete. `read_all` returns only
+ * for a `close_notify`. A `KeyUpdate` is followed (and answered, when asked),
+ * and a `NewSessionTicket` is filed in the session cache (below).
+ * */
 // --- client certificates (TLS 1.3 only) -------------------------------------------
-//
-//   tls.connect_identified(host, port, trust, identity, cache)       and
-//   tls.connect_over_identified(socket, host, trust, identity, cache), `_at` forms
-//   clientcert.load(chain_pem, key_pem) / clientcert.load_files(chain_path, key_path)
-//
-// An `Identity` (`lib/pki/clientcert.m31`) is a chain, leaf first, and the key of
-// the leaf: Ed25519 or ECDSA P-256. When the server sends a CertificateRequest
-// after its EncryptedExtensions (RFC 8446 §4.3.2), the client answers with
-// Certificate (the chain, empty request context), CertificateVerify (signed
-// by `signingkey`, which is `ecdsasign` or `ed25519`: this file has no
-// signer of its own) and a Finished that covers both. The certificate_authorities
-// extension is parsed and ignored; the chain goes whatever it says.
-//
-// * Without an identity, a CertificateRequest ends the handshake with
-//   `ClientCertificateRequested` (alert handshake_failure). The client never
-//   sends an empty Certificate to get past a request, even an optional one:
-//   a program that wants to talk to such servers anonymously should not
-//   present itself as having failed to authenticate.
-// * With an identity whose key signs none of the schemes the server lists in
-//   signature_algorithms, the handshake ends with `ClientCertificateUnusable`
-//   (alert handshake_failure), again without sending an empty Certificate.
-// * A request with a non-empty context, without signature_algorithms, with
-//   it twice, with trailing or truncated bytes, or in any place but between
-//   EncryptedExtensions and the server's Certificate is refused with the
-//   alert for that kind of fault, before anything is signed.
-// * A server that sends no CertificateRequest gets nothing: the identity is
-//   used only when it is asked for.
-// * Sessions are bound to the identity's fingerprint as well as to the host
-//   and trust (below): a session earned with one certificate is never offered
-//   by a connection with another, or with none.
-// * TLS 1.2: not supported. A 1.2 CertificateRequest also gives
-//   `ClientCertificateRequested`. Whether the server accepts the certificate is
-//   the server's business; a rejection arrives as its alert (`peer_alert`).
-//
-// What is and is not constant time is in the header of `lib/pki/clientcert.m31`
-// (the signers are written constant-time-style at source level, unaudited at
-// machine level; the key is not wiped from memory).
-//
+/*
+ *   tls.connect_identified(host, port, trust, identity, cache)       and
+ *   tls.connect_over_identified(socket, host, trust, identity, cache), `_at` forms
+ *   clientcert.load(chain_pem, key_pem) / clientcert.load_files(chain_path, key_path)
+ *
+ * An `Identity` (`lib/pki/clientcert.m31`) is a chain, leaf first, and the key of
+ * the leaf: Ed25519 or ECDSA P-256. When the server sends a CertificateRequest
+ * after its EncryptedExtensions (RFC 8446 §4.3.2), the client answers with
+ * Certificate (the chain, empty request context), CertificateVerify (signed
+ * by `signingkey`, which is `ecdsasign` or `ed25519`: this file has no
+ * signer of its own) and a Finished that covers both. The certificate_authorities
+ * extension is parsed and ignored; the chain goes whatever it says.
+ *
+ * * Without an identity, a CertificateRequest ends the handshake with
+ *   `ClientCertificateRequested` (alert handshake_failure). The client never
+ *   sends an empty Certificate to get past a request, even an optional one:
+ *   a program that wants to talk to such servers anonymously should not
+ *   present itself as having failed to authenticate.
+ * * With an identity whose key signs none of the schemes the server lists in
+ *   signature_algorithms, the handshake ends with `ClientCertificateUnusable`
+ *   (alert handshake_failure), again without sending an empty Certificate.
+ * * A request with a non-empty context, without signature_algorithms, with
+ *   it twice, with trailing or truncated bytes, or in any place but between
+ *   EncryptedExtensions and the server's Certificate is refused with the
+ *   alert for that kind of fault, before anything is signed.
+ * * A server that sends no CertificateRequest gets nothing: the identity is
+ *   used only when it is asked for.
+ * * Sessions are bound to the identity's fingerprint as well as to the host
+ *   and trust (below): a session earned with one certificate is never offered
+ *   by a connection with another, or with none.
+ * * TLS 1.2: not supported. A 1.2 CertificateRequest also gives
+ *   `ClientCertificateRequested`. Whether the server accepts the certificate is
+ *   the server's business; a rejection arrives as its alert (`peer_alert`).
+ *
+ * What is and is not constant time is in the header of `lib/pki/clientcert.m31`
+ * (the signers are written constant-time-style at source level, unaudited at
+ * machine level; the key is not wiped from memory).
+ * */
 // --- session resumption (TLS 1.3 only) -------------------------------------------
-//
-//   tls.connect_cached(host, port, trust, cache)          and the `_at`, `_over_cached`,
-//   tls.connect_over_cached_at(socket, host, trust, cache, now)    forms
-//   tlsresume.cache(capacity)        an in-process `SessionCache` (0 = off)
-//   c.resumed()                      -> bool   did this connection resume?
-//
-// `connect` and friends keep no sessions and ask for no tickets. With a cache
-// the client offers `psk_key_exchange_modes = [psk_dhe_ke]` and files each
-// NewSessionTicket as a session; the next connection to the same host takes
-// the newest unexpired one and offers it as a `pre_shared_key` with its binder.
-// A fresh (EC)DHE share is always sent and used (`psk_ke`, a PSK alone, is
-// not offered), so a resumed connection keeps forward secrecy.
-//
-// * A session is bound to the exact `host` (the SNI) **and** the exact trust
-//   configuration (the pin's octets, or `SystemRoots`, or the `CaFile` path)
-//   of the connection that earned it, and is offered to no other.
-// * A full handshake validates the certificate chain as always. Only a
-//   handshake in which the server selected the PSK skips the Certificate and
-//   CertificateVerify, as RFC 8446 requires; any other Certificate in such a
-//   handshake is refused. The server must pick identity 0, the offered suite,
-//   and send a key_share.
-// * A session ends at the earliest of: the ticket lifetime, 7 days after the
-//   handshake that earned it, and the `not_after` of every certificate that
-//   server presented (not for a pinned key, which has no chain). A resumed
-//   session earns no further trust: tickets from a resumed connection expire
-//   with the original full handshake's certificates, not later.
-// * A ticket is used at most once (taken from the cache when offered), a
-//   ticket with lifetime 0 is not stored, and a malformed NewSessionTicket
-//   fails the connection with decode_error.
-// * **0-RTT is never offered**: no early_data extension is sent, whatever
-//   `max_early_data_size` the ticket carried.
-// * Tickets are filed while the connection is being read: a connection never
-//   read after the handshake files none.
-// * A server that does not recognise the ticket does a full handshake and
-//   the client validates it; the failed ticket is already spent.
-//
-// `io.Stream` fixes the error type at `io.Error`, and `Error` below is richer
-// than that, so a failed call answers `Other(errno)` -- 5 (EIO) for a failed
-// underlying stream, 104 (ECONNRESET) for a stream that ended without a
-// `close_notify`, 9 (EBADF) for a connection already closed, 71 (EPROTO) for
-// everything the peer got wrong -- and `last_error()` has the exact reason.
-// A failure ends the connection: every later call repeats it. There are no
-// timeouts to retry after, since a read that gave up half way through a
-// record could not be resumed.
-//
-// `read_all` and `read_until` hand back what they had collected to the
-// connection when a failure comes, as `net.Conn`'s do, but the failure ends
-// the connection so only `read` of what was buffered still works.
-//
-// **The handshake can be bounded as a whole.** `net.Conn`'s read timeout limits
-// one read, so a server dripping a byte at a time inside it can hold a
-// handshake open for as long as it likes. `connect_over_deadline` adds a total
-// (`deadlinestream`): once it passes the handshake fails with `Error.Io`. It
-// reads the wall clock, as the language has no monotonic clock. The plain
-// `connect` forms keep the per-read behaviour of the socket they were given.
-//
-// **A `Conn` sends `close_notify` and closes the socket when its last
-// reference goes**, as a `net.Conn` closes itself.
+/*
+ *   tls.connect_cached(host, port, trust, cache)          and the `_at`, `_over_cached`,
+ *   tls.connect_over_cached_at(socket, host, trust, cache, now)    forms
+ *   tlsresume.cache(capacity)        an in-process `SessionCache` (0 = off)
+ *   c.resumed()                      -> bool   did this connection resume?
+ *
+ * `connect` and friends keep no sessions and ask for no tickets. With a cache
+ * the client offers `psk_key_exchange_modes = [psk_dhe_ke]` and files each
+ * NewSessionTicket as a session; the next connection to the same host takes
+ * the newest unexpired one and offers it as a `pre_shared_key` with its binder.
+ * A fresh (EC)DHE share is always sent and used (`psk_ke`, a PSK alone, is
+ * not offered), so a resumed connection keeps forward secrecy.
+ *
+ * * A session is bound to the exact `host` (the SNI) **and** the exact trust
+ *   configuration (the pin's octets, or `SystemRoots`, or the `CaFile` path)
+ *   of the connection that earned it, and is offered to no other.
+ * * A full handshake validates the certificate chain as always. Only a
+ *   handshake in which the server selected the PSK skips the Certificate and
+ *   CertificateVerify, as RFC 8446 requires; any other Certificate in such a
+ *   handshake is refused. The server must pick identity 0, the offered suite,
+ *   and send a key_share.
+ * * A session ends at the earliest of: the ticket lifetime, 7 days after the
+ *   handshake that earned it, and the `not_after` of every certificate that
+ *   server presented (not for a pinned key, which has no chain). A resumed
+ *   session earns no further trust: tickets from a resumed connection expire
+ *   with the original full handshake's certificates, not later.
+ * * A ticket is used at most once (taken from the cache when offered), a
+ *   ticket with lifetime 0 is not stored, and a malformed NewSessionTicket
+ *   fails the connection with decode_error.
+ * * **0-RTT is never offered**: no early_data extension is sent, whatever
+ *   `max_early_data_size` the ticket carried.
+ * * Tickets are filed while the connection is being read: a connection never
+ *   read after the handshake files none.
+ * * A server that does not recognise the ticket does a full handshake and
+ *   the client validates it; the failed ticket is already spent.
+ *
+ * `io.Stream` fixes the error type at `io.Error`, and `Error` below is richer
+ * than that, so a failed call answers `Other(errno)` -- 5 (EIO) for a failed
+ * underlying stream, 104 (ECONNRESET) for a stream that ended without a
+ * `close_notify`, 9 (EBADF) for a connection already closed, 71 (EPROTO) for
+ * everything the peer got wrong -- and `last_error()` has the exact reason.
+ * A failure ends the connection: every later call repeats it. There are no
+ * timeouts to retry after, since a read that gave up half way through a
+ * record could not be resumed.
+ *
+ * `read_all` and `read_until` hand back what they had collected to the
+ * connection when a failure comes, as `net.Conn`'s do, but the failure ends
+ * the connection so only `read` of what was buffered still works.
+ *
+ * **The handshake can be bounded as a whole.** `net.Conn`'s read timeout limits
+ * one read, so a server dripping a byte at a time inside it can hold a
+ * handshake open for as long as it likes. `connect_over_deadline` adds a total
+ * (`deadlinestream`): once it passes the handshake fails with `Error.Io`. It
+ * reads the wall clock, as the language has no monotonic clock. The plain
+ * `connect` forms keep the per-read behaviour of the socket they were given.
+ *
+ * **A `Conn` sends `close_notify` and closes the socket when its last
+ * reference goes**, as a `net.Conn` closes itself. */
 
 import crypto.consttime;
 import net.deadlinestream;
@@ -396,15 +396,15 @@ pub enum Trust {
     SystemRoots;
     /// A chain to a root in this PEM file.
     CaFile(str);
-    /// The same trust, and in addition every server certificate must come
-    /// with a valid stapled OCSP response (see "revocation" in the header).
-    /// Made by `require_stapled`; not meaningful over a pin.
+    /** The same trust, and in addition every server certificate must come
+     * with a valid stapled OCSP response (see "revocation" in the header).
+     * Made by `require_stapled`; not meaningful over a pin. */
     RequireStapled(Trust);
 }
 
-/// `trust` with a stapled OCSP response required of every server, whether
-/// or not its certificate says must-staple. A pin **traps**: a pinned key is
-/// not examined for revocation, so the demand could never be met.
+/** `trust` with a stapled OCSP response required of every server, whether
+ * or not its certificate says must-staple. A pin **traps**: a pinned key is
+ * not examined for revocation, so the demand could never be met. */
 pub Trust require_stapled(Trust trust) {
     match (trust) {
         case PinnedKey(bytes pinned): {
@@ -422,8 +422,8 @@ pub Trust require_stapled(Trust trust) {
     }
 }
 
-/// A key pin from its 32 octets. Anything else **traps**: a pin of the wrong
-/// size would refuse every server, and silently.
+/** A key pin from its 32 octets. Anything else **traps**: a pin of the wrong
+ * size would refuse every server, and silently. */
 pub Trust pinned_key(bytes key_hash) {
     if (key_hash.size() != 32) {
         trap("tls: a key pin is the 32 octets of a SHA-256 hash");
@@ -446,9 +446,9 @@ pub Option<Trust> pinned_key_hex(str text) {
     }
 }
 
-/// Why a connection could not be made, or stopped. Payload-free
-/// (`docs/errors-decision.md` §4); the alert a peer sent is
-/// `Conn.peer_alert()`.
+/** Why a connection could not be made, or stopped. Payload-free
+ * (`docs/errors-decision.md` §4); the alert a peer sent is
+ * `Conn.peer_alert()`. */
 pub enum Error {
     /// The TCP connection could not be made.
     Connect;
@@ -458,8 +458,8 @@ pub enum Error {
     Truncated;
     /// The server sent a fatal alert.
     PeerAlert;
-    /// The server's records broke a rule of the record layer: a version, a
-    /// size, a sequence number.
+    /** The server's records broke a rule of the record layer: a version, a
+     * size, a sequence number. */
     Record;
     /// A record's authentication tag did not verify.
     BadRecordMac;
@@ -469,8 +469,8 @@ pub enum Error {
     UnsupportedVersion;
     /// The server's random carries the TLS 1.3 downgrade sentinel.
     Downgrade;
-    /// The server answered with HelloRetryRequest, which this client, having
-    /// offered the one group it will use, cannot follow.
+    /** The server answered with HelloRetryRequest, which this client, having
+     * offered the one group it will use, cannot follow. */
     RetryRequested;
     /// A ServerHello field that is not what was offered.
     IllegalParameter;
@@ -480,11 +480,11 @@ pub enum Error {
     Malformed;
     /// A message that this point in the handshake does not allow.
     UnexpectedMessage;
-    /// The server asked for a client certificate and this connection has no
-    /// identity (or is TLS 1.2, where client certificates are not supported).
+    /** The server asked for a client certificate and this connection has no
+     * identity (or is TLS 1.2, where client certificates are not supported). */
     ClientCertificateRequested;
-    /// The server asked for a client certificate, but none of the signature
-    /// schemes it accepts is one the caller's key signs with.
+    /** The server asked for a client certificate, but none of the signature
+     * schemes it accepts is one the caller's key signs with. */
     ClientCertificateUnusable;
     /// The server's certificate is missing or not one this client can read.
     BadCertificate;
@@ -500,34 +500,34 @@ pub enum Error {
     CertificateNotYetValid;
     /// The certificate is not valid for the host that was asked for.
     HostnameMismatch;
-    /// The chain breaks a rule: a signature, a CA constraint, a path length,
-    /// a purpose.
+    /** The chain breaks a rule: a signature, a CA constraint, a path length,
+     * a purpose. */
     InvalidChain;
-    /// The chain is signed with an algorithm or key too weak, or one this
-    /// client does not implement.
+    /** The chain is signed with an algorithm or key too weak, or one this
+     * client does not implement. */
     WeakCertificate;
-    /// A CertificateVerify scheme that was not offered, or one that does not
-    /// fit the certificate's key.
+    /** A CertificateVerify scheme that was not offered, or one that does not
+     * fit the certificate's key. */
     UnsupportedSignature;
-    /// The CertificateVerify signature does not verify: the server does not
-    /// hold the key.
+    /** The CertificateVerify signature does not verify: the server does not
+     * hold the key. */
     BadSignature;
     /// The server's Finished does not verify: the handshake was altered.
     BadFinished;
     /// A TLS 1.2 server that does not do extended_master_secret (RFC 7627).
     MissingExtendedMasterSecret;
-    /// A TLS 1.2 renegotiation_info that is not the empty one of a first
-    /// handshake (RFC 5746).
+    /** A TLS 1.2 renegotiation_info that is not the empty one of a first
+     * handshake (RFC 5746). */
     BadRenegotiationInfo;
     /// The server's stapled OCSP response says the certificate is revoked.
     CertificateRevoked;
-    /// The server stapled an OCSP response that cannot be believed: it is
-    /// malformed, unsigned by the issuer or an authorised responder, stale,
-    /// for another certificate, or says "unknown".
+    /** The server stapled an OCSP response that cannot be believed: it is
+     * malformed, unsigned by the issuer or an authorised responder, stale,
+     * for another certificate, or says "unknown". */
     BadStapledResponse;
-    /// A stapled OCSP response was required, by the certificate's
-    /// must-staple extension or by `require_stapled`, and the server sent
-    /// none (or one that carries no answer).
+    /** A stapled OCSP response was required, by the certificate's
+     * must-staple extension or by `require_stapled`, and the server sent
+     * none (or one that carries no answer). */
     StapleRequired;
 }
 
@@ -635,8 +635,8 @@ pub str Error.to_str() {
     }
 }
 
-// The alert that tells the server why, or -1 where the record layer has
-// already sent one or there is nobody to send to.
+/* The alert that tells the server why, or -1 where the record layer has
+ * already sent one or there is nobody to send to. */
 int alert_for(Error error) {
     match (error) {
         case Connect: {
@@ -930,8 +930,8 @@ bytes message_body(bytes message) {
     return message.substr(4, message.size());
 }
 
-// A cursor over a received message's body, every read of which can find the
-// message too short.
+/* A cursor over a received message's body, every read of which can find the
+ * message too short. */
 type Reader {
     bytes data;
     int position = 0;
@@ -1014,11 +1014,11 @@ List<tls13schedule.Suite> offered_suites() {
     return suites;
 }
 
-// `should_offer_tickets` adds psk_key_exchange_modes (psk_dhe_ke only), which is what
-// lets a server send NewSessionTickets at all. `resumption`, when there, adds
-// the pre_shared_key extension for that session -- last, as RFC 8446 §4.2.11
-// requires, its binder computed over the message up to the binders. No
-// early_data extension is ever sent: there is no 0-RTT.
+/* `should_offer_tickets` adds psk_key_exchange_modes (psk_dhe_ke only), which is what
+ * lets a server send NewSessionTickets at all. `resumption`, when there, adds
+ * the pre_shared_key extension for that session -- last, as RFC 8446 §4.2.11
+ * requires, its binder computed over the message up to the binders. No
+ * early_data extension is ever sent: there is no 0-RTT. */
 bytes client_hello(str host, bytes client_random, bytes session_id, bytes public_key, bool should_offer_tickets, Option<tlsresume.Session> resumption, int now) {
     bytes body = [];
     put_u16(body, VERSION_TLS12);
@@ -1110,10 +1110,10 @@ bytes client_hello(str host, bytes client_random, bytes session_id, bytes public
     return message;
 }
 
-// RFC 8446 §4.2.11.2: the binder is the Finished-style HMAC, under the key
-// derived from the PSK, of the hash of the ClientHello cut off before the
-// binders list (a 2-octet length, then one binder with its 1-octet length).
-// It is written over the zeros that stand in for it.
+/* RFC 8446 §4.2.11.2: the binder is the Finished-style HMAC, under the key
+ * derived from the PSK, of the hash of the ClientHello cut off before the
+ * binders list (a 2-octet length, then one binder with its 1-octet length).
+ * It is written over the zeros that stand in for it. */
 void fill_binder(bytes message, tlsresume.Session session) {
     tls13schedule.Suite suite = session.suite;
     int tail = 3 + suite.hash_size();
@@ -1128,15 +1128,15 @@ void fill_binder(bytes message, tlsresume.Session session) {
 
 // --- ServerHello ------------------------------------------------------------------
 
-// RFC 8446 §4.1.3: a ServerHello whose random is the SHA-256 of this text is
-// a HelloRetryRequest.
+/* RFC 8446 §4.1.3: a ServerHello whose random is the SHA-256 of this text is
+ * a HelloRetryRequest. */
 bytes retry_request_random() {
     return sha256.sum("HelloRetryRequest".to_bytes());
 }
 
-// RFC 8446 §4.1.3: the last eight octets of the random of a server that
-// supports TLS 1.3 but is answering with an older version: "DOWNGRD" and a 1
-// (TLS 1.2) or a 0 (TLS 1.1 and below).
+/* RFC 8446 §4.1.3: the last eight octets of the random of a server that
+ * supports TLS 1.3 but is answering with an older version: "DOWNGRD" and a 1
+ * (TLS 1.2) or a 0 (TLS 1.1 and below). */
 bool has_downgrade_sentinel(bytes server_random) {
     bytes tail = server_random.substr(24, 32);
     bytes name = "DOWNGRD".to_bytes();
@@ -1146,8 +1146,8 @@ bool has_downgrade_sentinel(bytes server_random) {
     return tail[7] == 0 || tail[7] == 1;
 }
 
-// What a ServerHello settled. `legacy` says which of the two suites is the
-// one the server chose; `public_key` is its x25519 key_share, TLS 1.3 only.
+/* What a ServerHello settled. `legacy` says which of the two suites is the
+ * one the server chose; `public_key` is its x25519 key_share, TLS 1.3 only. */
 type ServerChoice {
     bool is_legacy;
     tls13schedule.Suite suite;
@@ -1156,8 +1156,8 @@ type ServerChoice {
     bytes server_random;
     // The server took the pre_shared_key we offered (identity 0).
     bool is_psk_selected;
-    // TLS 1.2: the server answered our status_request, and so may send a
-    // CertificateStatus message after its Certificate.
+    /* TLS 1.2: the server answered our status_request, and so may send a
+     * CertificateStatus message after its Certificate. */
     bool is_status_promised;
 }
 
@@ -1196,10 +1196,10 @@ Result<HelloExtensions, Error> parse_hello_extensions(bytes extension_block) {
     return Result<HelloExtensions, Error>.Ok(HelloExtensions(kinds, datas));
 }
 
-// The server's choice, once every field of its ServerHello has been checked
-// against what the ClientHello offered. A ServerHello is TLS 1.3's when it
-// carries supported_versions = 0x0304 and TLS 1.2's when it carries none and
-// says 0x0303 (RFC 8446 §4.2.1); anything else is refused.
+/* The server's choice, once every field of its ServerHello has been checked
+ * against what the ClientHello offered. A ServerHello is TLS 1.3's when it
+ * carries supported_versions = 0x0304 and TLS 1.2's when it carries none and
+ * says 0x0303 (RFC 8446 §4.2.1); anything else is refused. */
 Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, bool did_send_server_name, bool did_offer_psk) {
     Reader reader = Reader(message_body(message));
     int legacy_version = reader.u16()?;
@@ -1283,12 +1283,12 @@ Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_r
     return Result<ServerChoice, Error>.Ok(ServerChoice(false, suite, tls12.Suite.EcdsaChaCha20Poly1305, public_key, server_random, is_psk_selected, false));
 }
 
-// RFC 5246 §7.4.1.3 with RFC 7627 and RFC 5746: the server picked one of the
-// six suites, no compression, and no session (an echoed session id would be
-// a resumption, which this client never offered -- it sent a random id only
-// for TLS 1.3's sake). Of the extensions only the four that answer ours are
-// allowed, each once; extended_master_secret is required and
-// renegotiation_info, when there, is the empty one of a first handshake.
+/* RFC 5246 §7.4.1.3 with RFC 7627 and RFC 5746: the server picked one of the
+ * six suites, no compression, and no session (an echoed session id would be
+ * a resumption, which this client never offered -- it sent a random id only
+ * for TLS 1.3's sake). Of the extensions only the four that answer ours are
+ * allowed, each once; extended_master_secret is required and
+ * renegotiation_info, when there, is the empty one of a first handshake. */
 Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_session_id, int suite_code, int compression, HelloExtensions found, bytes session_id, bool did_send_server_name) {
     if (compression != 0 || echoed_session_id.size() > SESSION_ID_SIZE) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
@@ -1372,13 +1372,13 @@ Result<void, Error> check_encrypted_extensions(bytes message) {
     return Result<void, Error>.Ok;
 }
 
-// Every certificate of the Certificate message, the server's own first. In
-// TLS 1.2 (`is_legacy`) the message has no request context and no per-entry
-// extensions (RFC 5246 §7.4.2). An
-// entry after the first that does not parse is dropped: only a parsed
-// certificate can take part in a path, so it can neither help nor hurt, and a
-// server that sends a spare it cannot be faulted for is still served. The
-// first entry has to parse.
+/* Every certificate of the Certificate message, the server's own first. In
+ * TLS 1.2 (`is_legacy`) the message has no request context and no per-entry
+ * extensions (RFC 5246 §7.4.2). An
+ * entry after the first that does not parse is dropped: only a parsed
+ * certificate can take part in a path, so it can neither help nor hurt, and a
+ * server that sends a spare it cannot be faulted for is still served. The
+ * first entry has to parse. */
 Result<List<x509.Certificate>, Error> certificate_list(bytes message, bool is_legacy) {
     Reader reader = Reader(message_body(message));
     if (!is_legacy) {
@@ -1472,8 +1472,8 @@ List<str> system_bundle_paths() {
     return ["/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem"];
 }
 
-// The roots in one PEM file; a file that cannot be read, is not PEM, or holds
-// no root that parses is `TrustStore`.
+/* The roots in one PEM file; a file that cannot be read, is not PEM, or holds
+ * no root that parses is `TrustStore`. */
 Result<List<x509.Certificate>, Error> read_anchors(str path) {
     match (io.read(path)) {
         case Err(io.Error read_error): {
@@ -1517,8 +1517,8 @@ Result<List<x509.Certificate>, Error> system_anchors() {
     return Result<List<x509.Certificate>, Error>.Err(Error.TrustStore);
 }
 
-// The roots `trust` names, none for a pin. Read before the connection is
-// made, so a missing bundle costs no round trip.
+/* The roots `trust` names, none for a pin. Read before the connection is
+ * made, so a missing bundle costs no round trip. */
 Result<List<x509.Certificate>, Error> load_anchors(Trust trust) {
     match (trust) {
         case PinnedKey(bytes pinned): {
@@ -1537,10 +1537,10 @@ Result<List<x509.Certificate>, Error> load_anchors(Trust trust) {
     }
 }
 
-// Whether the server's certificates are who `trust` says: the pin matches the
-// leaf's key, or a chain leads from the leaf to an anchor and covers `host`.
-// The chain's path (leaf first, anchor last) is what comes back, for the
-// revocation check; under a pin there is none and the list is empty.
+/* Whether the server's certificates are who `trust` says: the pin matches the
+ * leaf's key, or a chain leads from the leaf to an anchor and covers `host`.
+ * The chain's path (leaf first, anchor last) is what comes back, for the
+ * revocation check; under a pin there is none and the list is empty. */
 Result<List<x509.Certificate>, Error> check_identity(List<x509.Certificate> presented, Trust trust, List<x509.Certificate> anchors, str host, int now) {
     match (trust) {
         case PinnedKey(bytes pinned): {
@@ -1589,11 +1589,11 @@ bool needs_staple(Trust trust) {
     }
 }
 
-// The staple policy (see "revocation" in the header). `staple` is the OCSP
-// response the server sent for its leaf, if any; `path` is the validated
-// chain, empty under a pin. What comes back is the instant after which the
-// answer no longer holds (a nextUpdate, epoch seconds), or -1 when no staple
-// was used and nothing bounds a session.
+/* The staple policy (see "revocation" in the header). `staple` is the OCSP
+ * response the server sent for its leaf, if any; `path` is the validated
+ * chain, empty under a pin. What comes back is the instant after which the
+ * answer no longer holds (a nextUpdate, epoch seconds), or -1 when no staple
+ * was used and nothing bounds a session. */
 Result<int, Error> check_revocation(Trust trust, List<x509.Certificate> path, Option<bytes> staple, int now) {
     if (path.size() == 0) {
         return Result<int, Error>.Ok(-1);
@@ -1663,13 +1663,13 @@ Result<int, Error> check_revocation(Trust trust, List<x509.Certificate> path, Op
     }
 }
 
-// The OCSP response in the status_request extension of the first (the
-// server's own) CertificateEntry of a TLS 1.3 Certificate message
-// (RFC 8446 §4.4.2.1): `CertificateStatus { status_type = ocsp(1),
-// opaque OCSPResponse<1..2^24-1> }`. Extensions of later entries (staples
-// for intermediates) are not read, and extensions of the first that are not
-// status_request are skipped; a status_request twice, a status_type other
-// than ocsp, an empty response or any trailing octet is `Malformed`.
+/* The OCSP response in the status_request extension of the first (the
+ * server's own) CertificateEntry of a TLS 1.3 Certificate message
+ * (RFC 8446 §4.4.2.1): `CertificateStatus { status_type = ocsp(1),
+ * opaque OCSPResponse<1..2^24-1> }`. Extensions of later entries (staples
+ * for intermediates) are not read, and extensions of the first that are not
+ * status_request are skipped; a status_request twice, a status_type other
+ * than ocsp, an empty response or any trailing octet is `Malformed`. */
 Result<Option<bytes>, Error> stapled_response(bytes message) {
     Reader reader = Reader(message_body(message));
     bytes request_context = reader.vector8()?;
@@ -1698,8 +1698,8 @@ Result<Option<bytes>, Error> stapled_response(bytes message) {
     return Result<Option<bytes>, Error>.Ok(found);
 }
 
-// `CertificateStatus` as TLS 1.2 sends it as a handshake message body and
-// TLS 1.3 as extension data: the OCSP response inside.
+/* `CertificateStatus` as TLS 1.2 sends it as a handshake message body and
+ * TLS 1.3 as extension data: the OCSP response inside. */
 Result<bytes, Error> certificate_status(bytes data) {
     Reader reader = Reader(data);
     int status_type = reader.octet()?;
@@ -1713,8 +1713,8 @@ Result<bytes, Error> certificate_status(bytes data) {
     return Result<bytes, Error>.Ok(response);
 }
 
-// What a CertificateVerify signs (RFC 8446 §4.4.3): 64 spaces, a context
-// string, a zero, and the transcript hash up to the Certificate.
+/* What a CertificateVerify signs (RFC 8446 §4.4.3): 64 spaces, a context
+ * string, a zero, and the transcript hash up to the Certificate. */
 bytes certificate_verify_content(bytes transcript_hash) {
     bytes content = [0x20; 64];
     content.extend("TLS 1.3, server CertificateVerify".to_bytes());
@@ -1774,8 +1774,8 @@ Result<void, Error> verify_rsa_pkcs1(x509.Certificate leaf, rsa.Hash hash, bytes
     }
 }
 
-// Ed25519 (RFC 8032, pure mode) signs the content itself, not a digest of
-// it (RFC 8446 §4.2.3), and only an Ed25519 certificate key can have made it.
+/* Ed25519 (RFC 8032, pure mode) signs the content itself, not a digest of
+ * it (RFC 8446 §4.2.3), and only an Ed25519 certificate key can have made it. */
 Result<void, Error> verify_ed25519_signature(x509.Certificate leaf, bytes content, bytes signature) {
     if (leaf.public_key.algorithm != x509.OBJECT_ID_ED25519) {
         return Result<void, Error>.Err(Error.UnsupportedSignature);
@@ -1857,22 +1857,22 @@ Result<bytes, Error> next_handshake(tls13record.Connection record) {
     }
 }
 
-// What a finished handshake leaves for the connection: whether it was a
-// resumption, and, for a TLS 1.3 handshake, what NewSessionTickets turn into
-// sessions.
+/* What a finished handshake leaves for the connection: whether it was a
+ * resumption, and, for a TLS 1.3 handshake, what NewSessionTickets turn into
+ * sessions. */
 type Outcome {
     bool is_resumed = false;
     bool is_ticketable = false;
     tls13schedule.Suite suite = tls13schedule.Suite.ChaCha20Poly1305Sha256;
     bytes resumption_master = [];
     int valid_until = 0;
-    // When the stapled OCSP response that vouched for the server's
-    // certificate stops holding, or -1 if none did.
+    /* When the stapled OCSP response that vouched for the server's
+     * certificate stops holding, or -1 if none did. */
     int staple_expires = -1;
 }
 
-// What `trust` is, as text, for filing sessions: two connections share a
-// session only when this and the host are the same.
+/* What `trust` is, as text, for filing sessions: two connections share a
+ * session only when this and the host are the same. */
 str trust_key(Trust trust) {
     match (trust) {
         case PinnedKey(bytes pinned): {
@@ -1894,9 +1894,9 @@ str trust_key(Trust trust) {
     }
 }
 
-// What a resumed session is bound to besides the host: the trust, and the
-// client certificate (if any) that earned it. A session earned with one
-// identity is never offered under another, or under none.
+/* What a resumed session is bound to besides the host: the trust, and the
+ * client certificate (if any) that earned it. A session earned with one
+ * identity is never offered under another, or under none. */
 str session_key(Trust trust, Option<clientcert.Identity> identity) {
     match (identity) {
         case Some(clientcert.Identity presenting): {
@@ -1986,9 +1986,9 @@ Result<void, Error> run_handshake(tls13record.Connection record, str host, Trust
     require_type(encrypted_extensions, HANDSHAKE_ENCRYPTED_EXTENSIONS)?;
     check_encrypted_extensions(encrypted_extensions)?;
     transcript.add(encrypted_extensions);
-    // A resumed handshake is authenticated by the PSK alone: no Certificate,
-    // no CertificateRequest, no CertificateVerify (RFC 8446 §2.2). A full one
-    // validates the server's chain exactly as before.
+    /* A resumed handshake is authenticated by the PSK alone: no Certificate,
+     * no CertificateRequest, no CertificateVerify (RFC 8446 §2.2). A full one
+     * validates the server's chain exactly as before. */
     bool is_requested = false;
     if (!choice.is_psk_selected) {
         bytes certificate_message = next_handshake(record)?;
@@ -2062,15 +2062,15 @@ Result<void, Error> run_handshake(tls13record.Connection record, str host, Trust
     return Result<void, Error>.Ok;
 }
 
-// RFC 8446 §4.3.2: a CertificateRequest in a handshake has an empty
-// certificate_request_context, and extensions that must include
-// signature_algorithms (once -- no extension may repeat). Anything else is a
-// malformed or illegal message. The identity must be able to sign with one of
-// the schemes listed, or the handshake ends: this client does not send an
-// empty Certificate to a server that asked for one, so a server that would
-// have accepted none is not silently served as if it had not asked.
-// certificate_authorities, if present, is parsed and then not used: one
-// identity is all the caller gave.
+/* RFC 8446 §4.3.2: a CertificateRequest in a handshake has an empty
+ * certificate_request_context, and extensions that must include
+ * signature_algorithms (once -- no extension may repeat). Anything else is a
+ * malformed or illegal message. The identity must be able to sign with one of
+ * the schemes listed, or the handshake ends: this client does not send an
+ * empty Certificate to a server that asked for one, so a server that would
+ * have accepted none is not silently served as if it had not asked.
+ * certificate_authorities, if present, is parsed and then not used: one
+ * identity is all the caller gave. */
 Result<void, Error> check_certificate_request(bytes message, clientcert.Identity identity) {
     Reader reader = Reader(message_body(message));
     bytes context = reader.vector8()?;
@@ -2117,8 +2117,8 @@ Result<void, Error> check_certificate_request(bytes message, clientcert.Identity
     return Result<void, Error>.Ok;
 }
 
-// What a client CertificateVerify signs: as the server's (above), with the
-// client's context string, over the transcript up to the client Certificate.
+/* What a client CertificateVerify signs: as the server's (above), with the
+ * client's context string, over the transcript up to the client Certificate. */
 bytes client_certificate_verify_content(bytes transcript_hash) {
     bytes content = [0x20; 64];
     content.extend("TLS 1.3, client CertificateVerify".to_bytes());
@@ -2127,9 +2127,9 @@ bytes client_certificate_verify_content(bytes transcript_hash) {
     return content;
 }
 
-// Sends the client's Certificate (empty request context, the chain with no
-// per-certificate extensions) and CertificateVerify, adding both to the
-// transcript; the client Finished follows over the transcript so far.
+/* Sends the client's Certificate (empty request context, the chain with no
+ * per-certificate extensions) and CertificateVerify, adding both to the
+ * transcript; the client Finished follows over the transcript so far. */
 Result<void, Error> send_client_certificate(tls13record.Connection record, tls13schedule.Transcript transcript, tls13schedule.Suite suite, clientcert.Identity identity) {
     bytes entries = [];
     for (bytes der_certificate in identity.chain) {
@@ -2172,10 +2172,10 @@ type KeyExchange {
     bytes point;
 }
 
-// ECDSA over a TLS 1.2 key exchange. TLS 1.2 leaves the curve to the
-// certificate (RFC 8446 §4.2.3 note on ecdsa_secp256r1_sha256 in 1.2), and
-// real servers pair a P-384 key with SHA-256, so the scheme gives the hash and
-// the certificate's own key the curve -- P-256 or P-384, nothing else.
+/* ECDSA over a TLS 1.2 key exchange. TLS 1.2 leaves the curve to the
+ * certificate (RFC 8446 §4.2.3 note on ecdsa_secp256r1_sha256 in 1.2), and
+ * real servers pair a P-384 key with SHA-256, so the scheme gives the hash and
+ * the certificate's own key the curve -- P-256 or P-384, nothing else. */
 Result<void, Error> verify_ecdsa_12(x509.Certificate leaf, int scheme, bytes content, bytes signature) {
     bytes digest = sha256.sum(content);
     if (scheme == SCHEME_ECDSA_P384_SHA384) {
@@ -2190,9 +2190,9 @@ Result<void, Error> verify_ecdsa_12(x509.Certificate leaf, int scheme, bytes con
     return Result<void, Error>.Err(Error.UnsupportedSignature);
 }
 
-// The signature over a ServerKeyExchange: a scheme that was offered, that
-// fits the suite's authentication (an ECDSA suite is signed with ECDSA, an RSA
-// suite with RSA-PSS or PKCS#1 v1.5), and that verifies under the leaf's key.
+/* The signature over a ServerKeyExchange: a scheme that was offered, that
+ * fits the suite's authentication (an ECDSA suite is signed with ECDSA, an RSA
+ * suite with RSA-PSS or PKCS#1 v1.5), and that verifies under the leaf's key. */
 Result<void, Error> verify_key_exchange_signature(tls12.Suite suite, x509.Certificate leaf, int scheme, bytes content, bytes signature) {
     if (suite.is_ecdsa()) {
         if (scheme == SCHEME_ED25519) {
@@ -2224,8 +2224,8 @@ Result<void, Error> verify_key_exchange_signature(tls12.Suite suite, x509.Certif
     return Result<void, Error>.Err(Error.UnsupportedSignature);
 }
 
-// RFC 8422 §5.4: `curve_type` (named_curve, 3), the group, the point, then the
-// signature over the randoms and those parameters.
+/* RFC 8422 §5.4: `curve_type` (named_curve, 3), the group, the point, then the
+ * signature over the randoms and those parameters. */
 Result<KeyExchange, Error> check_server_key_exchange(bytes message, tls12.Suite suite, x509.Certificate leaf, bytes client_random, bytes server_random) {
     bytes body = message_body(message);
     Reader reader = Reader(body);
@@ -2249,8 +2249,8 @@ Result<KeyExchange, Error> check_server_key_exchange(bytes message, tls12.Suite 
     return Result<KeyExchange, Error>.Ok(KeyExchange(group, point));
 }
 
-// What the client sends in ClientKeyExchange and the premaster secret that
-// comes of it: a fresh x25519 or P-256 key against the server's.
+/* What the client sends in ClientKeyExchange and the premaster secret that
+ * comes of it: a fresh x25519 or P-256 key against the server's. */
 type ClientShare {
     bytes public_point;
     bytes premaster;
@@ -2290,9 +2290,9 @@ Result<void, Error> check_finished_12(bytes message, bytes expected) {
     return Result<void, Error>.Ok;
 }
 
-// The rest of a TLS 1.2 handshake, once the ServerHello (already in
-// `transcript`) has named a suite: the server's flight up to ServerHelloDone,
-// our ClientKeyExchange, ChangeCipherSpec and Finished, and the server's.
+/* The rest of a TLS 1.2 handshake, once the ServerHello (already in
+ * `transcript`) has named a suite: the server's flight up to ServerHelloDone,
+ * our ClientKeyExchange, ChangeCipherSpec and Finished, and the server's. */
 Result<void, Error> run_handshake_12(tls13record.Connection record, ServerChoice choice, tls13schedule.Transcript transcript, bytes client_random, bytes x25519_secret, random.System source, str host, Trust trust, List<x509.Certificate> anchors, int now, Outcome outcome) {
     tls12.Suite suite = choice.legacy_suite;
     tls13schedule.Suite aead = suite.aead();
@@ -2350,8 +2350,8 @@ Result<void, Error> run_handshake_12(tls13record.Connection record, ServerChoice
     return Result<void, Error>.Ok;
 }
 
-// A failed handshake: the alert that says why (the record layer has sent its
-// own for the faults it finds), then the stream closed.
+/* A failed handshake: the alert that says why (the record layer has sent its
+ * own for the faults it finds), then the stream closed. */
 Error abort_handshake(tls13record.Connection record, Error error) {
     int description = alert_for(error);
     if (description >= 0) {
@@ -2361,17 +2361,17 @@ Error abort_handshake(tls13record.Connection record, Error error) {
     return error;
 }
 
-/// Connects to `host` on `port`, runs the handshake and checks the server
-/// against `trust`. What comes back is a stream of the server's decrypted
-/// octets; every `Err` is a connection that does not exist.
+/** Connects to `host` on `port`, runs the handshake and checks the server
+ * against `trust`. What comes back is a stream of the server's decrypted
+ * octets; every `Err` is a connection that does not exist. */
 pub Result<Conn, Error> connect(str host, int port, Trust trust) {
     return connect_cached(host, port, trust, tlsresume.cache(0));
 }
 
-/// `connect`, with session resumption: if `cache` holds a session for exactly
-/// this `host` under exactly this `trust` it is offered (once -- it leaves the
-/// cache), and the NewSessionTickets the server sends are filed in `cache` as
-/// the connection is read. See `tlsresume.m31` and the header of this file.
+/** `connect`, with session resumption: if `cache` holds a session for exactly
+ * this `host` under exactly this `trust` it is offered (once -- it leaves the
+ * cache), and the NewSessionTickets the server sends are filed in `cache` as
+ * the connection is read. See `tlsresume.m31` and the header of this file. */
 pub Result<Conn, Error> connect_cached(str host, int port, Trust trust, tlsresume.SessionCache cache) {
     List<x509.Certificate> anchors = load_anchors(trust)?;
     match (net.connect(host, port)) {
@@ -2384,9 +2384,9 @@ pub Result<Conn, Error> connect_cached(str host, int port, Trust trust, tlsresum
     }
 }
 
-/// `connect_cached`, with the clock given in epoch seconds: the time the
-/// certificates are checked at, the age of the ticket offered and the time
-/// new tickets are stamped with. For tests.
+/** `connect_cached`, with the clock given in epoch seconds: the time the
+ * certificates are checked at, the age of the ticket offered and the time
+ * new tickets are stamped with. For tests. */
 pub Result<Conn, Error> connect_cached_at(str host, int port, Trust trust, tlsresume.SessionCache cache, int now) {
     List<x509.Certificate> anchors = load_anchors(trust)?;
     match (net.connect(host, port)) {
@@ -2399,8 +2399,8 @@ pub Result<Conn, Error> connect_cached_at(str host, int port, Trust trust, tlsre
     }
 }
 
-/// `connect_cached`, over a socket the caller already opened (see
-/// `connect_over`).
+/** `connect_cached`, over a socket the caller already opened (see
+ * `connect_over`). */
 pub Result<Conn, Error> connect_over_cached(net.Conn socket, str host, Trust trust, tlsresume.SessionCache cache) {
     List<x509.Certificate> anchors = load_anchors(trust)?;
     return handshake_over(socket, host, trust, anchors, date.now(), false, cache, Option<clientcert.Identity>.None);
@@ -2412,10 +2412,10 @@ pub Result<Conn, Error> connect_over_cached_at(net.Conn socket, str host, Trust 
     return handshake_over(socket, host, trust, anchors, now, true, cache, Option<clientcert.Identity>.None);
 }
 
-/// `connect_cached`, presenting `identity` if the server asks for a client
-/// certificate (TLS 1.3 only; see the header). A server that does not ask never
-/// sees it. A session earned under one identity is offered only under that
-/// identity.
+/** `connect_cached`, presenting `identity` if the server asks for a client
+ * certificate (TLS 1.3 only; see the header). A server that does not ask never
+ * sees it. A session earned under one identity is offered only under that
+ * identity. */
 pub Result<Conn, Error> connect_identified(str host, int port, Trust trust, clientcert.Identity identity, tlsresume.SessionCache cache) {
     List<x509.Certificate> anchors = load_anchors(trust)?;
     match (net.connect(host, port)) {
@@ -2428,8 +2428,8 @@ pub Result<Conn, Error> connect_identified(str host, int port, Trust trust, clie
     }
 }
 
-/// `connect_identified` over a socket the caller already opened, the clock
-/// given in epoch seconds.
+/** `connect_identified` over a socket the caller already opened, the clock
+ * given in epoch seconds. */
 pub Result<Conn, Error> connect_over_identified_at(net.Conn socket, str host, Trust trust, clientcert.Identity identity, tlsresume.SessionCache cache, int now) {
     List<x509.Certificate> anchors = load_anchors(trust)?;
     return handshake_over(socket, host, trust, anchors, now, true, cache, Option<clientcert.Identity>.Some(identity));
@@ -2441,9 +2441,9 @@ pub Result<Conn, Error> connect_over_identified(net.Conn socket, str host, Trust
     return handshake_over(socket, host, trust, anchors, date.now(), false, cache, Option<clientcert.Identity>.Some(identity));
 }
 
-/// `connect`, with the time certificates are checked against given as epoch
-/// seconds instead of read from the clock. For tests, and for a program that
-/// has a better clock than the machine's.
+/** `connect`, with the time certificates are checked against given as epoch
+ * seconds instead of read from the clock. For tests, and for a program that
+ * has a better clock than the machine's. */
 pub Result<Conn, Error> connect_at(str host, int port, Trust trust, int now) {
     List<x509.Certificate> anchors = load_anchors(trust)?;
     match (net.connect(host, port)) {
@@ -2456,13 +2456,13 @@ pub Result<Conn, Error> connect_at(str host, int port, Trust trust, int now) {
     }
 }
 
-/// `connect`, over a socket the caller already opened: for a caller that
-/// wants `net`'s own error names for the connection, or to set timeouts and
-/// options on the socket before the handshake. `host` is what the server's
-/// certificate must cover and what goes in SNI; it need not be where
-/// `socket` is connected, and a caller that connects somewhere else on
-/// purpose is the one who owns that decision. The socket is closed when the
-/// handshake fails.
+/** `connect`, over a socket the caller already opened: for a caller that
+ * wants `net`'s own error names for the connection, or to set timeouts and
+ * options on the socket before the handshake. `host` is what the server's
+ * certificate must cover and what goes in SNI; it need not be where
+ * `socket` is connected, and a caller that connects somewhere else on
+ * purpose is the one who owns that decision. The socket is closed when the
+ * handshake fails. */
 pub Result<Conn, Error> connect_over(net.Conn socket, str host, Trust trust) {
     return connect_over_cached(socket, host, trust, tlsresume.cache(0));
 }
@@ -2473,15 +2473,15 @@ pub Result<Conn, Error> connect_over_at(net.Conn socket, str host, Trust trust, 
     return handshake_over(socket, host, trust, anchors, now, true, tlsresume.cache(0), Option<clientcert.Identity>.None);
 }
 
-/// `connect_over` with a bound on the whole handshake: `deadline_ms` is the
-/// total time the handshake (reads and writes together) may take, and
-/// `timeout_ms` the longest any one read may wait; 0 means no limit for
-/// either. A server that drips one byte at a time inside the per-read limit
-/// is cut off at the deadline. Running out of either is `Error.Io`. While the
-/// handshake runs this sets the socket's read and write timeouts itself, and
-/// it clears both when the handshake ends, so set any timeouts for the
-/// connection's life afterwards. The clock is the wall clock; see
-/// `deadlinestream`.
+/** `connect_over` with a bound on the whole handshake: `deadline_ms` is the
+ * total time the handshake (reads and writes together) may take, and
+ * `timeout_ms` the longest any one read may wait; 0 means no limit for
+ * either. A server that drips one byte at a time inside the per-read limit
+ * is cut off at the deadline. Running out of either is `Error.Io`. While the
+ * handshake runs this sets the socket's read and write timeouts itself, and
+ * it clears both when the handshake ends, so set any timeouts for the
+ * connection's life afterwards. The clock is the wall clock; see
+ * `deadlinestream`. */
 pub Result<Conn, Error> connect_over_deadline(net.Conn socket, str host, Trust trust, int deadline_ms, int timeout_ms = 0) {
     List<x509.Certificate> anchors = load_anchors(trust)?;
     deadlinestream.Bounded bounded = deadlinestream.bound(socket, deadline_ms, timeout_ms);
@@ -2517,8 +2517,8 @@ Result<Conn, Error> handshake_over(io.Stream socket, str host, Trust trust, List
 
 // --- the connection ----------------------------------------------------------------------------
 
-/// A TLS 1.3 connection to a server whose key was checked. Made by
-/// `connect`; every field is private.
+/** A TLS 1.3 connection to a server whose key was checked. Made by
+ * `connect`; every field is private. */
 pub type Conn {
     tls13record.Connection record;
     tlsresume.SessionCache cache;
@@ -2537,16 +2537,16 @@ pub type Conn {
     bool is_fixed_clock = false;
 }
 
-/// Whether this connection was resumed from a ticket: the server accepted the
-/// PSK, and no certificate was exchanged on it.
+/** Whether this connection was resumed from a ticket: the server accepted the
+ * PSK, and no certificate was exchanged on it. */
 pub bool Conn.is_resumed() {
     return outcome.is_resumed;
 }
 
-/// Whether a stapled OCSP response vouched for the server's certificate on
-/// this connection: present, signed by its issuer or an authorised responder,
-/// fresh, and saying "good". `false` on a resumed connection (no certificate
-/// was exchanged) and wherever the staple was absent and not required.
+/** Whether a stapled OCSP response vouched for the server's certificate on
+ * this connection: present, signed by its issuer or an authorised responder,
+ * fresh, and saying "good". `false` on a resumed connection (no certificate
+ * was exchanged) and wherever the staple was absent and not required. */
 pub bool Conn.is_stapled() {
     return outcome.staple_expires >= 0;
 }
@@ -2558,11 +2558,11 @@ int Conn.now() {
     return date.now();
 }
 
-// RFC 8446 §4.6.1: ticket_lifetime(4) ticket_age_add(4) ticket_nonce<0..255>
-// ticket<1..2^16-1> extensions<0..2^16-2>. The only extension defined for it
-// is early_data, which is parsed over and otherwise ignored: no 0-RTT here. A
-// lifetime of 0 means the server does not want the ticket used. A message
-// that does not parse is a `decode_error`.
+/* RFC 8446 §4.6.1: ticket_lifetime(4) ticket_age_add(4) ticket_nonce<0..255>
+ * ticket<1..2^16-1> extensions<0..2^16-2>. The only extension defined for it
+ * is early_data, which is parsed over and otherwise ignored: no 0-RTT here. A
+ * lifetime of 0 means the server does not want the ticket used. A message
+ * that does not parse is a `decode_error`. */
 Result<void, Error> Conn.file_ticket(bytes message) {
     Reader reader = Reader(message_body(message));
     int lifetime_high = reader.u16()?;
@@ -2602,8 +2602,8 @@ Result<void, Error> Conn.file_tickets() {
     return Result<void, Error>.Ok;
 }
 
-// The next chunk of application data, or an empty one once the server has
-// said it is finished.
+/* The next chunk of application data, or an empty one once the server has
+ * said it is finished. */
 Result<bytes, io.Error> Conn.next_chunk() {
     if (is_failed) {
         return Result<bytes, io.Error>.Err(io.Error.Other(errno_of(failure)));
@@ -2642,8 +2642,8 @@ io.Error Conn.fail(Error error) {
     return io.Error.Other(errno_of(error));
 }
 
-/// Between 1 and `n` octets, or an empty `bytes` once the server has sent
-/// `close_notify`. `n` below 1 traps.
+/** Between 1 and `n` octets, or an empty `bytes` once the server has sent
+ * `close_notify`. `n` below 1 traps. */
 pub Result<bytes, io.Error> Conn.read(int count) {
     if (count < 1) {
         trap("read(" + count.to_str() + "): read at least one byte; read_all() reads everything");
@@ -2665,8 +2665,8 @@ pub Result<bytes, io.Error> Conn.read(int count) {
     return Result<bytes, io.Error>.Ok(out);
 }
 
-/// Everything until the server's `close_notify`. A connection that ends any
-/// other way is an `Err`, and what had arrived stays readable with `read`.
+/** Everything until the server's `close_notify`. A connection that ends any
+ * other way is an `Err`, and what had arrived stays readable with `read`. */
 pub Result<bytes, io.Error> Conn.read_all() {
     bytes out = pending.substr(offset, pending.size());
     bytes none = [];
@@ -2688,8 +2688,8 @@ pub Result<bytes, io.Error> Conn.read_all() {
     }
 }
 
-/// Octets up to and including the first `delimiter`, at most `limit` of
-/// them; `net.Conn.read_until`'s three outcomes, told apart the same way.
+/** Octets up to and including the first `delimiter`, at most `limit` of
+ * them; `net.Conn.read_until`'s three outcomes, told apart the same way. */
 pub Result<bytes, io.Error> Conn.read_until(bytes delimiter, int limit) {
     if (delimiter.size() == 0) {
         trap("read_until: the delimiter is empty");
@@ -2744,8 +2744,8 @@ pub Result<int, io.Error> Conn.write(bytes data) {
     }
 }
 
-/// Tells the server the data is over with a `close_notify`, then closes the
-/// socket. Closing twice is not an error.
+/** Tells the server the data is over with a `close_notify`, then closes the
+ * socket. Closing twice is not an error. */
 pub Result<bool, io.Error> Conn.close() {
     return release();
 }

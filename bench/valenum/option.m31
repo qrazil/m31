@@ -1,7 +1,7 @@
-// `Option<int>` returned from a function called 50 million times.
-//
-// The A/B partner is `option-boxed.m31`, which is this file plus one line.
-// See `bench/value-enums.md`.
+/* `Option<int>` returned from a function called 50 million times.
+ *
+ * The A/B partner is `option-boxed.m31`, which is this file plus one line.
+ * See `bench/value-enums.md`. */
 
 Option<int> half(int number) {
     if (number % 2 == 0) {

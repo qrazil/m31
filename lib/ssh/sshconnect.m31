@@ -1,39 +1,39 @@
-// The part of an SSH client that is not the protocol and not the session:
-// resolving the configuration for a host, deciding about its host key,
-// finding and unlocking identities, authenticating, and walking a chain of
-// jump hosts -- shared by `m31ssh`, `m31scp` and `m31sftp` so that they trust
-// the same hosts the same way.
-//
-// API
+/* The part of an SSH client that is not the protocol and not the session:
+ * resolving the configuration for a host, deciding about its host key,
+ * finding and unlocking identities, authenticating, and walking a chain of
+ * jump hosts -- shared by `m31ssh`, `m31scp` and `m31sftp` so that they trust
+ * the same hosts the same way.
+ *
+ * API */
 // ---
-//   sshconnect.connect(parameters)   -> Result<Connection, str>
-//   sshconnect.connect_reporting(parameters, report)
-//                                    -> Result<Connection, str>   see `Report`
-//   sshconnect.resolve(parameters)   -> Result<Resolved, str>   no connection
-//   sshconnect.sanitize(text)    -> str      server text made safe to print
-//   sshconnect.home_directory()  -> str
-//   sshconnect.local_user()      -> str
-//
-// What it decides, in one place:
-//
-//   * **configuration**: `~/.ssh/config` (or `-F`) for every hop, and the
-//     command line's `-p -l -i -o` for the destination only (ssh(1) -J);
-//   * **host keys**: `known_hosts` is consulted mid-handshake, after the
-//     server has proved it holds the key and before any credential is
-//     offered. A key that differs from the file's is a hard refusal in every
-//     mode and the file is never rewritten; an unknown host is refused, asked
-//     about, or recorded according to `StrictHostKeyChecking`;
-//   * **identities**: ssh-agent keys, then key files (ed25519, ECDSA P-256,
-//     RSA, plain or passphrase-protected: the passphrase is read from the
-//     terminal with echo off and goes only to `sshkey`);
-//   * **jump hosts**: each hop's connection runs inside a `direct-tcpip`
-//     channel of the previous one and is checked and authenticated on its
-//     own.
-//
-// Warnings (a key file with loose permissions, an agent that cannot be
-// reached, a host recorded) go to standard error as one `Warning: ...` line;
-// failures come back as the `Err` text, one line, for the caller to prefix
-// with its own name.
+/*   sshconnect.connect(parameters)   -> Result<Connection, str>
+ *   sshconnect.connect_reporting(parameters, report)
+ *                                    -> Result<Connection, str>   see `Report`
+ *   sshconnect.resolve(parameters)   -> Result<Resolved, str>   no connection
+ *   sshconnect.sanitize(text)    -> str      server text made safe to print
+ *   sshconnect.home_directory()  -> str
+ *   sshconnect.local_user()      -> str
+ *
+ * What it decides, in one place:
+ *
+ *   * **configuration**: `~/.ssh/config` (or `-F`) for every hop, and the
+ *     command line's `-p -l -i -o` for the destination only (ssh(1) -J);
+ *   * **host keys**: `known_hosts` is consulted mid-handshake, after the
+ *     server has proved it holds the key and before any credential is
+ *     offered. A key that differs from the file's is a hard refusal in every
+ *     mode and the file is never rewritten; an unknown host is refused, asked
+ *     about, or recorded according to `StrictHostKeyChecking`;
+ *   * **identities**: ssh-agent keys, then key files (ed25519, ECDSA P-256,
+ *     RSA, plain or passphrase-protected: the passphrase is read from the
+ *     terminal with echo off and goes only to `sshkey`);
+ *   * **jump hosts**: each hop's connection runs inside a `direct-tcpip`
+ *     channel of the previous one and is checked and authenticated on its
+ *     own.
+ *
+ * Warnings (a key file with loose permissions, an agent that cannot be
+ * reached, a host recorded) go to standard error as one `Warning: ...` line;
+ * failures come back as the `Err` text, one line, for the caller to prefix
+ * with its own name. */
 
 import io;
 import os;
@@ -50,9 +50,9 @@ import ssh.sshjump;
 
 const int HANDSHAKE_TIMEOUT_MS = 30000;
 
-// One `Warning: ...` line: to standard error, or into `report.warnings` when
-// the caller asked for them to be collected (a program with the terminal in
-// raw mode must not have stderr written under it).
+/* One `Warning: ...` line: to standard error, or into `report.warnings` when
+ * the caller asked for them to be collected (a program with the terminal in
+ * raw mode must not have stderr written under it). */
 void warn(Report report, str message) {
     if (report.is_silent) {
         report.warnings.push("Warning: " + message);
@@ -61,24 +61,24 @@ void warn(Report report, str message) {
     }
 }
 
-/// What a connection attempt reports besides its result, for a caller that
-/// holds the object: the `Warning:` lines it would have written to standard
-/// error (collected when `is_silent`), and, when a host key was refused, the
-/// facts a program needs to ask a person about it instead of parsing the
-/// error line. Used by `sshclient.connect_detailed`; `connect` makes its own
-/// (noisy, no collection), so `m31ssh`, `m31scp` and `m31sftp` behave as
-/// before.
+/** What a connection attempt reports besides its result, for a caller that
+ * holds the object: the `Warning:` lines it would have written to standard
+ * error (collected when `is_silent`), and, when a host key was refused, the
+ * facts a program needs to ask a person about it instead of parsing the
+ * error line. Used by `sshclient.connect_detailed`; `connect` makes its own
+ * (noisy, no collection), so `m31ssh`, `m31scp` and `m31sftp` behave as
+ * before. */
 pub type Report {
-    /// true: `Warning:` lines are appended to `warnings` and nothing is
-    /// written to standard error by the library (interactive prompts are only
-    /// ever written when `Params.is_interactive` is true).
+    /** true: `Warning:` lines are appended to `warnings` and nothing is
+     * written to standard error by the library (interactive prompts are only
+     * ever written when `Params.is_interactive` is true). */
     pub bool is_silent = false;
     pub List<str> warnings = [];
-    /// Why a host key was refused: "" (not for that reason), "unknown",
-    /// "changed" or "revoked".
+    /** Why a host key was refused: "" (not for that reason), "unknown",
+     * "changed" or "revoked". */
     pub str refusal = "";
-    /// The host as checked (after `HostName`), its port and the known_hosts
-    /// file consulted; set with `refusal`.
+    /** The host as checked (after `HostName`), its port and the known_hosts
+     * file consulted; set with `refusal`. */
     pub str refusal_host = "";
     pub int refusal_port = 0;
     pub str refusal_path = "";
@@ -86,8 +86,8 @@ pub type Report {
     pub bool is_hashed = false;
     /// The key the server presented (a list of zero or one).
     pub List<ssh.HostKey> presented = [];
-    /// For "changed": the fingerprints of the keys the file lists for the
-    /// host.
+    /** For "changed": the fingerprints of the keys the file lists for the
+     * host. */
     pub List<str> known_fingerprints = [];
 }
 
@@ -118,9 +118,9 @@ pub type Connection {
     pub str user;
 }
 
-/// Server-supplied text made safe to print: control characters (except
-/// newline and tab) are dropped, so a banner or a name cannot move the
-/// cursor, retitle the window or inject escape sequences.
+/** Server-supplied text made safe to print: control characters (except
+ * newline and tab) are dropped, so a banner or a name cannot move the
+ * cursor, retitle the window or inject escape sequences. */
 pub str sanitize(str text) {
     return ssh.sanitize_text(text);
 }
@@ -172,12 +172,12 @@ str read_text(str path) {
     }
 }
 
-// `Include` lines expanded in place, as OpenSSH does for a user's file: a
-// relative path is relative to `~/.ssh`, `~` and globs work, the matches go
-// in lexical order, a file that does not exist is skipped, and the depth is
-// bounded (16, as in OpenSSH) so a file that includes itself ends. The text
-// is spliced where the line was, so an included file's `Host` and `Match`
-// lines open blocks exactly as if written there.
+/* `Include` lines expanded in place, as OpenSSH does for a user's file: a
+ * relative path is relative to `~/.ssh`, `~` and globs work, the matches go
+ * in lexical order, a file that does not exist is skipped, and the depth is
+ * bounded (16, as in OpenSSH) so a file that includes itself ends. The text
+ * is spliced where the line was, so an included file's `Host` and `Match`
+ * lines open blocks exactly as if written there. */
 str expand_includes(str text, str home, int depth) {
     if (depth > 16) {
         return text;
@@ -213,9 +213,9 @@ str expand_includes(str text, str home, int depth) {
 
 // --- host key policy ------------------------------------------------------------
 
-/// The decision about a server's host key, as the transport asks for it. It
-/// never writes `known_hosts` for a key that changed, and writes for an
-/// unknown one only after a yes (or under accept-new / no).
+/** The decision about a server's host key, as the transport asks for it. It
+ * never writes `known_hosts` for a key that changed, and writes for an
+ * unknown one only after a yes (or under accept-new / no). */
 type HostCheck {
     str host;
     int port;
@@ -393,8 +393,8 @@ type Candidate {
     /// The key, once loaded: zero or one.
     List<sshkey.PrivateKey> key;
     str label;
-    /// The file, and whether it needs a passphrase (asked for only when this
-    /// candidate is reached and no agent key already covered it).
+    /** The file, and whether it needs a passphrase (asked for only when this
+     * candidate is reached and no agent key already covered it). */
     str file;
     bool is_encrypted;
 }
@@ -421,10 +421,10 @@ List<str> algorithms_of(bytes blob) {
     }
 }
 
-// A passphrase read from the terminal with echo off, or None when there is
-// no terminal, the person gave up (Ctrl-C, Ctrl-D on an empty line), or the
-// terminal could not be put in raw mode. Never printed, never logged; the
-// bytes go only to `sshkey`.
+/* A passphrase read from the terminal with echo off, or None when there is
+ * no terminal, the person gave up (Ctrl-C, Ctrl-D on an empty line), or the
+ * terminal could not be put in raw mode. Never printed, never logged; the
+ * bytes go only to `sshkey`. */
 Option<bytes> read_passphrase(str prompt) {
     if (!term.is_terminal(0)) {
         return Option<bytes>.None;
@@ -483,8 +483,8 @@ Option<bytes> read_passphrase(str prompt) {
     }
 }
 
-// The key of an encrypted candidate, asking for the passphrase up to three
-// times; None when it cannot be had.
+/* The key of an encrypted candidate, asking for the passphrase up to three
+ * times; None when it cannot be had. */
 Option<sshkey.PrivateKey> unlock(Candidate candidate, Report report) {
     int attempts = 0;
     while (attempts < 3) {
@@ -779,8 +779,8 @@ Result<HostCheck, str> check_for(Hop hop, str home, bool is_quiet, bool is_inter
     }
 }
 
-// Tries each candidate identity over the transport; `Ok` carries the
-// server's banner.
+/* Tries each candidate identity over the transport; `Ok` carries the
+ * server's banner. */
 Result<str, str> authenticate(ssh.Transport transport, str user, str host_name, List<Candidate> candidates, Report report) {
     match (sshauth.start(transport)) {
         case Ok: {
@@ -852,8 +852,8 @@ Result<str, str> authenticate(ssh.Transport transport, str user, str host_name, 
     return Result<str, str>.Ok(banner);
 }
 
-// Handshake, host-key decision and authentication over `wire` for one hop;
-// the authenticated transport, or a one-line reason.
+/* Handshake, host-key decision and authentication over `wire` for one hop;
+ * the authenticated transport, or a one-line reason. */
 Result<ssh.Transport, str> open_hop(ssh.Wire wire, Hop hop, str home, bool is_quiet, bool is_interactive, bool is_target, Report report) {
     HostCheck check = check_for(hop, home, is_quiet, is_interactive, report)?;
     List<Candidate> candidates = gather(hop.settings, home, is_quiet, report);
@@ -888,8 +888,8 @@ Result<ssh.Transport, str> open_hop(ssh.Wire wire, Hop hop, str home, bool is_qu
     }
 }
 
-// The first hop's byte stream: a TCP connection, or the standard input and
-// output of its `ProxyCommand`.
+/* The first hop's byte stream: a TCP connection, or the standard input and
+ * output of its `ProxyCommand`. */
 Result<ssh.Wire, str> first_wire(Hop first) {
     if (first.settings.proxy_command != "") {
         match (sshjump.start_command(first.settings.proxy_command, first.host_name, first.port, first.user)) {
@@ -906,8 +906,8 @@ Result<ssh.Wire, str> first_wire(Hop first) {
     if (first.settings.connect_timeout > 0) {
         connect_ms = first.settings.connect_timeout * 1000;
     }
-    // The connection never sits in a reactor wait: this program has one
-    // thread of control and every wait for the network is a poll(2).
+    /* The connection never sits in a reactor wait: this program has one
+     * thread of control and every wait for the network is a poll(2). */
     match (net.connect_polled(first.host_name, first.port, timeout_ms: connect_ms)) {
         case Err(net.Error error): {
             return Result<ssh.Wire, str>.Err("could not connect to " + display_name(first.host_name, first.port) + ": " + error.to_str());
@@ -919,10 +919,10 @@ Result<ssh.Wire, str> first_wire(Hop first) {
     }
 }
 
-// Walks `hops`: the first over TCP (or its ProxyCommand), then each next hop
-// over a direct-tcpip channel on the previous one. Every hop's host key is
-// checked against its own `known_hosts` entry and every hop authenticates
-// for itself.
+/* Walks `hops`: the first over TCP (or its ProxyCommand), then each next hop
+ * over a direct-tcpip channel on the previous one. Every hop's host key is
+ * checked against its own `known_hosts` entry and every hop authenticates
+ * for itself. */
 Result<ssh.Transport, str> establish(List<Hop> hops, str home, bool is_quiet, bool is_interactive, Report report) {
     ssh.Wire wire = first_wire(hops[0])?;
     int index = 0;
@@ -951,9 +951,9 @@ Result<ssh.Transport, str> establish(List<Hop> hops, str home, bool is_quiet, bo
     }
 }
 
-// Whether `text` is a single word with no control character or space in it:
-// what a user name or host name must be to be put into generated
-// configuration text without becoming a second directive.
+/* Whether `text` is a single word with no control character or space in it:
+ * what a user name or host name must be to be put into generated
+ * configuration text without becoming a second directive. */
 bool is_plain_word(str text) {
     for (int code in text.chars()) {
         if (code <= 32 || code == 127 || (code >= 128 && code < 160)) {
@@ -963,22 +963,22 @@ bool is_plain_word(str text) {
     return true;
 }
 
-// Keywords whose being ignored would silently weaken the connection: a
-// `RevokedHostKeys` file not consulted lets a revoked key be trusted again,
-// and a `Match` with a criterion this client cannot evaluate (`exec`,
-// `canonical`, ...) hides the settings of its block, which may be security
-// settings. A file that uses one is refused until the line is removed.
-// Everything else that is not understood (Ciphers, HostKeyAlgorithms,
-// ForwardAgent, Compression, ...) is a warning: this client's fixed offer is
-// all strong and it never forwards an agent, so ignoring those cannot widen
-// what it trusts.
+/* Keywords whose being ignored would silently weaken the connection: a
+ * `RevokedHostKeys` file not consulted lets a revoked key be trusted again,
+ * and a `Match` with a criterion this client cannot evaluate (`exec`,
+ * `canonical`, ...) hides the settings of its block, which may be security
+ * settings. A file that uses one is refused until the line is removed.
+ * Everything else that is not understood (Ciphers, HostKeyAlgorithms,
+ * ForwardAgent, Compression, ...) is a warning: this client's fixed offer is
+ * all strong and it never forwards an agent, so ignoring those cannot widen
+ * what it trusts. */
 bool is_unsafe_to_ignore(str keyword) {
     List<str> unsafe = ["revokedhostkeys"];
     return unsafe.contains(keyword) || keyword.starts_with("match ");
 }
 
-// What to do about the lines of `settings` that were understood by nobody:
-// `Err` for any that cannot safely be ignored, a `Warning:` line for the rest.
+/* What to do about the lines of `settings` that were understood by nobody:
+ * `Err` for any that cannot safely be ignored, a `Warning:` line for the rest. */
 Result<void, str> check_ignored(sshconfig.Settings settings, str name, bool is_quiet, Report report) {
     List<str> seen = [];
     for (str keyword in settings.ignored) {
@@ -996,8 +996,8 @@ Result<void, str> check_ignored(sshconfig.Settings settings, str name, bool is_q
     return Result<void, str>.Ok;
 }
 
-/// The configuration of a destination, resolved: everything `connect` decides
-/// before any byte goes on the wire.
+/** The configuration of a destination, resolved: everything `connect` decides
+ * before any byte goes on the wire. */
 type Prepared {
     str home;
     str login;
@@ -1007,8 +1007,8 @@ type Prepared {
     List<Hop> hops;
 }
 
-// The resolution half of `connect`: option lines, the configuration file with
-// its `Include`s expanded, the destination's settings, and the chain of hops.
+/* The resolution half of `connect`: option lines, the configuration file with
+ * its `Include`s expanded, the destination's settings, and the chain of hops. */
 Result<Prepared, str> prepare(Params parameters, Report report) {
     str home = home_directory();
     str login = local_user();
@@ -1035,9 +1035,9 @@ Result<Prepared, str> prepare(Params parameters, Report report) {
     } else if (home != "") {
         file_text = read_text(home + "/.ssh/config") + "\n";
     }
-    // OpenSSH's rule (ssh(1), -J): "configuration directives supplied on the
-    // command line generally apply to the destination host and not any
-    // specified jump hosts", so a jump host sees the configuration file only.
+    /* OpenSSH's rule (ssh(1), -J): "configuration directives supplied on the
+     * command line generally apply to the destination host and not any
+     * specified jump hosts", so a jump host sees the configuration file only. */
     file_text = expand_includes(file_text, home, 0);
     str base_config = file_text;
     str target_config = "";
@@ -1091,9 +1091,9 @@ Result<Prepared, str> prepare(Params parameters, Report report) {
     return Result<Prepared, str>.Ok(Prepared(home, login, settings, user, port, hops));
 }
 
-/// The destination as it will be connected to, after `~/.ssh/config` (with
-/// `Include`s expanded), `-o` lines and the other parameters have been
-/// resolved. Nothing is connected and nothing is written.
+/** The destination as it will be connected to, after `~/.ssh/config` (with
+ * `Include`s expanded), `-o` lines and the other parameters have been
+ * resolved. Nothing is connected and nothing is written. */
 pub type Resolved {
     /// The name as given.
     pub str alias;
@@ -1101,12 +1101,12 @@ pub type Resolved {
     pub str host;
     pub int port;
     pub str user;
-    /// `IdentityFile`s in order; the default key files when none is
-    /// configured (`is_default_identities`).
+    /** `IdentityFile`s in order; the default key files when none is
+     * configured (`is_default_identities`). */
     pub List<str> identity_files;
     pub bool is_default_identities;
-    /// `UserKnownHostsFile`, else `~/.ssh/known_hosts` ("" when neither can
-    /// be known).
+    /** `UserKnownHostsFile`, else `~/.ssh/known_hosts` ("" when neither can
+     * be known). */
     pub str known_hosts_file;
     /// `StrictHostKeyChecking`: yes, ask (the default), accept-new or no.
     pub str host_key_policy;
@@ -1116,8 +1116,8 @@ pub type Resolved {
     pub List<str> jump_hosts;
 }
 
-/// Resolves `parameters` like `connect` does, without connecting. `Err` is
-/// the same one-line configuration error `connect` would return.
+/** Resolves `parameters` like `connect` does, without connecting. `Err` is
+ * the same one-line configuration error `connect` would return. */
 pub Result<Resolved, str> resolve(Params parameters) {
     Report report = Report(is_silent: true);
     Prepared prepared = prepare(parameters, report)?;
@@ -1150,16 +1150,16 @@ pub Result<Resolved, str> resolve(Params parameters) {
     return Result<Resolved, str>.Ok(Resolved(parameters.host, settings.host_name, prepared.port, prepared.user, files, is_default, known_hosts, policy, settings.is_hash_known_hosts, jumps));
 }
 
-/// Resolves the configuration for `parameters.host`, connects through any jump
-/// hosts, checks every host key, and authenticates. `Err` is one line.
+/** Resolves the configuration for `parameters.host`, connects through any jump
+ * hosts, checks every host key, and authenticates. `Err` is one line. */
 pub Result<Connection, str> connect(Params parameters) {
     return connect_reporting(parameters, Report());
 }
 
-/// `connect`, reporting into `report` (see `Report`): warnings can be
-/// collected instead of written, and a refused host key is described there
-/// in structured form as well as in the `Err` line. The policy is the same:
-/// nothing is trusted that the configuration does not say to trust.
+/** `connect`, reporting into `report` (see `Report`): warnings can be
+ * collected instead of written, and a refused host key is described there
+ * in structured form as well as in the `Err` line. The policy is the same:
+ * nothing is trusted that the configuration does not say to trust. */
 pub Result<Connection, str> connect_reporting(Params parameters, Report report) {
     Prepared prepared = prepare(parameters, report)?;
     sshconfig.Settings settings = prepared.settings;

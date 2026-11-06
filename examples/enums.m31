@@ -1,23 +1,23 @@
-// Enums and match.
-//
-// Run it:   ./build.sh examples/enums.m31 && ./enums
-// This file is also in the corpus, so it cannot rot.
-//
-// An enum is a value that is exactly one of several shapes, and each shape
-// can carry its own data. A `match` takes it apart. The compiler checks that
-// every variant is handled, so adding a variant later is a compile error at
-// every place that has to learn about it -- which is the whole reason to
-// have the compiler involved.
+/* Enums and match.
+ *
+ * Run it:   ./build.sh examples/enums.m31 && ./enums
+ * This file is also in the corpus, so it cannot rot.
+ *
+ * An enum is a value that is exactly one of several shapes, and each shape
+ * can carry its own data. A `match` takes it apart. The compiler checks that
+ * every variant is handled, so adding a variant later is a compile error at
+ * every place that has to learn about it -- which is the whole reason to
+ * have the compiler involved. */
 
 // ---- Option: a value that might not be there ---------------------------
-// This is what the language has instead of null. Only something typed
-// `Option<T>` can be absent, and you cannot read the value without saying
-// what happens when it is not there.
-//
-// `Option` and `Result` are declared by the compiler, not here. They have to
-// be: a built-in method cannot return a type the program defines, so without
-// them `index_of` and `Map.get` could not hand back "nothing" at all. Past
-// that they are ordinary enums -- the same match, the same exhaustiveness.
+/* This is what the language has instead of null. Only something typed
+ * `Option<T>` can be absent, and you cannot read the value without saying
+ * what happens when it is not there.
+ *
+ * `Option` and `Result` are declared by the compiler, not here. They have to
+ * be: a built-in method cannot return a type the program defines, so without
+ * them `index_of` and `Map.get` could not hand back "nothing" at all. Past
+ * that they are ordinary enums -- the same match, the same exhaustiveness. */
 
 int or_else(Option<int> option, int fallback) {
     match (option) {
@@ -32,8 +32,8 @@ int or_else(Option<int> option, int fallback) {
 
 print(or_else(Option<int>.Some(7), 0));  // 7
 print(or_else(Option<int>.None, -1));  // -1
-// Three methods spare you a `match` when all you want is a fallback or a
-// yes/no. Taking the value OUT and keeping it still needs `match`.
+/* Three methods spare you a `match` when all you want is a fallback or a
+ * yes/no. Taking the value OUT and keeping it still needs `match`. */
 print(Option<int>.Some(3).or(0));  // 3
 print(Option<int>.None.or(0));  // 0
 print(Option<int>.Some(3).is_some());  // true
@@ -50,8 +50,8 @@ print(names.index_of("grace").or(-1));  // 1
 print(names.index_of("nobody").or(-1));  // -1
 
 // ---- Result: an answer or a reason it failed ----------------------------
-// Errors as values. No exceptions, no unwinding, nothing hidden in the
-// control flow -- a function that can fail says so in its return type.
+/* Errors as values. No exceptions, no unwinding, nothing hidden in the
+ * control flow -- a function that can fail says so in its return type. */
 
 Result<int, str> half(int number) {
     if (number % 2 == 0) {
@@ -78,8 +78,8 @@ match (half(7)) {
 }
 
 // ---- A shape is one of several things -----------------------------------
-// Variants carry different numbers of values, and different types. They all
-// share one object, so `Shape` is one type and a Circle is not a subclass.
+/* Variants carry different numbers of values, and different types. They all
+ * share one object, so `Shape` is one type and a Circle is not a subclass. */
 
 enum Shape {
     Empty;
@@ -112,11 +112,11 @@ for (Shape shape in shapes) {
 print(total);  // 12 + 12 + 0 = 24
 
 // ---- JSON, which is why null is not needed ------------------------------
-// JSON genuinely has a null, and modelling it takes no null in the language:
-// it is one variant among the others. The difference matters -- a JSON null
-// can only turn up where a Json was expected, and the compiler makes you
-// handle it. A null pointer can turn up anywhere and makes you handle
-// nothing.
+/* JSON genuinely has a null, and modelling it takes no null in the language:
+ * it is one variant among the others. The difference matters -- a JSON null
+ * can only turn up where a Json was expected, and the compiler makes you
+ * handle it. A null pointer can turn up anywhere and makes you handle
+ * nothing. */
 
 enum Json {
     Null;
@@ -179,9 +179,9 @@ for (Json json_value in doc) {
 print(sum);  // 42 + -1 + 5 = 46
 
 // ---- Enums hold references, and release them ----------------------------
-// A variant's payload is owned by the enum exactly as a field is owned by a
-// struct: retained when it goes in, released when the enum is freed. The
-// corpus checks that __rc_live is 0 at exit, so a leak here would fail.
+/* A variant's payload is owned by the enum exactly as a field is owned by a
+ * struct: retained when it goes in, released when the enum is freed. The
+ * corpus checks that __rc_live is 0 at exit, so a leak here would fail. */
 
 enum Message {
     Quit;

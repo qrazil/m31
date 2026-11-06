@@ -1,29 +1,29 @@
-// An interactive program: raw mode, keys, and a terminal that is always put
-// back the way it was found.
-//
-// Run it:   ./build.sh examples/keys.m31 && ./keys
-// Quit it:  q, or Escape, or Ctrl+C -- in raw mode Ctrl+C is a key, not a
-//           signal, which is the whole point of turning ISIG off.
-//
-// Unlike the other examples this one is NOT in the corpus, because it needs a
-// terminal and a person. What the corpus does cover is the part that matters:
-// `corpus/modules/term-keys` drives the escape-sequence decoder over a table
-// of real xterm, rxvt and Linux-console sequences, and `runtime/tests/sys_test.c`
-// drives the termios and window-size calls over a pty on both sys-layer
-// backends and three architectures. What is left for a human is whether the
-// keys on the keyboard in front of them produce the sequences the table says
-// they should -- and that is what this program is for.
-//
-// Try: the arrows, Home and End, Page Up and Page Down, F1 to F12, Alt and a
-// letter, Ctrl and a letter, the mouse, and pasting a line of text.
+/* An interactive program: raw mode, keys, and a terminal that is always put
+ * back the way it was found.
+ *
+ * Run it:   ./build.sh examples/keys.m31 && ./keys
+ * Quit it:  q, or Escape, or Ctrl+C -- in raw mode Ctrl+C is a key, not a
+ *           signal, which is the whole point of turning ISIG off.
+ *
+ * Unlike the other examples this one is NOT in the corpus, because it needs a
+ * terminal and a person. What the corpus does cover is the part that matters:
+ * `corpus/modules/term-keys` drives the escape-sequence decoder over a table
+ * of real xterm, rxvt and Linux-console sequences, and `runtime/tests/sys_test.c`
+ * drives the termios and window-size calls over a pty on both sys-layer
+ * backends and three architectures. What is left for a human is whether the
+ * keys on the keyboard in front of them produce the sequences the table says
+ * they should -- and that is what this program is for.
+ *
+ * Try: the arrows, Home and End, Page Up and Page Down, F1 to F12, Alt and a
+ * letter, Ctrl and a letter, the mouse, and pasting a line of text. */
 import io;
 import term;
 
-// The screen, redrawn from scratch into one buffer and written once. A
-// terminal application that writes as it goes -- a cursor move here, a colour
-// there -- flickers, because the terminal draws what it has whenever it feels
-// like it. This is the shape that does not: build the whole frame, then
-// `flush()`, which is exactly one `write`.
+/* The screen, redrawn from scratch into one buffer and written once. A
+ * terminal application that writes as it goes -- a cursor move here, a colour
+ * there -- flickers, because the terminal draws what it has whenever it feels
+ * like it. This is the shape that does not: build the whole frame, then
+ * `flush()`, which is exactly one `write`. */
 void draw(term.Writer writer, term.Size screen_size, List<str> log) {
     writer.put(term.CLEAR);
     writer.put(term.move_to(1, 1));
@@ -50,8 +50,8 @@ void draw(term.Writer writer, term.Size screen_size, List<str> log) {
 term.Size window() {
     match (term.size()) {
         case Ok(term.Size screen_size): {
-            // A terminal that does not know its size answers 0 by 0, which is
-            // not an error and is not a size to draw into either.
+            /* A terminal that does not know its size answers 0 by 0, which is
+             * not an error and is not a size to draw into either. */
             if (screen_size.rows > 0 && screen_size.columns > 0) {
                 return screen_size;
             }
@@ -140,10 +140,10 @@ match (term.raw()) {
         io.eprint("keys: " + error.to_str());
     }
     case Ok(term.Session session): {
-        // Everything written to GET here is undone when the session ends --
-        // by `restore()`, by the end of this block, or by the runtime if the
-        // program traps. Saying it once, here, is the whole trick: there is
-        // no exit path left on which it can be forgotten.
+        /* Everything written to GET here is undone when the session ends --
+         * by `restore()`, by the end of this block, or by the runtime if the
+         * program traps. Saying it once, here, is the whole trick: there is
+         * no exit path left on which it can be forgotten. */
         session.on_exit(term.MOUSE_OFF + term.PASTE_OFF + term.SHOW_CURSOR + term.RESET + term.ALT_SCREEN_OFF);
         term.Writer writer = term.writer(io.stdout());
         writer.put(term.ALT_SCREEN_ON + term.HIDE_CURSOR + term.MOUSE_ON + term.PASTE_ON);
@@ -159,10 +159,10 @@ match (term.raw()) {
                     is_running = false;
                 }
             }
-            // 250 ms rather than for ever, so that a window resized while no
-            // key is pressed is still noticed: the loop comes round, asks the
-            // size again and redraws. It is also what makes a lone Escape
-            // arrive as Escape rather than waiting for the next key.
+            /* 250 ms rather than for ever, so that a window resized while no
+             * key is pressed is still noticed: the loop comes round, asks the
+             * size again and redraws. It is also what makes a lone Escape
+             * arrive as Escape rather than waiting for the next key. */
             match (reader.read(250)) {
                 case Ok(term.Input input): {
                     match (input) {

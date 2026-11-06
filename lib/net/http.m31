@@ -1,208 +1,208 @@
-// HTTP/1.1, both directions, written over `net` and `io`.
-//
-// API -- the message
+/* HTTP/1.1, both directions, written over `net` and `io`.
+ *
+ * API -- the message */
 // ------------------
-//   http.Error                       enum        why a message was refused
-//   e.to_str(), e.status()                       the sentence, and the code to answer with
-//
-//   http.headers()                   -> Headers  empty, insertion-ordered
-//   h.set(name, value), h.get(name), h.has(name), h.remove(name)
-//   h.names()                        -> List<str>   lowercased, in order
-//   h.size()                         -> int
-//
-//   http.parse_url(url)              -> Result<Url, Error>
-//   u.scheme(), u.host(), u.port(), u.path(), u.query(), u.target()
-//   u.host_header(), u.to_str()
-//   http.quote(s, safe:)             -> str      percent-encode
-//   http.unquote(s, plus:)           -> Result<str, Error>
-//
-//   http.request(method, url)        -> Result<Request, Error>
-//   r.method(), r.url(), r.path(), r.query(), r.version(), r.header(n)
-//   r.body(), r.text(), r.set(n, v), r.set_body(b), r.set_text(s),
-//   r.set_chunked(on), r.set_version(v)
-//
-//   http.response(status)            -> Response
-//   http.text_response(s, status:)   -> Response
-//   http.json_response(v, status:)   -> Result<Response, Error>
-//   p.status(), p.reason(), p.header(n), p.body(), p.text(), p.json()
-//   p.set(n, v), p.set_body(b), p.set_text(s), p.set_chunked(on), p.set_reason(s)
-//
-// API -- the seam, over any `io.Stream`
+/*   http.Error                       enum        why a message was refused
+ *   e.to_str(), e.status()                       the sentence, and the code to answer with
+ *
+ *   http.headers()                   -> Headers  empty, insertion-ordered
+ *   h.set(name, value), h.get(name), h.has(name), h.remove(name)
+ *   h.names()                        -> List<str>   lowercased, in order
+ *   h.size()                         -> int
+ *
+ *   http.parse_url(url)              -> Result<Url, Error>
+ *   u.scheme(), u.host(), u.port(), u.path(), u.query(), u.target()
+ *   u.host_header(), u.to_str()
+ *   http.quote(s, safe:)             -> str      percent-encode
+ *   http.unquote(s, plus:)           -> Result<str, Error>
+ *
+ *   http.request(method, url)        -> Result<Request, Error>
+ *   r.method(), r.url(), r.path(), r.query(), r.version(), r.header(n)
+ *   r.body(), r.text(), r.set(n, v), r.set_body(b), r.set_text(s),
+ *   r.set_chunked(on), r.set_version(v)
+ *
+ *   http.response(status)            -> Response
+ *   http.text_response(s, status:)   -> Response
+ *   http.json_response(v, status:)   -> Result<Response, Error>
+ *   p.status(), p.reason(), p.header(n), p.body(), p.text(), p.json()
+ *   p.set(n, v), p.set_body(b), p.set_text(s), p.set_chunked(on), p.set_reason(s)
+ *
+ * API -- the seam, over any `io.Stream` */
 // -------------------------------------
-//   http.read_request(s)             -> Result<Option<Request>, Error>
-//   http.write_request(s, req)       -> Result<void, Error>
-//   http.read_response(s, method)    -> Result<Response, Error>
-//   http.write_response(s, req, resp, keep_alive)  -> Result<void, Error>
-//   http.should_keep_alive(req, resp) -> bool
-//   http.read_request_stream(s)      -> Result<Option<RequestStream>, Error>
-//                                    the head read, the body left for `rs.read(n)`
-//   rs.request(), rs.read(n), rs.is_finished()
-//   http.start_response(s, req, resp, keep_alive)  -> Result<BodyWriter, Error>
-//                                    the head written, the body sent by `w.write(b)`
-//   w.write(b), w.finish(), w.is_keep_alive()
-//
-// API -- the server
+/*   http.read_request(s)             -> Result<Option<Request>, Error>
+ *   http.write_request(s, req)       -> Result<void, Error>
+ *   http.read_response(s, method)    -> Result<Response, Error>
+ *   http.write_response(s, req, resp, keep_alive)  -> Result<void, Error>
+ *   http.should_keep_alive(req, resp) -> bool
+ *   http.read_request_stream(s)      -> Result<Option<RequestStream>, Error>
+ *                                    the head read, the body left for `rs.read(n)`
+ *   rs.request(), rs.read(n), rs.is_finished()
+ *   http.start_response(s, req, resp, keep_alive)  -> Result<BodyWriter, Error>
+ *                                    the head written, the body sent by `w.write(b)`
+ *   w.write(b), w.finish(), w.is_keep_alive()
+ *
+ * API -- the server */
 // -----------------
-//   http.Handler                     interface   `Response handle(Request req)`
-//   http.serve(listener, handler, connections:, timeout_ms:, max_requests:)
-//                                    -> Result<int, Error>   connections served
-//   http.serve_stream(stream, handler, max_requests:)
-//                                    -> Result<int, Error>   requests served, over any io.Stream
-//   http.serve_connection(conn, handler, max_requests:)
-//                                    -> Result<int, Error>   serve_stream over a net.Conn
-//
-// API -- the client
+/*   http.Handler                     interface   `Response handle(Request req)`
+ *   http.serve(listener, handler, connections:, timeout_ms:, max_requests:)
+ *                                    -> Result<int, Error>   connections served
+ *   http.serve_stream(stream, handler, max_requests:)
+ *                                    -> Result<int, Error>   requests served, over any io.Stream
+ *   http.serve_connection(conn, handler, max_requests:)
+ *                                    -> Result<int, Error>   serve_stream over a net.Conn
+ *
+ * API -- the client */
 // -----------------
-//   http.get(url)                    -> Result<Response, Error>
-//   http.fetch(request, redirects:, timeout_ms:)  -> Result<Response, Error>
-//   http.fetch_via(transport, request, redirects:, timeout_ms:)
-//                                    -> Result<Response, Error>
-//   http.fetch_stream(request, timeout_ms:)  -> Result<BodyStream, Error>
-//                                    the head read, the body left for `body.read(n)`;
-//                                    no redirects. `http.read_response_stream(s, method)` is
-//                                    the same over any `io.Stream`.
-//   body.status(), body.reason(), body.header(n), body.read(n), body.is_finished()
-//   http.open(request, timeout_ms)   -> Result<net.Conn, Error>
-//                                    `http://` only. `https://` is `lib/net/https.m31`, which
-//                                    is `fetch_via` with a TLS transport.
-//
-// **The seam takes an `io.Stream`, so every parser here is testable without a
-// socket.** `read_request`, `write_request`, `read_response` and
-// `write_response` never mention `net`: hand them an `io.Buffer` and they
-// parse a transcript, hand them a `net.Conn` and they are a server or a
-// client. `serve_stream` is on the seam's side of that line: it takes an
-// `io.Stream`. Only `serve`, `serve_conn`, `get` and `fetch` know what a socket
-// is, because only they have to set a timeout or make a connection. That is
-// Oro's arrangement in `std/http.oro`, for Oro's reason: two parsers that
-// agree today drift tomorrow, so there is one of each and the corpus drives
-// it from memory.
-//
-// **A body is `bytes`, already read, and bounded by `MAX_BODY`** -- except
-// through the streaming forms (`fetch_stream`, `read_request_stream`,
-// `start_response`), which hand the body over a piece at a time, have no
-// ceiling, and leave the connection's position to the caller.
-//
+/*   http.get(url)                    -> Result<Response, Error>
+ *   http.fetch(request, redirects:, timeout_ms:)  -> Result<Response, Error>
+ *   http.fetch_via(transport, request, redirects:, timeout_ms:)
+ *                                    -> Result<Response, Error>
+ *   http.fetch_stream(request, timeout_ms:)  -> Result<BodyStream, Error>
+ *                                    the head read, the body left for `body.read(n)`;
+ *                                    no redirects. `http.read_response_stream(s, method)` is
+ *                                    the same over any `io.Stream`.
+ *   body.status(), body.reason(), body.header(n), body.read(n), body.is_finished()
+ *   http.open(request, timeout_ms)   -> Result<net.Conn, Error>
+ *                                    `http://` only. `https://` is `lib/net/https.m31`, which
+ *                                    is `fetch_via` with a TLS transport.
+ *
+ * **The seam takes an `io.Stream`, so every parser here is testable without a
+ * socket.** `read_request`, `write_request`, `read_response` and
+ * `write_response` never mention `net`: hand them an `io.Buffer` and they
+ * parse a transcript, hand them a `net.Conn` and they are a server or a
+ * client. `serve_stream` is on the seam's side of that line: it takes an
+ * `io.Stream`. Only `serve`, `serve_conn`, `get` and `fetch` know what a socket
+ * is, because only they have to set a timeout or make a connection. That is
+ * Oro's arrangement in `std/http.oro`, for Oro's reason: two parsers that
+ * agree today drift tomorrow, so there is one of each and the corpus drives
+ * it from memory.
+ *
+ * **A body is `bytes`, already read, and bounded by `MAX_BODY`** -- except
+ * through the streaming forms (`fetch_stream`, `read_request_stream`,
+ * `start_response`), which hand the body over a piece at a time, have no
+ * ceiling, and leave the connection's position to the caller.
+ * */
 // --- the limits, and why each one exists -----------------------------------
-//
-// Every limit is a `pub const` a caller can read, print and compare against,
-// because a limit that is a number in the middle of a function is a limit
-// nobody can plan around. Each one bounds something an anonymous peer
-// chooses:
-//
-//   MAX_HEAD          the whole header block, request line included
-//   MAX_HEADERS       header fields in one block, and trailer fields after one
-//   MAX_HEADER_LINE   one field line
-//   MAX_CHUNK_LINE    one chunk size line
-//   MAX_BODY          a body held in memory, in either direction
-//   MAX_REDIRECTS     hops the client will follow
-//   MAX_INTERIM       1xx responses stepped over before the peer is looping
-//   MAX_REQUESTS      requests one kept-alive connection may carry
-//   TIMEOUT_MS        how long a read or a write on a served connection waits
-//
-// A peer that passes one gets `Err(TooLarge(what, limit))`, whose message
-// names both, and a server answers it 431.
-//
+/*
+ * Every limit is a `pub const` a caller can read, print and compare against,
+ * because a limit that is a number in the middle of a function is a limit
+ * nobody can plan around. Each one bounds something an anonymous peer
+ * chooses:
+ *
+ *   MAX_HEAD          the whole header block, request line included
+ *   MAX_HEADERS       header fields in one block, and trailer fields after one
+ *   MAX_HEADER_LINE   one field line
+ *   MAX_CHUNK_LINE    one chunk size line
+ *   MAX_BODY          a body held in memory, in either direction
+ *   MAX_REDIRECTS     hops the client will follow
+ *   MAX_INTERIM       1xx responses stepped over before the peer is looping
+ *   MAX_REQUESTS      requests one kept-alive connection may carry
+ *   TIMEOUT_MS        how long a read or a write on a served connection waits
+ *
+ * A peer that passes one gets `Err(TooLarge(what, limit))`, whose message
+ * names both, and a server answers it 431.
+ * */
 // --- strictness: what is refused, and why ----------------------------------
-//
-// The rule is that **anything two parsers could read differently is
-// refused**, because a request smuggled past a proxy is exactly a request
-// the proxy and the server read differently. So:
-//
-//   - **Both `Content-Length` and `Transfer-Encoding`** is `Framing`, not a
-//     resolution. RFC 9112 says prefer the latter; "says prefer" plus "the
-//     proxy in front of me did not" is the whole attack.
-//   - **A second `Content-Length` or `Transfer-Encoding`** is `Framing` for
-//     the same reason, and a second `Host` is `Syntax`: neither field is
-//     list-valued, so two of one is not a list.
-//   - **A `Transfer-Encoding` that is not exactly `chunked`** is `Framing`.
-//     `gzip, chunked` is well-formed and undecodable here, and handing back
-//     coded bytes as if they were the body is the one answer that must not
-//     happen.
-//   - **Obsolete line folding** -- a field continued on an indented line --
-//     is `Syntax`. RFC 9112 deprecated it and it is a smuggling vector.
-//   - **A bare CR or LF inside the header block** is `Syntax`. The block is
-//     split on CRLF, so a lone LF would otherwise leave a line that this
-//     parser and the next one disagree about.
-//   - **A NUL, a CR or a DEL anywhere in a field name or value** is
-//     `Syntax`, naming the byte and where it was. A field name must be a
-//     token (RFC 9110 `tchar`); a field value is HTAB and 0x20 upwards
-//     except DEL.
-//   - **A `Content-Length` that is not a non-empty run of ASCII digits** is
-//     `Syntax`. That refuses `+5`, `0x5`, ` 5` and `5, 5` in one rule.
-//   - **A chunk size that is not a non-empty run of hex digits** is
-//     `Syntax`; no surrounding space is tolerated, and more than sixteen
-//     digits is refused before the multiply can overflow. Chunk extensions
-//     (`;name=value`) are skipped, and trailer fields are read and
-//     discarded -- acting on a field that arrives after the body has been
-//     handed to the application is a decision this module has no standing to
-//     make.
-//   - **An `HTTP/1.1` request with no `Host`** is `Syntax`. RFC 9112
-//     requires it, and a virtual host that guesses is a virtual host that
-//     can be aimed.
-//   - **A leading empty line before a request** is refused, where RFC 9112
-//     lets a recipient ignore one. It would have to be read out of the
-//     stream before the header block, which means a second bounded read and
-//     a second place the block can end; a peer that sends a stray CRLF after
-//     its last message is malformed, and saying so is cheaper than carrying
-//     the tolerance forever.
-//   - **A request target** must be origin-form (`/path?query`) or
-//     absolute-form (`http://host/path`, whose authority is dropped --
-//     `Host` is what this module routes on). Asterisk-form (`*`) is accepted
-//     only for `OPTIONS`. Authority-form, a relative target and a `#`
-//     fragment are refused.
-//
+/*
+ * The rule is that **anything two parsers could read differently is
+ * refused**, because a request smuggled past a proxy is exactly a request
+ * the proxy and the server read differently. So:
+ *
+ *   - **Both `Content-Length` and `Transfer-Encoding`** is `Framing`, not a
+ *     resolution. RFC 9112 says prefer the latter; "says prefer" plus "the
+ *     proxy in front of me did not" is the whole attack.
+ *   - **A second `Content-Length` or `Transfer-Encoding`** is `Framing` for
+ *     the same reason, and a second `Host` is `Syntax`: neither field is
+ *     list-valued, so two of one is not a list.
+ *   - **A `Transfer-Encoding` that is not exactly `chunked`** is `Framing`.
+ *     `gzip, chunked` is well-formed and undecodable here, and handing back
+ *     coded bytes as if they were the body is the one answer that must not
+ *     happen.
+ *   - **Obsolete line folding** -- a field continued on an indented line --
+ *     is `Syntax`. RFC 9112 deprecated it and it is a smuggling vector.
+ *   - **A bare CR or LF inside the header block** is `Syntax`. The block is
+ *     split on CRLF, so a lone LF would otherwise leave a line that this
+ *     parser and the next one disagree about.
+ *   - **A NUL, a CR or a DEL anywhere in a field name or value** is
+ *     `Syntax`, naming the byte and where it was. A field name must be a
+ *     token (RFC 9110 `tchar`); a field value is HTAB and 0x20 upwards
+ *     except DEL.
+ *   - **A `Content-Length` that is not a non-empty run of ASCII digits** is
+ *     `Syntax`. That refuses `+5`, `0x5`, ` 5` and `5, 5` in one rule.
+ *   - **A chunk size that is not a non-empty run of hex digits** is
+ *     `Syntax`; no surrounding space is tolerated, and more than sixteen
+ *     digits is refused before the multiply can overflow. Chunk extensions
+ *     (`;name=value`) are skipped, and trailer fields are read and
+ *     discarded -- acting on a field that arrives after the body has been
+ *     handed to the application is a decision this module has no standing to
+ *     make.
+ *   - **An `HTTP/1.1` request with no `Host`** is `Syntax`. RFC 9112
+ *     requires it, and a virtual host that guesses is a virtual host that
+ *     can be aimed.
+ *   - **A leading empty line before a request** is refused, where RFC 9112
+ *     lets a recipient ignore one. It would have to be read out of the
+ *     stream before the header block, which means a second bounded read and
+ *     a second place the block can end; a peer that sends a stray CRLF after
+ *     its last message is malformed, and saying so is cheaper than carrying
+ *     the tolerance forever.
+ *   - **A request target** must be origin-form (`/path?query`) or
+ *     absolute-form (`http://host/path`, whose authority is dropped --
+ *     `Host` is what this module routes on). Asterisk-form (`*`) is accepted
+ *     only for `OPTIONS`. Authority-form, a relative target and a `#`
+ *     fragment are refused.
+ * */
 // --- duplicate header fields -----------------------------------------------
-//
-// **A repeated field is joined with `", "` in arrival order**, which is RFC
-// 9110 §5.3: a list-valued field sent as several lines means the same as one
-// line with the values comma-joined. `Host`, `Content-Length` and
-// `Transfer-Encoding` are exempt and refused, above.
-//
-// The one field this rule is wrong for is **`Set-Cookie`**, which RFC 9110
-// exempts because its value may contain a comma. This module has no cookie
-// support at all -- no jar, no parsing, no `Set-Cookie` splitting -- so a
-// caller who needs the individual values of several `Set-Cookie` lines does
-// not get them here. That is a real gap and it is written down rather than
-// papered over with a second accessor nothing else would use.
-//
-// `Headers` keeps **insertion order**, which is why it is two `List<str>`
-// and not a `Map`: a map's order is its table's (§3.9), and a response whose
-// header order changes between runs is a response no test can pin and no
-// cache can key.
-//
+/*
+ * **A repeated field is joined with `", "` in arrival order**, which is RFC
+ * 9110 §5.3: a list-valued field sent as several lines means the same as one
+ * line with the values comma-joined. `Host`, `Content-Length` and
+ * `Transfer-Encoding` are exempt and refused, above.
+ *
+ * The one field this rule is wrong for is **`Set-Cookie`**, which RFC 9110
+ * exempts because its value may contain a comma. This module has no cookie
+ * support at all -- no jar, no parsing, no `Set-Cookie` splitting -- so a
+ * caller who needs the individual values of several `Set-Cookie` lines does
+ * not get them here. That is a real gap and it is written down rather than
+ * papered over with a second accessor nothing else would use.
+ *
+ * `Headers` keeps **insertion order**, which is why it is two `List<str>`
+ * and not a `Map`: a map's order is its table's (§3.9), and a response whose
+ * header order changes between runs is a response no test can pin and no
+ * cache can key.
+ * */
 // --- what is deliberately not here -----------------------------------------
-//
-//   - **`https` in this module.** `http.fetch` and `http.get` refuse an
-//     `https://` URL with `Error.SchemeNeedsTls` before a socket exists;
-//     `lib/net/https.m31` fetches them, over `lib/tls.m31`, and checked: every
-//     connection proves a certificate chain (or a pinned key) before a byte of
-//     the request is sent, and there is no option, flag or environment
-//     variable that skips it. TLS is a separate library because it is most of
-//     a megabyte of compiled code -- bignums, curves, X.509 -- that a program
-//     which only speaks `http://` (a server, a test, a loopback client) would
-//     otherwise carry. The wire format and the redirect rules are shared:
-//     `https` reuses `write_request`, `read_response` and `fetch_via`, and
-//     an `https` URL's rules (never downgraded to `http`) live here.
-//     What is checked and what is not (TLS 1.2, resumption, client
-//     certificates and revocation are not) is in `lib/tls.m31`'s header.
-//   - **A streaming handler.** `Handler` takes and returns values, and
-//     `serve` buffers. The streaming forms are the seam, not a server: a
-//     program that streams (a git server, a proxy) writes its own loop over
-//     `read_request_stream` and `start_response`, because only it knows
-//     whether an unread body means "drain" or "close".
-//   - **Cookies, authentication, pooling, retries and compression.** Each is
-//     a policy the caller owns; Oro's `std/http.oro` lists the same five and
-//     the reasons hold word for word.
-//   - **A `Date` header.** RFC 9110 asks an origin server with a clock to
-//     send one, and adding it would make every response a function of the
-//     wall clock -- untestable, and a dependency on `date` for a field the
-//     caller can set in one line.
-//   - **`Expect: 100-continue`**, HTTP/2, HTTP/3, upgrades, `multipart`,
-//     static file serving and routing.
-//   - **`501` and `505`.** A refusal this module makes answers `400`, or
-//     `431` for a limit. Splitting out "not implemented" and "version not
-//     supported" means carrying a status through every error value, and the
-//     message already says which it was. See `Error.status()`.
+/*
+ *   - **`https` in this module.** `http.fetch` and `http.get` refuse an
+ *     `https://` URL with `Error.SchemeNeedsTls` before a socket exists;
+ *     `lib/net/https.m31` fetches them, over `lib/tls.m31`, and checked: every
+ *     connection proves a certificate chain (or a pinned key) before a byte of
+ *     the request is sent, and there is no option, flag or environment
+ *     variable that skips it. TLS is a separate library because it is most of
+ *     a megabyte of compiled code -- bignums, curves, X.509 -- that a program
+ *     which only speaks `http://` (a server, a test, a loopback client) would
+ *     otherwise carry. The wire format and the redirect rules are shared:
+ *     `https` reuses `write_request`, `read_response` and `fetch_via`, and
+ *     an `https` URL's rules (never downgraded to `http`) live here.
+ *     What is checked and what is not (TLS 1.2, resumption, client
+ *     certificates and revocation are not) is in `lib/tls.m31`'s header.
+ *   - **A streaming handler.** `Handler` takes and returns values, and
+ *     `serve` buffers. The streaming forms are the seam, not a server: a
+ *     program that streams (a git server, a proxy) writes its own loop over
+ *     `read_request_stream` and `start_response`, because only it knows
+ *     whether an unread body means "drain" or "close".
+ *   - **Cookies, authentication, pooling, retries and compression.** Each is
+ *     a policy the caller owns; Oro's `std/http.oro` lists the same five and
+ *     the reasons hold word for word.
+ *   - **A `Date` header.** RFC 9110 asks an origin server with a clock to
+ *     send one, and adding it would make every response a function of the
+ *     wall clock -- untestable, and a dependency on `date` for a field the
+ *     caller can set in one line.
+ *   - **`Expect: 100-continue`**, HTTP/2, HTTP/3, upgrades, `multipart`,
+ *     static file serving and routing.
+ *   - **`501` and `505`.** A refusal this module makes answers `400`, or
+ *     `431` for a limit. Splitting out "not implemented" and "version not
+ *     supported" means carrying a status through every error value, and the
+ *     message already says which it was. See `Error.status()`. */
 
 import io;
 import encoding.json;
@@ -210,8 +210,8 @@ import net;
 import timer;
 
 // --- limits ----------------------------------------------------------------
-/// The whole header block -- request or status line, every field, and the
-/// blank line -- in bytes.
+/** The whole header block -- request or status line, every field, and the
+ * blank line -- in bytes. */
 pub const int MAX_HEAD = 65536;
 /// Header fields in one block, and trailer fields after a chunked body.
 pub const int MAX_HEADERS = 100;
@@ -223,33 +223,33 @@ pub const int MAX_CHUNK_LINE = 32;
 pub const int MAX_BODY = 33554432;
 /// How many redirects `fetch` follows before giving up.
 pub const int MAX_REDIRECTS = 5;
-/// How many interim (1xx) responses `read_response` steps over before
-/// deciding the peer is looping. Nothing here asks for one -- there is no
-/// `Expect: 100-continue` -- but `103 Early Hints` arrives unasked.
+/** How many interim (1xx) responses `read_response` steps over before
+ * deciding the peer is looping. Nothing here asks for one -- there is no
+ * `Expect: 100-continue` -- but `103 Early Hints` arrives unasked. */
 pub const int MAX_INTERIM = 8;
-/// How many requests one kept-alive connection may carry before the server
-/// hangs up and makes the client come back. It is fairness, not memory: it
-/// stops a handful of trickling clients holding every slot of a server that
-/// serves one connection at a time.
+/** How many requests one kept-alive connection may carry before the server
+ * hangs up and makes the client come back. It is fairness, not memory: it
+ * stops a handful of trickling clients holding every slot of a server that
+ * serves one connection at a time. */
 pub const int MAX_REQUESTS = 1000;
-/// How long a read or a write on a served connection waits, in
-/// milliseconds. 0 waits forever.
+/** How long a read or a write on a served connection waits, in
+ * milliseconds. 0 waits forever. */
 pub const int TIMEOUT_MS = 30000;
 // How long `serve` pauses after a failed accept before it asks again.
 const int ACCEPT_BACKOFF_MS = 10;
-/// How large a piece of a body `set_chunked` writes as one chunk, and how
-/// much is asked of a stream at a time.
+/** How large a piece of a body `set_chunked` writes as one chunk, and how
+ * much is asked of a stream at a time. */
 pub const int CHUNK = 16384;
-// The port an `http://` URL means when it does not say, and an `https://`
-// one.
+/* The port an `http://` URL means when it does not say, and an `https://`
+ * one. */
 const int DEFAULT_PORT = 80;
 const int DEFAULT_HTTPS_PORT = 443;
-// Sent unless the caller sets their own: a surprising number of services
-// answer 403 to a request without one.
+/* Sent unless the caller sets their own: a surprising number of services
+ * answer 403 to a request without one. */
 const str USER_AGENT = "m31-http";
-// The delimiters, as `bytes`. Module constants are immortal static data
-// (§4.5), so naming one costs nothing at run time -- which matters for
-// `CRLF`, which every line of every message is split on.
+/* The delimiters, as `bytes`. Module constants are immortal static data
+ * (§4.5), so naming one costs nothing at run time -- which matters for
+ * `CRLF`, which every line of every message is split on. */
 const bytes CRLF = [13, 10];
 const bytes CRLF2 = [13, 10, 13, 10];
 const bytes SP1 = [32];
@@ -267,40 +267,40 @@ const int DEL = 127;
 const str HEX = "0123456789abcdef";
 
 // --- errors ----------------------------------------------------------------
-/// Why a message was refused, or could not be exchanged.
-///
-/// The named variants are the ones a caller branches on -- "the peer sent
-/// nonsense", "the framing is ambiguous", "it was too big", "that URL cannot
-/// be requested", "it stopped in the middle", "the socket failed" -- and
-/// `Other` is what keeps the enum from growing often: `match` is exhaustive
-/// and has no default (§5.6), so a new variant breaks every program that
-/// matches on an HTTP error. The five TLS variants were the one deliberate
-/// exception -- a caller that sees `CertificateUntrusted` does something a
-/// caller that sees `TlsFailed` does not.
-///
-/// Every variant carries a **sentence, not a code**. A refusal that a caller
-/// cannot act on differently is a refusal they have to read, and the whole
-/// point of being strict is being able to say exactly what was wrong.
-///
-/// Payload-free (docs/errors-decision.md §4): the sentence each variant used
-/// to carry is context the caller already has -- the message, the URL, the
-/// limit -- at the point it reports. The socket vocabulary that used to
-/// nest a whole `net.Error` inside `Transport` is instead six variants of
-/// this module's own, in `net`'s own names, built by `from_net` below --
-/// each module's error type stays its own (§4), so this widens by name
-/// rather than by nesting one enum inside another.
+/** Why a message was refused, or could not be exchanged.
+ *
+ * The named variants are the ones a caller branches on -- "the peer sent
+ * nonsense", "the framing is ambiguous", "it was too big", "that URL cannot
+ * be requested", "it stopped in the middle", "the socket failed" -- and
+ * `Other` is what keeps the enum from growing often: `match` is exhaustive
+ * and has no default (§5.6), so a new variant breaks every program that
+ * matches on an HTTP error. The five TLS variants were the one deliberate
+ * exception -- a caller that sees `CertificateUntrusted` does something a
+ * caller that sees `TlsFailed` does not.
+ *
+ * Every variant carries a **sentence, not a code**. A refusal that a caller
+ * cannot act on differently is a refusal they have to read, and the whole
+ * point of being strict is being able to say exactly what was wrong.
+ *
+ * Payload-free (docs/errors-decision.md §4): the sentence each variant used
+ * to carry is context the caller already has -- the message, the URL, the
+ * limit -- at the point it reports. The socket vocabulary that used to
+ * nest a whole `net.Error` inside `Transport` is instead six variants of
+ * this module's own, in `net`'s own names, built by `from_net` below --
+ * each module's error type stays its own (§4), so this widens by name
+ * rather than by nesting one enum inside another. */
 pub enum Error {
     /// The bytes are not a well-formed HTTP message.
     Syntax;
-    /// The message's framing is ambiguous or names a coding this module does
-    /// not speak. Separate from `Syntax` because it is the one class of
-    /// refusal that is a security decision rather than a grammar one, and a
-    /// gateway may want to count it.
+    /** The message's framing is ambiguous or names a coding this module does
+     * not speak. Separate from `Syntax` because it is the one class of
+     * refusal that is a security decision rather than a grammar one, and a
+     * gateway may want to count it. */
     Framing;
     /// A limit this module publishes was passed.
     TooLarge;
-    /// The URL cannot be requested at all -- no scheme, no host, a scheme
-    /// that is neither `http` nor `https`.
+    /** The URL cannot be requested at all -- no scheme, no host, a scheme
+     * that is neither `http` nor `https`. */
     BadUrl;
     /// The peer stopped in the middle of a message.
     Closed;
@@ -316,31 +316,31 @@ pub enum Error {
     InUse;
     /// The host name did not resolve.
     NameNotFound;
-    /// A socket failure with none of the names above, or a refusal nobody
-    /// named.
+    /** A socket failure with none of the names above, or a refusal nobody
+     * named. */
     Other;
-    /// An `https` server's certificate does not lead to a trusted root, is
-    /// not the pinned key, or breaks a rule of the chain.
+    /** An `https` server's certificate does not lead to a trusted root, is
+     * not the pinned key, or breaks a rule of the chain. */
     CertificateUntrusted;
-    /// An `https` server's certificate, or one above it, is expired or not
-    /// yet valid.
+    /** An `https` server's certificate, or one above it, is expired or not
+     * yet valid. */
     CertificateExpired;
     /// An `https` server's certificate is not valid for the host asked for.
     HostnameMismatch;
-    /// Anything else that stopped a TLS connection: a handshake the server
-    /// failed, an alert, a record that did not verify, a stream cut without
-    /// `close_notify`, a CA bundle that could not be read.
+    /** Anything else that stopped a TLS connection: a handshake the server
+     * failed, an alert, a record that did not verify, a stream cut without
+     * `close_notify`, a CA bundle that could not be read. */
     TlsFailed;
-    /// An `https` URL answered with a redirect to plain `http`. Never
-    /// followed: the next request would go in the clear.
+    /** An `https` URL answered with a redirect to plain `http`. Never
+     * followed: the next request would go in the clear. */
     InsecureRedirect;
-    /// An `https` URL was handed to `http.fetch`, which does not speak TLS.
-    /// `lib/net/https.m31` does.
+    /** An `https` URL was handed to `http.fetch`, which does not speak TLS.
+     * `lib/net/https.m31` does. */
     SchemeNeedsTls;
 }
 
-/// A sentence saying what went wrong. A method named `to_str`, so `print(e)`
-/// prints it.
+/** A sentence saying what went wrong. A method named `to_str`, so `print(e)`
+ * prints it. */
 pub str Error.to_str() {
     match (this) {
         case Syntax: {
@@ -400,13 +400,13 @@ pub str Error.to_str() {
     }
 }
 
-/// The status a server answers this refusal with.
-///
-/// Four hundred for everything the peer got wrong, 431 for a limit, 500 for
-/// a failure that was this end's. There is deliberately no 501 and no 505:
-/// distinguishing them would mean carrying a status inside every error
-/// value, and `to_str()` already says which coding or which version was
-/// refused. See the module note.
+/** The status a server answers this refusal with.
+ *
+ * Four hundred for everything the peer got wrong, 431 for a limit, 500 for
+ * a failure that was this end's. There is deliberately no 501 and no 505:
+ * distinguishing them would mean carrying a status inside every error
+ * value, and `to_str()` already says which coding or which version was
+ * refused. See the module note. */
 pub int Error.status() {
     match (this) {
         case Syntax: {
@@ -466,17 +466,17 @@ pub int Error.status() {
     }
 }
 
-// An `io.Error` off a stream, in this module's vocabulary. It goes through
-// `net.error_of`, which is exact for everything a socket produces, so a
-// timeout arrives as `Error.TimedOut` and not as a number.
+/* An `io.Error` off a stream, in this module's vocabulary. It goes through
+ * `net.error_of`, which is exact for everything a socket produces, so a
+ * timeout arrives as `Error.TimedOut` and not as a number. */
 Error transport(io.Error error) {
     return from_net(net.error_of(error));
 }
 
-// `net.Error`, in this module's own vocabulary -- each module's error type
-// stays its own (docs/errors-decision.md §4), so a socket failure widens by
-// matching on `net`'s names and returning this module's, rather than nesting
-// a whole `net.Error` inside this one.
+/* `net.Error`, in this module's own vocabulary -- each module's error type
+ * stays its own (docs/errors-decision.md §4), so a socket failure widens by
+ * matching on `net`'s names and returning this module's, rather than nesting
+ * a whole `net.Error` inside this one. */
 Error from_net(net.Error error) {
     match (error) {
         case Refused: {
@@ -510,9 +510,9 @@ Error from_net(net.Error error) {
 }
 
 // --- byte classes ----------------------------------------------------------
-// RFC 9110's grammar, written as predicates over one octet. They are the
-// whole of this module's strictness, so each is the RFC's rule and nothing
-// near it.
+/* RFC 9110's grammar, written as predicates over one octet. They are the
+ * whole of this module's strictness, so each is the RFC's rule and nothing
+ * near it. */
 
 // tchar: what a method, a field name and a chunk extension name may contain.
 bool is_tchar(int octet) {
@@ -535,10 +535,10 @@ bool is_token(bytes data) {
     return true;
 }
 
-// The first byte of `data` that may not appear in a field value, as an index,
-// or -1. HTAB is allowed; everything below 0x20 is not, DEL is not, and
-// bytes above 127 are -- they are answered for by the UTF-8 decode that
-// turns a value into a `str`.
+/* The first byte of `data` that may not appear in a field value, as an index,
+ * or -1. HTAB is allowed; everything below 0x20 is not, DEL is not, and
+ * bytes above 127 are -- they are answered for by the UTF-8 decode that
+ * turns a value into a `str`. */
 int bad_value_at(bytes data) {
     for (int i in 0 .. data.size()) {
         int octet = data[i];
@@ -549,9 +549,9 @@ int bad_value_at(bytes data) {
     return -1;
 }
 
-// The first byte of `data` that may not appear in a request target, or -1:
-// visible ASCII and above, so a control character or a space is refused and
-// raw UTF-8 in a path -- which clients do send -- is not.
+/* The first byte of `data` that may not appear in a request target, or -1:
+ * visible ASCII and above, so a control character or a space is refused and
+ * raw UTF-8 in a path -- which clients do send -- is not. */
 int bad_target_at(bytes data) {
     for (int i in 0 .. data.size()) {
         int octet = data[i];
@@ -591,9 +591,9 @@ str hex_of(int value) {
     return digits.join("");
 }
 
-// How a message names one byte: the character if it is printable ASCII, and
-// the hex otherwise -- a byte of a multi-byte UTF-8 character is not a
-// character on its own, and a NUL has no spelling at all.
+/* How a message names one byte: the character if it is printable ASCII, and
+ * the hex otherwise -- a byte of a multi-byte UTF-8 character is not a
+ * character on its own, and a NUL has no spelling at all. */
 str shown(int octet) {
     if (octet == 0) {
         return "a NUL byte";
@@ -612,10 +612,10 @@ str shown(int octet) {
     return "the byte 0x" + one.hex();
 }
 
-// How a message quotes a run of bytes that may not be text and may be long:
-// the text in quotes if every byte is printable ASCII and there are few
-// enough of them, and hex otherwise. An error message is written to a log,
-// and a log that echoes whatever a client sent is a log nobody can read.
+/* How a message quotes a run of bytes that may not be text and may be long:
+ * the text in quotes if every byte is printable ASCII and there are few
+ * enough of them, and hex otherwise. An error message is written to a log,
+ * and a log that echoes whatever a client sent is a log nobody can read. */
 str quoted(bytes data) {
     bytes head = data;
     str tail = "";
@@ -632,37 +632,37 @@ str quoted(bytes data) {
     return "'" + head.utf8().or("") + tail + "'";
 }
 
-// Bytes this module has already checked are printable ASCII, as text. The
-// `or` is never taken: every caller has run `is_token`, `bad_value_at` or
-// `bad_target_at` over these bytes first.
+/* Bytes this module has already checked are printable ASCII, as text. The
+ * `or` is never taken: every caller has run `is_token`, `bad_value_at` or
+ * `bad_target_at` over these bytes first. */
 str ascii(bytes data) {
     return data.utf8().or("");
 }
 
 // --- headers ---------------------------------------------------------------
-/// The field lines of one message: lowercased names, in the order they
-/// arrived or were set.
-///
-/// **Two lists and not a `Map`.** A map's iteration order is its table's and
-/// changes when it rehashes (§3.9), so a response built from a map would put
-/// its fields in a different order between runs -- which no corpus test can
-/// pin, no cache can key, and no reader of a transcript can follow. A
-/// hundred fields is the limit, so a linear scan is the right shape besides.
-///
-/// Names are folded to lowercase once, when they go in, so every lookup is a
-/// comparison and no caller has to remember which spelling arrived.
+/** The field lines of one message: lowercased names, in the order they
+ * arrived or were set.
+ *
+ * **Two lists and not a `Map`.** A map's iteration order is its table's and
+ * changes when it rehashes (§3.9), so a response built from a map would put
+ * its fields in a different order between runs -- which no corpus test can
+ * pin, no cache can key, and no reader of a transcript can follow. A
+ * hundred fields is the limit, so a linear scan is the right shape besides.
+ *
+ * Names are folded to lowercase once, when they go in, so every lookup is a
+ * comparison and no caller has to remember which spelling arrived. */
 pub type Headers {
     List<str> names;
     List<str> values;
 }
 
-/// Set `name` to `value`, replacing whatever was there.
-///
-/// The name is folded to lowercase. Nothing is checked here: a name or a
-/// value that cannot be sent is caught by `write_request` and
-/// `write_response`, which answer with an `Error` naming the field, because
-/// a header built out of a request's own data is data and not a bug in the
-/// program.
+/** Set `name` to `value`, replacing whatever was there.
+ *
+ * The name is folded to lowercase. Nothing is checked here: a name or a
+ * value that cannot be sent is caught by `write_request` and
+ * `write_response`, which answer with an `Error` naming the field, because
+ * a header built out of a request's own data is data and not a bug in the
+ * program. */
 pub void Headers.set(str name, str value) {
     str key = name.to_lower();
     match (names.index_of(key)) {
@@ -715,17 +715,17 @@ pub int Headers.size() {
     return names.size();
 }
 
-// A copy, so that a `Request` handed to a handler cannot have its fields
-// changed under the caller that built it.
+/* A copy, so that a `Request` handed to a handler cannot have its fields
+ * changed under the caller that built it. */
 Headers Headers.copy() {
     return Headers(clone(names), clone(values));
 }
 
-// The parser's door: add a field that has just been read off the wire.
-//
-// A repeat is joined with ", ", which is RFC 9110 §5.3 -- except for the
-// three fields that are not list-valued, where a repeat is refused. See the
-// module note on duplicates.
+/* The parser's door: add a field that has just been read off the wire.
+ *
+ * A repeat is joined with ", ", which is RFC 9110 §5.3 -- except for the
+ * three fields that are not list-valued, where a repeat is refused. See the
+ * module note on duplicates. */
 Result<void, Error> Headers.merge(str name, str value) {
     match (names.index_of(name)) {
         case Some(int index): {
@@ -745,11 +745,11 @@ Result<void, Error> Headers.merge(str name, str value) {
     return Result<void, Error>.Ok;
 }
 
-// Append `name: value\r\n` for every field, having checked that each can be
-// sent. This is response splitting on the way out and request splitting on
-// the way in, and it is the same check in both directions -- `kind` is in
-// the message and nowhere else, because a client told that its *request*
-// field is an illegal *response* field looks in the wrong place.
+/* Append `name: value\r\n` for every field, having checked that each can be
+ * sent. This is response splitting on the way out and request splitting on
+ * the way in, and it is the same check in both directions -- `kind` is in
+ * the message and nowhere else, because a client told that its *request*
+ * field is an illegal *response* field looks in the wrong place. */
 Result<void, Error> Headers.render(bytes out, str kind) {
     for (int i in 0 .. names.size()) {
         bytes name = names[i].to_bytes();
@@ -777,8 +777,8 @@ pub Headers headers() {
     return Headers(field_names, field_values);
 }
 
-// Whether a comma-separated field holds `token`, case-insensitively: the
-// question `Connection: keep-alive, Upgrade` is asked.
+/* Whether a comma-separated field holds `token`, case-insensitively: the
+ * question `Connection: keep-alive, Upgrade` is asked. */
 bool has_token(Option<str> field, str token) {
     match (field) {
         case Some(str field_value): {
@@ -796,23 +796,23 @@ bool has_token(Option<str> field, str token) {
 }
 
 // --- percent-encoding ------------------------------------------------------
-// RFC 3986 §2.3's unreserved set, written out rather than assembled because
-// it is a quotation: a reader checking this against the RFC should read the
-// same sixty-six characters in both places.
+/* RFC 3986 §2.3's unreserved set, written out rather than assembled because
+ * it is a quotation: a reader checking this against the RFC should read the
+ * same sixty-six characters in both places. */
 const str UNRESERVED = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
 
-/// `text` with every octet outside the unreserved set, and outside `safe`,
-/// written as `%HH`.
-///
-/// `safe` is the extra characters to leave alone, and it differs by where
-/// the text is going: `"/"` for a path, `""` for one query value, and a
-/// caller who wants `?q=a&b` -- a value containing an `&` -- must say
-/// `quote(v, safe: "")` and get it right. The unreserved characters are
-/// never escaped whatever `safe` says: `%41` and `A` name the same
-/// character, so an encoder that escapes what it need not is an encoder
-/// whose output nobody can compare.
-///
-/// The digits are uppercase, which RFC 3986 §6.2.2.1 says to prefer.
+/** `text` with every octet outside the unreserved set, and outside `safe`,
+ * written as `%HH`.
+ *
+ * `safe` is the extra characters to leave alone, and it differs by where
+ * the text is going: `"/"` for a path, `""` for one query value, and a
+ * caller who wants `?q=a&b` -- a value containing an `&` -- must say
+ * `quote(v, safe: "")` and get it right. The unreserved characters are
+ * never escaped whatever `safe` says: `%41` and `A` name the same
+ * character, so an encoder that escapes what it need not is an encoder
+ * whose output nobody can compare.
+ *
+ * The digits are uppercase, which RFC 3986 §6.2.2.1 says to prefer. */
 pub str quote(str text, str safe = "/") {
     List<str> out = [];
     for (int octet in text.to_bytes()) {
@@ -830,18 +830,18 @@ pub str quote(str text, str safe = "/") {
     return out.join("");
 }
 
-/// The text `text` spells with its `%HH` escapes decoded.
-///
-/// `plus: true` also reads `+` as a space, which is the form a query string
-/// and an HTML form body use and a path does not. It is a flag on the one
-/// operation rather than a second name because it is one decoder with one
-/// extra byte mapped.
-///
-/// **A malformed escape is an error, not a literal `%`.** A `%` that is not
-/// followed by two hex digits means the text was built by something that did
-/// not encode it, and reading it through unchanged is how two readers
-/// disagree about what a path was. Escapes that spell bytes which are not
-/// UTF-8 are refused too, because the answer is a `str`.
+/** The text `text` spells with its `%HH` escapes decoded.
+ *
+ * `plus: true` also reads `+` as a space, which is the form a query string
+ * and an HTML form body use and a path does not. It is a flag on the one
+ * operation rather than a second name because it is one decoder with one
+ * extra byte mapped.
+ *
+ * **A malformed escape is an error, not a literal `%`.** A `%` that is not
+ * followed by two hex digits means the text was built by something that did
+ * not encode it, and reading it through unchanged is how two readers
+ * disagree about what a path was. Escapes that spell bytes which are not
+ * UTF-8 are refused too, because the answer is a `str`. */
 pub Result<str, Error> unquote(str text, bool should_decode_plus = false) {
     bytes raw = pct_decode(text.to_bytes(), should_decode_plus, "the text")?;
     match (raw.utf8()) {
@@ -854,8 +854,8 @@ pub Result<str, Error> unquote(str text, bool should_decode_plus = false) {
     }
 }
 
-// The octets `encoded` spells. `where` names the part of the message in the error,
-// so "the request target" and "the URL" say which.
+/* The octets `encoded` spells. `where` names the part of the message in the error,
+ * so "the request target" and "the URL" say which. */
 Result<bytes, Error> pct_decode(bytes encoded, bool is_plus, str where) {
     bytes out = [];
     int index = 0;
@@ -885,11 +885,11 @@ Result<bytes, Error> pct_decode(bytes encoded, bool is_plus, str where) {
 }
 
 // --- URLs ------------------------------------------------------------------
-/// An absolute `http://` or `https://` URL, taken apart.
-///
-/// Made by `parse_url`, or by this module out of a request's target and its
-/// `Host` field -- which is why a `Request` read off a socket answers
-/// `url()` with the URL the client asked for, and not only with a path.
+/** An absolute `http://` or `https://` URL, taken apart.
+ *
+ * Made by `parse_url`, or by this module out of a request's target and its
+ * `Host` field -- which is why a `Request` read off a socket answers
+ * `url()` with the URL the client asked for, and not only with a path. */
 pub type Url {
     str sch;
     str hst;
@@ -909,43 +909,43 @@ pub str Url.host() {
     return hst;
 }
 
-/// The port, filled in with 80 (`http`) or 443 (`https`) when the URL did
-/// not say.
+/** The port, filled in with 80 (`http`) or 443 (`https`) when the URL did
+ * not say. */
 pub int Url.port() {
     return prt;
 }
 
-/// The path, **percent-decoded**, and never empty -- a URL with no path has
-/// the path `/`.
-///
-/// Decoding is what a router wants and it loses one distinction: `%2F` comes
-/// out as `/`, so `/a%2Fb` and `/a/b` have the same `path()`. That is the
-/// same answer Oro's `std/http.oro` gives and the same one `urllib` gives,
-/// and it is stated here rather than left to be discovered, because a router
-/// for which the difference matters must read `target()`, which is the
-/// escapes exactly as they arrived.
+/** The path, **percent-decoded**, and never empty -- a URL with no path has
+ * the path `/`.
+ *
+ * Decoding is what a router wants and it loses one distinction: `%2F` comes
+ * out as `/`, so `/a%2Fb` and `/a/b` have the same `path()`. That is the
+ * same answer Oro's `std/http.oro` gives and the same one `urllib` gives,
+ * and it is stated here rather than left to be discovered, because a router
+ * for which the difference matters must read `target()`, which is the
+ * escapes exactly as they arrived. */
 pub str Url.path() {
     return pth;
 }
 
-/// Everything after the first `?`, **not** decoded: splitting a query into
-/// pairs is the caller's, because only the caller knows whether a `;` is a
-/// separator and whether a `+` is a space. `unquote(v, plus: true)` is the
-/// other half.
+/** Everything after the first `?`, **not** decoded: splitting a query into
+ * pairs is the caller's, because only the caller knows whether a `;` is a
+ * separator and whether a `+` is a space. `unquote(v, plus: true)` is the
+ * other half. */
 pub str Url.query() {
     return qry;
 }
 
-/// The request target, byte for byte as it will be sent: the path and query
-/// exactly as they were written, with their escapes intact.
+/** The request target, byte for byte as it will be sent: the path and query
+ * exactly as they were written, with their escapes intact. */
 pub str Url.target() {
     return tgt;
 }
 
-/// The form the `Host` field wants: the authority with the default port left
-/// off, because RFC 9110 says a client should omit it and a server that
-/// virtual-hosts on the field should see `example.com` and not
-/// `example.com:80`. An IPv6 literal is bracketed.
+/** The form the `Host` field wants: the authority with the default port left
+ * off, because RFC 9110 says a client should omit it and a server that
+ * virtual-hosts on the field should see `example.com` and not
+ * `example.com:80`. An IPv6 literal is bracketed. */
 pub str Url.host_header() {
     if (prt == default_port(sch)) {
         return bracket(hst);
@@ -953,12 +953,12 @@ pub str Url.host_header() {
     return bracket(hst) + ":" + prt.to_str();
 }
 
-/// The URL as text, which `parse_url` reads back.
-///
-/// The asterisk target has no URL form -- `OPTIONS *` asks about the server
-/// and not about a resource -- so it prints as the authority alone. An
-/// HTTP/1.0 request that sent no `Host` has no authority either, and prints
-/// as its target alone, which is all that was ever said about where it went.
+/** The URL as text, which `parse_url` reads back.
+ *
+ * The asterisk target has no URL form -- `OPTIONS *` asks about the server
+ * and not about a resource -- so it prints as the authority alone. An
+ * HTTP/1.0 request that sent no `Host` has no authority either, and prints
+ * as its target alone, which is all that was ever said about where it went. */
 pub str Url.to_str() {
     if (hst == "") {
         return tgt;
@@ -977,9 +977,9 @@ int default_port(str scheme) {
     return DEFAULT_PORT;
 }
 
-// The index of the first byte of `data` that is `first_needle` or `second_needle`, or -1. Two needles
-// and not `index_of` twice, because the answer is the earlier of the two and
-// finding both to compare them walks the string again.
+/* The index of the first byte of `data` that is `first_needle` or `second_needle`, or -1. Two needles
+ * and not `index_of` twice, because the answer is the earlier of the two and
+ * finding both to compare them walks the string again. */
 int first_of(bytes data, int first_needle, int second_needle) {
     for (int i in 0 .. data.size()) {
         if (data[i] == first_needle || data[i] == second_needle) {
@@ -989,8 +989,8 @@ int first_of(bytes data, int first_needle, int second_needle) {
     return -1;
 }
 
-// An IPv6 literal is nothing but colons, so it is bracketed everywhere it is
-// written next to a port -- which is what `net.Addr.to_str` does too.
+/* An IPv6 literal is nothing but colons, so it is bracketed everywhere it is
+ * written next to a port -- which is what `net.Addr.to_str` does too. */
 str bracket(str host) {
     if (host.contains(":")) {
         return "[" + host + "]";
@@ -998,26 +998,26 @@ str bracket(str host) {
     return host;
 }
 
-/// Parse an absolute `http://` or `https://` URL.
-///
-///     http.parse_url("http://example.com:8080/a/b?x=1#frag")
-///
-/// A relative URL is refused: a client with no base to resolve against
-/// cannot make one absolute, and guessing a scheme is how a request goes
-/// somewhere nobody asked for. A fragment is parsed and dropped -- it names
-/// a place in the answer and RFC 9110 says it is never sent.
-///
-/// **`https://` is spoken over TLS, and never quietly downgraded.** Whether
-/// a URL is `http` or `https` is kept on the `Url` and decides, in `fetch`,
-/// whether the request is written to the socket or to a verified TLS
-/// connection over it. The failure this module exists to prevent is the
-/// quiet one: a plaintext connection to port 443, or a certificate nobody
-/// checked, carrying a credential the caller believed was private. So there
-/// is no scheme guessing, no `http` retry after an `https` failure, and no
-/// way to switch verification off.
-///
-/// Userinfo before the host (`http://user:pw@host/`) is refused: RFC 9110
-/// deprecates it and this client will not send it.
+/** Parse an absolute `http://` or `https://` URL.
+ *
+ *     http.parse_url("http://example.com:8080/a/b?x=1#frag")
+ *
+ * A relative URL is refused: a client with no base to resolve against
+ * cannot make one absolute, and guessing a scheme is how a request goes
+ * somewhere nobody asked for. A fragment is parsed and dropped -- it names
+ * a place in the answer and RFC 9110 says it is never sent.
+ *
+ * **`https://` is spoken over TLS, and never quietly downgraded.** Whether
+ * a URL is `http` or `https` is kept on the `Url` and decides, in `fetch`,
+ * whether the request is written to the socket or to a verified TLS
+ * connection over it. The failure this module exists to prevent is the
+ * quiet one: a plaintext connection to port 443, or a certificate nobody
+ * checked, carrying a credential the caller believed was private. So there
+ * is no scheme guessing, no `http` retry after an `https` failure, and no
+ * way to switch verification off.
+ *
+ * Userinfo before the host (`http://user:pw@host/`) is refused: RFC 9110
+ * deprecates it and this client will not send it. */
 pub Result<Url, Error> parse_url(str url) {
     bytes url_bytes = url.to_bytes();
     match (url_bytes.index_of("://".to_bytes())) {
@@ -1036,8 +1036,8 @@ Result<Url, Error> after_scheme(str url, bytes url_bytes, int sep) {
         return Result<Url, Error>.Err(Error.BadUrl);
     }
     bytes rest = url_bytes.substr(sep + 3, url_bytes.size());
-    // The fragment is cut before anything else looks at the bytes, so a `#`
-    // cannot be mistaken for part of a query.
+    /* The fragment is cut before anything else looks at the bytes, so a `#`
+     * cannot be mistaken for part of a query. */
     match (rest.index_of(HASH1)) {
         case Some(int hash_index): {
             rest = rest.substr(0, hash_index);
@@ -1045,10 +1045,10 @@ Result<Url, Error> after_scheme(str url, bytes url_bytes, int sep) {
         case None: {
         }
     }
-    // The authority ends at the first `/` or `?` (RFC 3986 §3.2), so
-    // `http://host?q=1` is a host and a query and not a host with a question
-    // mark in its name -- which is what `urlsplit` answers too. A URL with no
-    // path at all gets `/`, because that is the target that will be sent.
+    /* The authority ends at the first `/` or `?` (RFC 3986 §3.2), so
+     * `http://host?q=1` is a host and a query and not a host with a question
+     * mark in its name -- which is what `urlsplit` answers too. A URL with no
+     * path at all gets `/`, because that is the target that will be sent. */
     bytes authority = rest;
     bytes target = "/".to_bytes();
     int cut = first_of(rest, 47, 63);
@@ -1072,11 +1072,11 @@ Result<Url, Error> after_scheme(str url, bytes url_bytes, int sep) {
     return url_of(scheme, host_and_port[0], host_and_port[1].parse_int().or(fallback), target, quoted(url_bytes));
 }
 
-// Build a `Url` out of a host, a port and a target. Shared by `parse_url` and
-// by the server's request reader, because the two differ only in where the
-// authority came from -- a URL says it, a request puts it in `Host`, and an
-// HTTP/1.0 request may not say at all, which is the one case where the host
-// is empty.
+/* Build a `Url` out of a host, a port and a target. Shared by `parse_url` and
+ * by the server's request reader, because the two differ only in where the
+ * authority came from -- a URL says it, a request puts it in `Host`, and an
+ * HTTP/1.0 request may not say at all, which is the one case where the host
+ * is empty. */
 Result<Url, Error> url_of(str scheme, str host, int port, bytes target, str what) {
     str path = ascii(target);
     str query = "";
@@ -1102,11 +1102,11 @@ Result<Url, Error> url_of(str scheme, str host, int port, bytes target, str what
     return Result<Url, Error>.Ok(Url(scheme, host, port, path, query, ascii(target)));
 }
 
-// `host`, `host:port`, `[::1]` or `[::1]:port`, as a two-element list of the
-// host and the port in decimal. The scan for the port's colon starts after
-// the closing bracket, for the reason `net`'s own does: an IPv6 literal is
-// nothing but colons, and the last one before the bracket is not a port
-// separator. A list rather than two returns, which the language has not got.
+/* `host`, `host:port`, `[::1]` or `[::1]:port`, as a two-element list of the
+ * host and the port in decimal. The scan for the port's colon starts after
+ * the closing bracket, for the reason `net`'s own does: an IPv6 literal is
+ * nothing but colons, and the last one before the bracket is not a port
+ * separator. A list rather than two returns, which the language has not got. */
 Result<List<str>, Error> split_host_port(bytes authority, str what, int fallback) {
     if (authority.size() == 0) {
         return Result<List<str>, Error>.Err(Error.BadUrl);
@@ -1165,14 +1165,14 @@ Result<List<str>, Error> split_host_port(bytes authority, str what, int fallback
 }
 
 // --- status reasons --------------------------------------------------------
-// The codes this module has a phrase for. A constant `Map<int, str>` is
-// static data laid out by the compiler (§4.5), so this costs nothing at run
-// time. Anything else gets the class's name, which is what RFC 9110 says a
-// recipient should fall back to.
+/* The codes this module has a phrase for. A constant `Map<int, str>` is
+ * static data laid out by the compiler (§4.5), so this costs nothing at run
+ * time. Anything else gets the class's name, which is what RFC 9110 says a
+ * recipient should fall back to. */
 const Map<int, str> REASONS = {100: "Continue", 101: "Switching Protocols", 200: "OK", 201: "Created", 202: "Accepted", 203: "Non-Authoritative Information", 204: "No Content", 205: "Reset Content", 206: "Partial Content", 300: "Multiple Choices", 301: "Moved Permanently", 302: "Found", 303: "See Other", 304: "Not Modified", 307: "Temporary Redirect", 308: "Permanent Redirect", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed", 406: "Not Acceptable", 408: "Request Timeout", 409: "Conflict", 410: "Gone", 411: "Length Required", 412: "Precondition Failed", 413: "Content Too Large", 414: "URI Too Long", 415: "Unsupported Media Type", 416: "Range Not Satisfiable", 417: "Expectation Failed", 418: "I'm a teapot", 421: "Misdirected Request", 422: "Unprocessable Content", 426: "Upgrade Required", 428: "Precondition Required", 429: "Too Many Requests", 431: "Request Header Fields Too Large", 451: "Unavailable For Legal Reasons", 500: "Internal Server Error", 501: "Not Implemented", 502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout", 505: "HTTP Version Not Supported"};
 
-/// The reason phrase for a status code: the registered one, or the name of
-/// its class.
+/** The reason phrase for a status code: the registered one, or the name of
+ * its class. */
 pub str reason(int status) {
     match (REASONS.get(status)) {
         case Some(str phrase_text): {
@@ -1196,21 +1196,21 @@ pub str reason(int status) {
     return "Server Error";
 }
 
-// 1xx, 204 and 304 have no body and no framing fields, ever. A
-// Content-Length on a 304 is a real interoperability bug and not a harmless
-// one: a client that believes it goes looking for a body that is not coming.
+/* 1xx, 204 and 304 have no body and no framing fields, ever. A
+ * Content-Length on a 304 is a real interoperability bug and not a harmless
+ * one: a client that believes it goes looking for a body that is not coming. */
 bool is_bodiless(int status) {
     return status >= 100 && status < 200 || status == 204 || status == 304;
 }
 
 // --- requests --------------------------------------------------------------
-/// One request, in either direction: the one a client is about to send, and
-/// the one a server has just read.
-///
-/// It carries a whole `Url` rather than a bare target, so a handler can ask
-/// `req.url().host()` without going back to the `Host` field, and a client's
-/// redirect logic has somewhere to resolve against. A request read off a
-/// socket gets its URL from its target and its `Host`.
+/** One request, in either direction: the one a client is about to send, and
+ * the one a server has just read.
+ *
+ * It carries a whole `Url` rather than a bare target, so a handler can ask
+ * `req.url().host()` without going back to the `Host` field, and a client's
+ * redirect logic has somewhere to resolve against. A request read off a
+ * socket gets its URL from its target and its `Host`. */
 pub type Request {
     str verb;
     Url loc;
@@ -1220,8 +1220,8 @@ pub type Request {
     bool is_framed = false;
 }
 
-/// The method, as it was written: `"GET"`, `"POST"`. HTTP methods are
-/// case-sensitive, so nothing is folded.
+/** The method, as it was written: `"GET"`, `"POST"`. HTTP methods are
+ * case-sensitive, so nothing is folded. */
 pub str Request.method() {
     return verb;
 }
@@ -1231,8 +1231,8 @@ pub Url Request.url() {
     return loc;
 }
 
-/// The percent-decoded path -- `loc.path()`, which is what a handler routes
-/// on.
+/** The percent-decoded path -- `loc.path()`, which is what a handler routes
+ * on. */
 pub str Request.path() {
     return loc.path();
 }
@@ -1287,20 +1287,20 @@ pub void Request.set_text(str content) {
     payload = content.to_bytes();
 }
 
-/// Send this body with `Transfer-Encoding: chunked` instead of a
-/// `Content-Length`.
-///
-/// The body is still held whole in memory, so this buys nothing in space; it
-/// is a **framing choice**, for a peer that wants chunks and for the tests
-/// that drive the decoder. A streaming body -- the thing chunked framing
-/// exists for -- is not in this module; see the module note.
+/** Send this body with `Transfer-Encoding: chunked` instead of a
+ * `Content-Length`.
+ *
+ * The body is still held whole in memory, so this buys nothing in space; it
+ * is a **framing choice**, for a peer that wants chunks and for the tests
+ * that drive the decoder. A streaming body -- the thing chunked framing
+ * exists for -- is not in this module; see the module note. */
 pub void Request.set_chunked(bool is_chunked) {
     is_framed = is_chunked;
 }
 
-/// Send `"1.0"` or `"1.1"` on the request line. Anything else traps: it is
-/// the program's own value, and there is no other version this module can
-/// speak.
+/** Send `"1.0"` or `"1.1"` on the request line. Anything else traps: it is
+ * the program's own value, and there is no other version this module can
+ * speak. */
 pub void Request.set_version(str version_text) {
     if (version_text != "1.0" && version_text != "1.1") {
         trap("set_version(" + version_text + "): this module speaks HTTP/1.0 and HTTP/1.1");
@@ -1308,13 +1308,13 @@ pub void Request.set_version(str version_text) {
     ver = version_text;
 }
 
-/// A request to send: the method, and an absolute `http://` or `https://` URL.
-///
-///     http.request("GET", "http://127.0.0.1:8080/health")
-///
-/// The version is 1.1 and the body is empty; `set_body`, `set_text` and
-/// `set` fill in the rest. A method that is not a token is refused here
-/// rather than at the write, so a typo does not reach a socket.
+/** A request to send: the method, and an absolute `http://` or `https://` URL.
+ *
+ *     http.request("GET", "http://127.0.0.1:8080/health")
+ *
+ * The version is 1.1 and the body is empty; `set_body`, `set_text` and
+ * `set` fill in the rest. A method that is not a token is refused here
+ * rather than at the write, so a typo does not reach a socket. */
 pub Result<Request, Error> request(str method, str url) {
     if (!is_token(method.to_bytes())) {
         return Result<Request, Error>.Err(Error.Syntax);
@@ -1324,8 +1324,8 @@ pub Result<Request, Error> request(str method, str url) {
 }
 
 // --- responses -------------------------------------------------------------
-/// One response: the one a handler is building, and the one a client has
-/// just read.
+/** One response: the one a handler is building, and the one a client has
+ * just read. */
 pub type Response {
     int code;
     str phrase;
@@ -1340,8 +1340,8 @@ pub int Response.status() {
     return code;
 }
 
-/// The reason phrase: the peer's when this was read off a socket, and the
-/// registered one otherwise.
+/** The reason phrase: the peer's when this was read off a socket, and the
+ * registered one otherwise. */
 pub str Response.reason() {
     return phrase;
 }
@@ -1366,23 +1366,23 @@ pub bytes Response.body() {
     return clone(payload);
 }
 
-/// The body as text, or `Err(Syntax(..))` if it is not UTF-8.
-///
-/// It does **not** look at `Content-Type`: a charset in a header is what the
-/// peer claims, and what the bytes are is what `utf8()` says. A body that
-/// is not UTF-8 is refused rather than repaired, for the reason
-/// `bytes.utf8()` gives (§3.10).
+/** The body as text, or `Err(Syntax(..))` if it is not UTF-8.
+ *
+ * It does **not** look at `Content-Type`: a charset in a header is what the
+ * peer claims, and what the bytes are is what `utf8()` says. A body that
+ * is not UTF-8 is refused rather than repaired, for the reason
+ * `bytes.utf8()` gives (§3.10). */
 pub Result<str, Error> Response.text() {
     return utf8_of(payload, "the response body");
 }
 
-/// The body, parsed as JSON.
-///
-/// It composes with `lib/encoding/json.m31` at the one place they meet: the body is
-/// decoded as UTF-8 first, because `json.parse` takes a `str` and RFC 8259
-/// requires the document to be UTF-8, and a parse failure comes back as
-/// `Syntax` carrying `json.Error`'s own sentence -- which already names the
-/// byte position.
+/** The body, parsed as JSON.
+ *
+ * It composes with `lib/encoding/json.m31` at the one place they meet: the body is
+ * decoded as UTF-8 first, because `json.parse` takes a `str` and RFC 8259
+ * requires the document to be UTF-8, and a parse failure comes back as
+ * `Syntax` carrying `json.Error`'s own sentence -- which already names the
+ * byte position. */
 pub Result<json.Value, Error> Response.json() {
     return json_of(payload, "the response body");
 }
@@ -1402,8 +1402,8 @@ pub void Response.set_text(str content) {
     payload = content.to_bytes();
 }
 
-/// Write this body as chunks rather than with a `Content-Length`. See
-/// `Request.set_chunked`: it is a framing choice, not a streaming one.
+/** Write this body as chunks rather than with a `Content-Length`. See
+ * `Request.set_chunked`: it is a framing choice, not a streaming one. */
 pub void Response.set_chunked(bool is_chunked) {
     is_framed = is_chunked;
 }
@@ -1413,10 +1413,10 @@ pub void Response.set_reason(str reason_text) {
     phrase = reason_text;
 }
 
-/// An empty response with this status and the registered reason phrase.
-///
-/// A status outside 100..599 traps: it is the program's own number, and
-/// there is no status line to write for it.
+/** An empty response with this status and the registered reason phrase.
+ *
+ * A status outside 100..599 traps: it is the program's own number, and
+ * there is no status line to write for it. */
 pub Response response(int status) {
     if (status < 100 || status > 599) {
         trap("response(" + status.to_str() + "): a status is 100..599");
@@ -1432,10 +1432,10 @@ pub Response text_response(str body, int status = 200) {
     return reply;
 }
 
-/// An `application/json` response carrying `value`.
-///
-/// It is a `Result` because `json.stringify` is: a NaN, an infinity and a
-/// value that contains itself have no JSON spelling.
+/** An `application/json` response carrying `value`.
+ *
+ * It is a `Result` because `json.stringify` is: a NaN, an infinity and a
+ * value that contains itself have no JSON spelling. */
 pub Result<Response, Error> json_response(json.Value value, int status = 200) {
     match (json.stringify(value)) {
         case Ok(str text): {
@@ -1474,8 +1474,8 @@ Result<json.Value, Error> json_of(bytes data, str what) {
 }
 
 // --- reading a message head ------------------------------------------------
-// The header block, up to and including the blank line, or an empty `bytes`
-// if the stream was at a clean end before anything arrived.
+/* The header block, up to and including the blank line, or an empty `bytes`
+ * if the stream was at a clean end before anything arrived. */
 Result<bytes, Error> read_head(io.Stream stream) {
     match (stream.read_until(CRLF2, MAX_HEAD)) {
         case Ok(bytes raw): {
@@ -1493,10 +1493,10 @@ Result<bytes, Error> read_head(io.Stream stream) {
     }
 }
 
-// The head's lines, without the blank one that ends it. A bare CR or LF
-// inside any of them is refused: the block was split on CRLF, so a lone LF
-// would leave a line this parser and the next one disagree about, which is
-// the whole of request smuggling.
+/* The head's lines, without the blank one that ends it. A bare CR or LF
+ * inside any of them is refused: the block was split on CRLF, so a lone LF
+ * would leave a line this parser and the next one disagree about, which is
+ * the whole of request smuggling. */
 Result<List<bytes>, Error> head_lines(bytes raw) {
     List<bytes> lines = raw.substr(0, raw.size() - 4).split(CRLF);
     for (int i in 0 .. lines.size()) {
@@ -1524,9 +1524,9 @@ Result<Headers, Error> parse_headers(List<bytes> lines, int from) {
         bytes line = lines[line_index];
         line_index = line_index + 1;
         if (line.size() == 0) {
-            // The block is split on CRLF, so an empty line inside it is a
-            // message that ended and then went on -- which the read above
-            // cannot produce, and which is refused rather than ignored.
+            /* The block is split on CRLF, so an empty line inside it is a
+             * message that ended and then went on -- which the read above
+             * cannot produce, and which is refused rather than ignored. */
             return Result<Headers, Error>.Err(Error.Syntax);
         }
         if (line[0] == SPACE || line[0] == HTAB) {
@@ -1563,8 +1563,8 @@ Result<void, Error> parse_header_line(Headers fields, bytes line) {
     if (badv >= 0) {
         return Result<void, Error>.Err(Error.Syntax);
     }
-    // Only SP and HTAB can be here now, so `trim` is exactly the optional
-    // whitespace RFC 9110 puts either side of a field value.
+    /* Only SP and HTAB can be here now, so `trim` is exactly the optional
+     * whitespace RFC 9110 puts either side of a field value. */
     bytes trimmed = value.trim();
     match (trimmed.utf8()) {
         case Some(str field_value): {
@@ -1577,10 +1577,10 @@ Result<void, Error> parse_header_line(Headers fields, bytes line) {
 }
 
 // --- bodies ----------------------------------------------------------------
-// Exactly `byte_count` bytes. A stream that ends first is the peer having declared a
-// length it did not send, which is a lie and not a short answer: on the way
-// in it desynchronises the connection, and on the way out it is the JSON
-// document the caller is about to parse with half of it missing.
+/* Exactly `byte_count` bytes. A stream that ends first is the peer having declared a
+ * length it did not send, which is a lie and not a short answer: on the way
+ * in it desynchronises the connection, and on the way out it is the JSON
+ * document the caller is about to parse with half of it missing. */
 Result<bytes, Error> read_exact(io.Stream stream, int byte_count, str what) {
     bytes out = [];
     while (out.size() < byte_count) {
@@ -1642,13 +1642,13 @@ Result<bytes, Error> read_line(io.Stream stream, int limit, str what) {
     }
 }
 
-/// A `Transfer-Encoding: chunked` body, decoded.
-///
-/// A size line, that many bytes, a CRLF, and round again; a size of zero
-/// ends it and is followed by the trailer fields, which are read and
-/// discarded. Chunk extensions after a `;` are skipped. `limit` bounds the
-/// decoded body, because a chunked body declares no total and a peer that
-/// keeps sending chunks is otherwise a request for all of memory.
+/** A `Transfer-Encoding: chunked` body, decoded.
+ *
+ * A size line, that many bytes, a CRLF, and round again; a size of zero
+ * ends it and is followed by the trailer fields, which are read and
+ * discarded. Chunk extensions after a `;` are skipped. `limit` bounds the
+ * decoded body, because a chunked body declares no total and a peer that
+ * keeps sending chunks is otherwise a request for all of memory. */
 Result<bytes, Error> read_chunked(io.Stream stream, int limit) {
     bytes out = [];
     while (true) {
@@ -1669,9 +1669,9 @@ Result<bytes, Error> read_chunked(io.Stream stream, int limit) {
     }
 }
 
-// A chunk size line: hex digits, then optional `;ext=...` this module
-// ignores. No surrounding whitespace is tolerated -- RFC 9112 does not put
-// any there, and a decoder that strips it is one a smuggler can aim.
+/* A chunk size line: hex digits, then optional `;ext=...` this module
+ * ignores. No surrounding whitespace is tolerated -- RFC 9112 does not put
+ * any there, and a decoder that strips it is one a smuggler can aim. */
 Result<int, Error> chunk_size(bytes line) {
     bytes digits = line;
     match (line.index_of(SEMI1)) {
@@ -1684,11 +1684,11 @@ Result<int, Error> chunk_size(bytes line) {
     if (digits.size() == 0) {
         return Result<int, Error>.Err(Error.Syntax);
     }
-    // Fifteen hex digits, and not sixteen, because the multiply below **traps
-    // on overflow** (§6.1) and sixteen digits reach 2^64-1, which an `int`
-    // cannot hold. Fifteen reach 2^60-1, a thousand times the largest body
-    // this module will assemble, so nothing legitimate is refused and a
-    // hostile size is an error value rather than a dead process.
+    /* Fifteen hex digits, and not sixteen, because the multiply below **traps
+     * on overflow** (§6.1) and sixteen digits reach 2^64-1, which an `int`
+     * cannot hold. Fifteen reach 2^60-1, a thousand times the largest body
+     * this module will assemble, so nothing legitimate is refused and a
+     * hostile size is an error value rather than a dead process. */
     if (digits.size() > 15) {
         return Result<int, Error>.Err(Error.Syntax);
     }
@@ -1703,11 +1703,11 @@ Result<int, Error> chunk_size(bytes line) {
     return Result<int, Error>.Ok(total);
 }
 
-// Trailer fields are read and discarded. Acting on a field that arrives
-// after the body has already been handed to the application is a decision
-// this module has no standing to make -- and a trailer that could change
-// what the body meant is exactly the thing a cache in front of it would not
-// have seen.
+/* Trailer fields are read and discarded. Acting on a field that arrives
+ * after the body has already been handed to the application is a decision
+ * this module has no standing to make -- and a trailer that could change
+ * what the body meant is exactly the thing a cache in front of it would not
+ * have seen. */
 Result<void, Error> skip_trailer(io.Stream stream) {
     int count = 0;
     while (true) {
@@ -1722,18 +1722,18 @@ Result<void, Error> skip_trailer(io.Stream stream) {
     }
 }
 
-// A `Content-Length` value: a non-empty run of ASCII digits and nothing
-// else. That one rule refuses `+5`, `0x5`, ` 5`, `5 ` and the `5, 5` that a
-// duplicated field would have been joined into.
+/* A `Content-Length` value: a non-empty run of ASCII digits and nothing
+ * else. That one rule refuses `+5`, `0x5`, ` 5`, `5 ` and the `5, 5` that a
+ * duplicated field would have been joined into. */
 Result<int, Error> content_length(str text) {
     bytes digits = text.to_bytes();
     if (digits.size() == 0) {
         return Result<int, Error>.Err(Error.Syntax);
     }
-    // Eighteen digits and not nineteen: nineteen can spell a number an `int`
-    // cannot hold, and `parse_int` would answer `None` -- which an `or(0)`
-    // would turn into "no body", the one wrong answer available. Eighteen
-    // digits is 10^18, thirty billion times `MAX_BODY`.
+    /* Eighteen digits and not nineteen: nineteen can spell a number an `int`
+     * cannot hold, and `parse_int` would answer `None` -- which an `or(0)`
+     * would turn into "no body", the one wrong answer available. Eighteen
+     * digits is 10^18, thirty billion times `MAX_BODY`. */
     if (digits.size() > 18) {
         return Result<int, Error>.Err(Error.Syntax);
     }
@@ -1752,17 +1752,17 @@ Result<int, Error> content_length(str text) {
     }
 }
 
-// Which of the two framing fields is in force, and what they agree on.
-// Answers -2 for chunked, -1 for "no body at all", and a length otherwise.
-//
-// A message carrying both is refused rather than resolved. That ambiguity is
-// the classic request-smuggling vector: whichever this end picks, some proxy
-// in front of it picks the other, and the disagreement is an injected
-// message.
-//
-// `limit` bounds a declared length, for a body that is about to be held in
-// memory; a streamed body passes -1, because its reader decides how much to
-// take and a length is not a request for memory.
+/* Which of the two framing fields is in force, and what they agree on.
+ * Answers -2 for chunked, -1 for "no body at all", and a length otherwise.
+ *
+ * A message carrying both is refused rather than resolved. That ambiguity is
+ * the classic request-smuggling vector: whichever this end picks, some proxy
+ * in front of it picks the other, and the disagreement is an injected
+ * message.
+ *
+ * `limit` bounds a declared length, for a body that is about to be held in
+ * memory; a streamed body passes -1, because its reader decides how much to
+ * take and a length is not a request for memory. */
 Result<int, Error> framing(Headers fields, int limit) {
     match (fields.get("transfer-encoding")) {
         case Some(str transfer_coding): {
@@ -1792,15 +1792,15 @@ Result<int, Error> framing(Headers fields, int limit) {
 }
 
 // --- reading a request -----------------------------------------------------
-/// The next request on `stream`, or `None` at a clean end -- the peer closed
-/// between messages, which on a kept-alive connection is how it says it is
-/// finished.
-///
-/// The body is read here, whole, so the request handed on is a value and the
-/// stream is positioned at the next message. A request with neither framing
-/// field has **no body**: not "read until the end", which on a kept-alive
-/// connection would read the next request as this one's body -- the same
-/// smuggling bug from the other direction.
+/** The next request on `stream`, or `None` at a clean end -- the peer closed
+ * between messages, which on a kept-alive connection is how it says it is
+ * finished.
+ *
+ * The body is read here, whole, so the request handed on is a value and the
+ * stream is positioned at the next message. A request with neither framing
+ * field has **no body**: not "read until the end", which on a kept-alive
+ * connection would read the next request as this one's body -- the same
+ * smuggling bug from the other direction. */
 pub Result<Option<Request>, Error> read_request(io.Stream stream) {
     match (read_request_head(stream)?) {
         case None: {
@@ -1818,9 +1818,9 @@ pub Result<Option<Request>, Error> read_request(io.Stream stream) {
     }
 }
 
-// The request line and fields, checked, with the body left on the stream:
-// what `read_request` and `read_request_stream` share, so a streamed request
-// is refused for exactly what a buffered one is.
+/* The request line and fields, checked, with the body left on the stream:
+ * what `read_request` and `read_request_stream` share, so a streamed request
+ * is refused for exactly what a buffered one is. */
 Result<Option<Request>, Error> read_request_head(io.Stream stream) {
     bytes raw = read_head(stream)?;
     if (raw.size() == 0) {
@@ -1836,9 +1836,9 @@ Result<Option<Request>, Error> read_request_head(io.Stream stream) {
             host = host_text;
         }
         case None: {
-            // RFC 9112 requires it of 1.1, and a virtual host that guesses is
-            // a virtual host that can be aimed. A 1.0 request may leave it
-            // out, and then the URL has no host.
+            /* RFC 9112 requires it of 1.1, and a virtual host that guesses is
+             * a virtual host that can be aimed. A 1.0 request may leave it
+             * out, and then the URL has no host. */
             if (version == "1.1") {
                 return Result<Option<Request>, Error>.Err(Error.Syntax);
             }
@@ -1849,20 +1849,20 @@ Result<Option<Request>, Error> read_request_head(io.Stream stream) {
     return Result<Option<Request>, Error>.Ok(Option<Request>.Some(http_request));
 }
 
-/// A request whose head has been read and whose body has not: the server's
-/// side of `BodyStream`. The body comes out of `read` a piece at a time, so an
-/// upload need not be held in memory, and it has **no ceiling** -- not
-/// `MAX_BODY`, not a declared `Content-Length` -- because the caller decides
-/// how much to take.
-///
-/// The head is checked exactly as `read_request` checks it, and the framing
-/// rules are the request's: neither framing field means no body.
-///
-/// **The caller owns the connection's position.** A request whose body was
-/// not read to the end leaves the stream part way through it, and the next
-/// request cannot be read from there: either read to the end (`is_finished`)
-/// or close the connection. `start_response` cannot know, so it does not
-/// decide; `BodyWriter.is_keep_alive` is the caller's answer to give.
+/** A request whose head has been read and whose body has not: the server's
+ * side of `BodyStream`. The body comes out of `read` a piece at a time, so an
+ * upload need not be held in memory, and it has **no ceiling** -- not
+ * `MAX_BODY`, not a declared `Content-Length` -- because the caller decides
+ * how much to take.
+ *
+ * The head is checked exactly as `read_request` checks it, and the framing
+ * rules are the request's: neither framing field means no body.
+ *
+ * **The caller owns the connection's position.** A request whose body was
+ * not read to the end leaves the stream part way through it, and the next
+ * request cannot be read from there: either read to the end (`is_finished`)
+ * or close the connection. `start_response` cannot know, so it does not
+ * decide; `BodyWriter.is_keep_alive` is the caller's answer to give. */
 pub type RequestStream {
     Request head;
     BodyReader body;
@@ -1873,21 +1873,21 @@ pub Request RequestStream.request() {
     return head;
 }
 
-/// True once the whole body has been handed out: the next `read` answers an
-/// empty `bytes`, and the stream is positioned at the next request.
+/** True once the whole body has been handed out: the next `read` answers an
+ * empty `bytes`, and the stream is positioned at the next request. */
 pub bool RequestStream.is_finished() {
     return body.is_finished();
 }
 
-/// Between 1 and `max_bytes` bytes of the body, or an empty `bytes` once it
-/// has ended -- `BodyStream.read`'s contract, read through the same decoder.
-/// Traps on `max_bytes` below 1.
+/** Between 1 and `max_bytes` bytes of the body, or an empty `bytes` once it
+ * has ended -- `BodyStream.read`'s contract, read through the same decoder.
+ * Traps on `max_bytes` below 1. */
 pub Result<bytes, Error> RequestStream.read(int max_bytes) {
     return body.read(max_bytes);
 }
 
-/// The next request on `stream` with its body left for `RequestStream.read`,
-/// or `None` at a clean end: the streaming form of `read_request`.
+/** The next request on `stream` with its body left for `RequestStream.read`,
+ * or `None` at a clean end: the streaming form of `read_request`. */
 pub Result<Option<RequestStream>, Error> read_request_stream(io.Stream stream) {
     match (read_request_head(stream)?) {
         case None: {
@@ -1906,8 +1906,8 @@ Result<List<str>, Error> request_line(bytes line) {
     if (line.size() == 0) {
         return Result<List<str>, Error>.Err(Error.Syntax);
     }
-    // Exactly one space either side of the target: tolerating runs of spaces
-    // is how a request line becomes two different requests to two readers.
+    /* Exactly one space either side of the target: tolerating runs of spaces
+     * is how a request line becomes two different requests to two readers. */
     List<bytes> parts = line.split(SP1);
     if (parts.size() != 3) {
         return Result<List<str>, Error>.Err(Error.Syntax);
@@ -1922,10 +1922,10 @@ Result<List<str>, Error> request_line(bytes line) {
     if (parts[1].size() == 0) {
         return Result<List<str>, Error>.Err(Error.Syntax);
     }
-    // Raw UTF-8 in a target is allowed (`bad_target_at` says so), and bytes
-    // that are not UTF-8 are not text: refused here, because `ascii` below
-    // would turn them into the empty string and the target would then be
-    // read as if it were empty.
+    /* Raw UTF-8 in a target is allowed (`bad_target_at` says so), and bytes
+     * that are not UTF-8 are not text: refused here, because `ascii` below
+     * would turn them into the empty string and the target would then be
+     * read as if it were empty. */
     if (parts[1].utf8().is_none()) {
         return Result<List<str>, Error>.Err(Error.Syntax);
     }
@@ -1941,28 +1941,28 @@ Result<str, Error> version_of(bytes field, str where) {
     bytes rest = field.substr(5, field.size());
     str version = ascii(rest);
     if (version != "1.0" && version != "1.1") {
-        // `quoted` and not `version`: a version field that is not UTF-8 decodes to
-        // the empty string, and "unsupported HTTP version ''" says nothing
-        // about what actually arrived.
+        /* `quoted` and not `version`: a version field that is not UTF-8 decodes to
+         * the empty string, and "unsupported HTTP version ''" says nothing
+         * about what actually arrived. */
         return Result<str, Error>.Err(Error.Syntax);
     }
     return Result<str, Error>.Ok(version);
 }
 
-// The URL a request target and a `Host` field name together.
-//
-// Origin-form (`/p?q`) is the ordinary one. Absolute-form
-// (`http://host/p`) is accepted because RFC 9112 requires a server to accept
-// it, and its authority is dropped: `Host` is what this module routes on,
-// and a request that says two different hosts must not be resolved into one.
-// Asterisk-form is accepted for `OPTIONS` alone. Everything else --
-// authority-form, a relative target, a fragment -- is refused.
+/* The URL a request target and a `Host` field name together.
+ *
+ * Origin-form (`/p?q`) is the ordinary one. Absolute-form
+ * (`http://host/p`) is accepted because RFC 9112 requires a server to accept
+ * it, and its authority is dropped: `Host` is what this module routes on,
+ * and a request that says two different hosts must not be resolved into one.
+ * Asterisk-form is accepted for `OPTIONS` alone. Everything else --
+ * authority-form, a relative target, a fragment -- is refused. */
 Result<Url, Error> target_url(str method, str target, str host) {
     bytes target_bytes = target.to_bytes();
     str what = "the request target " + quoted(target_bytes);
-    // An HTTP/1.0 request may arrive with no `Host` at all, and then there is
-    // no authority to put in the URL: the host is empty and the port is the
-    // default. Every other path here has one, because 1.1 must send it.
+    /* An HTTP/1.0 request may arrive with no `Host` at all, and then there is
+     * no authority to put in the URL: the host is empty and the port is the
+     * default. Every other path here has one, because 1.1 must send it. */
     str name = "";
     int port = DEFAULT_PORT;
     if (host != "") {
@@ -2000,22 +2000,22 @@ Result<Url, Error> target_url(str method, str target, str host) {
 }
 
 // --- writing a request -----------------------------------------------------
-/// Write `http_request` to `stream`: the request line, its fields and its body, in **one**
-/// `write`.
-///
-/// The framing is this function's and not the caller's: a chunked request
-/// gets `Transfer-Encoding: chunked`, one with a body gets a
-/// `Content-Length`, and one with an empty body and no chunking gets
-/// **neither** -- a `Content-Length: 0` on a `GET` is noise, and a server
-/// reads the absence as "no body", which is what it is.
-///
-/// `Host` is filled in from the URL if the caller has not set one, and
-/// `User-Agent` likewise. `Connection: close` is added unless the caller has
-/// said otherwise, because one call is one connection here; a caller driving
-/// a kept-alive connection through this seam sets `connection` itself.
-///
-/// The target is written byte for byte from the URL. This function never
-/// re-encodes what it was handed.
+/** Write `http_request` to `stream`: the request line, its fields and its body, in **one**
+ * `write`.
+ *
+ * The framing is this function's and not the caller's: a chunked request
+ * gets `Transfer-Encoding: chunked`, one with a body gets a
+ * `Content-Length`, and one with an empty body and no chunking gets
+ * **neither** -- a `Content-Length: 0` on a `GET` is noise, and a server
+ * reads the absence as "no body", which is what it is.
+ *
+ * `Host` is filled in from the URL if the caller has not set one, and
+ * `User-Agent` likewise. `Connection: close` is added unless the caller has
+ * said otherwise, because one call is one connection here; a caller driving
+ * a kept-alive connection through this seam sets `connection` itself.
+ *
+ * The target is written byte for byte from the URL. This function never
+ * re-encodes what it was handed. */
 pub Result<void, Error> write_request(io.Stream stream, Request http_request) {
     Headers fields = http_request.head;
     if (!fields.has_name("host")) {
@@ -2050,22 +2050,22 @@ pub Result<void, Error> write_request(io.Stream stream, Request http_request) {
 }
 
 // --- reading a response ----------------------------------------------------
-/// The response on `stream` to a request that used `method`.
-///
-/// **`method` is not decoration.** Nothing in a response marks that it has no
-/// body when it answers a `HEAD`; only the caller knows, and a client that
-/// forgets hangs waiting for a body that is not coming.
-///
-/// Interim (1xx) responses are stepped over -- `103 Early Hints` arrives
-/// unasked from real servers -- up to eight of them, after which the peer is
-/// looping.
-///
-/// The framing rules are **not** the request's, and the difference is the
-/// dangerous one: a request with neither framing field has no body, and a
-/// response with neither has a body that ends when the connection closes.
-/// Reusing one rule for both would give an empty body for every
-/// HTTP/1.0-style response, or read the next request as a body on the server
-/// side.
+/** The response on `stream` to a request that used `method`.
+ *
+ * **`method` is not decoration.** Nothing in a response marks that it has no
+ * body when it answers a `HEAD`; only the caller knows, and a client that
+ * forgets hangs waiting for a body that is not coming.
+ *
+ * Interim (1xx) responses are stepped over -- `103 Early Hints` arrives
+ * unasked from real servers -- up to eight of them, after which the peer is
+ * looping.
+ *
+ * The framing rules are **not** the request's, and the difference is the
+ * dangerous one: a request with neither framing field has no body, and a
+ * response with neither has a body that ends when the connection closes.
+ * Reusing one rule for both would give an empty body for every
+ * HTTP/1.0-style response, or read the next request as a body on the server
+ * side. */
 pub Result<Response, Error> read_response(io.Stream stream, str method) {
     int interim = 0;
     while (true) {
@@ -2113,19 +2113,19 @@ Result<Response, Error> read_one_response(io.Stream stream, str method) {
 }
 
 // --- a body read as it arrives, in either direction -------------------------
-// The framing state `BodyStream` and `RequestStream` share: one reader, so a
-// request body and a response body cannot be decoded two ways.
+/* The framing state `BodyStream` and `RequestStream` share: one reader, so a
+ * request body and a response body cannot be decoded two ways. */
 type BodyReader {
     io.Stream source;
-    // 0: no more body, 1: `left` bytes of a length-delimited body,
-    // 2: chunked, `left` bytes of the current chunk, 3: until the stream ends.
+    /* 0: no more body, 1: `left` bytes of a length-delimited body,
+     * 2: chunked, `left` bytes of the current chunk, 3: until the stream ends. */
     int mode = 0;
     int left = 0;
 }
 
-// Set the framing from what `framing` answered. `is_close_delimited` is the
-// response rule: a response with neither field runs to the end of the
-// stream, a request with neither has no body.
+/* Set the framing from what `framing` answered. `is_close_delimited` is the
+ * response rule: a response with neither field runs to the end of the
+ * stream, a request with neither has no body. */
 void BodyReader.frame(int length, bool is_close_delimited) {
     if (length == -2) {
         mode = 2;
@@ -2173,8 +2173,8 @@ Result<bytes, Error> BodyReader.read(int max_bytes) {
                     mode = 0;
                     return Result<bytes, Error>.Ok(none);
                 }
-                // A declared length, or a chunk, that the peer did not send:
-                // not a short body.
+                /* A declared length, or a chunk, that the peer did not send:
+                 * not a short body. */
                 return Result<bytes, Error>.Err(Error.Closed);
             }
             if (mode != 3) {
@@ -2198,21 +2198,21 @@ Result<bytes, Error> BodyReader.read(int max_bytes) {
 }
 
 // --- reading a response body as it arrives ---------------------------------
-/// A response whose head has been read and whose body has not: the body comes
-/// out of `read` a piece at a time, so a download need not be held in memory
-/// and a long-lived response (a log tail, an event stream) can be consumed
-/// while it is still being written.
-///
-/// `read_response` and `fetch` are unchanged and still buffer: they read the
-/// same body through the same framing rules, to the end, with a ceiling
-/// (`MAX_BODY`). **A `BodyStream` has no ceiling** -- the caller decides how
-/// much to take, and stopping early is just not calling `read` again -- and
-/// has no redirect handling: a 3xx is handed back as it is.
-///
-/// Dropping a `BodyStream` before the end closes the connection it holds when
-/// that was opened by `fetch_stream`; over a stream the caller owns
-/// (`read_response_stream`), the caller's stream is left as it stood, part way
-/// through the body.
+/** A response whose head has been read and whose body has not: the body comes
+ * out of `read` a piece at a time, so a download need not be held in memory
+ * and a long-lived response (a log tail, an event stream) can be consumed
+ * while it is still being written.
+ *
+ * `read_response` and `fetch` are unchanged and still buffer: they read the
+ * same body through the same framing rules, to the end, with a ceiling
+ * (`MAX_BODY`). **A `BodyStream` has no ceiling** -- the caller decides how
+ * much to take, and stopping early is just not calling `read` again -- and
+ * has no redirect handling: a 3xx is handed back as it is.
+ *
+ * Dropping a `BodyStream` before the end closes the connection it holds when
+ * that was opened by `fetch_stream`; over a stream the caller owns
+ * (`read_response_stream`), the caller's stream is left as it stood, part way
+ * through the body. */
 pub type BodyStream {
     Response head;
     BodyReader body;
@@ -2233,8 +2233,8 @@ pub str BodyStream.version() {
     return head.ver;
 }
 
-/// The first value of the field `name`, which is matched without regard to
-/// case.
+/** The first value of the field `name`, which is matched without regard to
+ * case. */
 pub Option<str> BodyStream.header(str name) {
     return head.head.get(name);
 }
@@ -2244,27 +2244,27 @@ pub List<str> BodyStream.header_names() {
     return head.head.names();
 }
 
-/// True once the whole body has been handed out: the next `read` answers an
-/// empty `bytes`.
+/** True once the whole body has been handed out: the next `read` answers an
+ * empty `bytes`. */
 pub bool BodyStream.is_finished() {
     return body.is_finished();
 }
 
-/// Between 1 and `max_bytes` bytes of the body, or an empty `bytes` once it
-/// has ended. As with `io.File.read`, fewer than `max_bytes` is not the end;
-/// an empty answer is, and is the only way the end is reported.
-///
-/// A body that stops short of what its framing declared, or a chunk that is
-/// malformed, is an `Err` (`Closed`, `Syntax`), never a quiet short body. A
-/// read that times out is an `Err` and the stream can be read again.
-/// Traps on `max_bytes` below 1, so an empty answer has one meaning.
+/** Between 1 and `max_bytes` bytes of the body, or an empty `bytes` once it
+ * has ended. As with `io.File.read`, fewer than `max_bytes` is not the end;
+ * an empty answer is, and is the only way the end is reported.
+ *
+ * A body that stops short of what its framing declared, or a chunk that is
+ * malformed, is an `Err` (`Closed`, `Syntax`), never a quiet short body. A
+ * read that times out is an `Err` and the stream can be read again.
+ * Traps on `max_bytes` below 1, so an empty answer has one meaning. */
 pub Result<bytes, Error> BodyStream.read(int max_bytes) {
     return body.read(max_bytes);
 }
 
-/// The response on `stream` to a request that used `method`, with the head
-/// read and the body left on the stream for `BodyStream.read`: the streaming
-/// form of `read_response`, with the same interim-response and framing rules.
+/** The response on `stream` to a request that used `method`, with the head
+ * read and the body left on the stream for `BodyStream.read`: the streaming
+ * form of `read_response`, with the same interim-response and framing rules. */
 pub Result<BodyStream, Error> read_response_stream(io.Stream stream, str method) {
     int interim = 0;
     while (true) {
@@ -2292,11 +2292,11 @@ Result<BodyStream, Error> body_stream_of(io.Stream stream, Response http_respons
     return Result<BodyStream, Error>.Ok(out);
 }
 
-// The version, the status code and the reason phrase, as three strings. The
-// phrase may hold spaces, so the line is cut at its first two spaces rather
-// than split on every one; RFC 9112 allows the phrase to be empty, and a
-// line with no phrase and no space after the code is accepted too, because
-// some servers send one and there is nothing ambiguous about it.
+/* The version, the status code and the reason phrase, as three strings. The
+ * phrase may hold spaces, so the line is cut at its first two spaces rather
+ * than split on every one; RFC 9112 allows the phrase to be empty, and a
+ * line with no phrase and no space after the code is accepted too, because
+ * some servers send one and there is nothing ambiguous about it. */
 Result<List<str>, Error> status_line(bytes line) {
     int first = -1;
     match (line.index_of(SP1)) {
@@ -2345,32 +2345,32 @@ Result<List<str>, Error> status_line(bytes line) {
 }
 
 // --- writing a response ----------------------------------------------------
-/// Write `http_response` to `stream` as the answer to `http_request`, in **one** `write`.
-///
-/// The framing fields are chosen here and written into `http_response`, so a response
-/// that has been sent carries the headers that went out:
-///
-///   - a bodiless status (1xx, 204, 304) gets neither framing field and no
-///     body, whatever the handler set;
-///   - a `HEAD` gets the fields the `GET` would have got, and no body;
-///   - `set_chunked(true)` gets `Transfer-Encoding: chunked`, unless the
-///     peer is 1.0, which has no chunked coding;
-///   - everything else gets a `Content-Length`.
-///
-/// `is_keep_alive` is what `should_keep_alive` decided: false writes
-/// `Connection: close`, and true tells a 1.0 client `Connection: keep-alive`,
-/// which it needs, because 1.0 closes by default and the reuse it asked for
-/// would otherwise silently not happen.
-///
-/// The status line always says `HTTP/1.1`: a server answers in the protocol
-/// it speaks, not in the one it was told about. The reason phrase is the
-/// response's own, so a relayed response keeps the phrase it arrived with.
+/** Write `http_response` to `stream` as the answer to `http_request`, in **one** `write`.
+ *
+ * The framing fields are chosen here and written into `http_response`, so a response
+ * that has been sent carries the headers that went out:
+ *
+ *   - a bodiless status (1xx, 204, 304) gets neither framing field and no
+ *     body, whatever the handler set;
+ *   - a `HEAD` gets the fields the `GET` would have got, and no body;
+ *   - `set_chunked(true)` gets `Transfer-Encoding: chunked`, unless the
+ *     peer is 1.0, which has no chunked coding;
+ *   - everything else gets a `Content-Length`.
+ *
+ * `is_keep_alive` is what `should_keep_alive` decided: false writes
+ * `Connection: close`, and true tells a 1.0 client `Connection: keep-alive`,
+ * which it needs, because 1.0 closes by default and the reuse it asked for
+ * would otherwise silently not happen.
+ *
+ * The status line always says `HTTP/1.1`: a server answers in the protocol
+ * it speaks, not in the one it was told about. The reason phrase is the
+ * response's own, so a relayed response keeps the phrase it arrived with. */
 pub Result<void, Error> write_response(io.Stream stream, Request http_request, Response http_response, bool is_keep_alive) {
     Headers fields = http_response.head;
     bool is_suppress = http_request.verb == "HEAD" || is_bodiless(http_response.code);
-    // `bodiless` and not `is_suppress`: a HEAD answer carries the framing fields
-    // its GET would have carried and simply omits the body, so the chunked
-    // choice is made as if the body were going out.
+    /* `bodiless` and not `is_suppress`: a HEAD answer carries the framing fields
+     * its GET would have carried and simply omits the body, so the chunked
+     * choice is made as if the body were going out. */
     bool is_chunked = http_response.is_framed && !is_bodiless(http_response.code) && http_request.ver != "1.0";
     if (is_bodiless(http_response.code)) {
         fields.remove("content-length");
@@ -2393,8 +2393,8 @@ pub Result<void, Error> write_response(io.Stream stream, Request http_request, R
     return write_all(stream, out);
 }
 
-// The status line, the fields and the blank line, with `Connection` set from
-// `is_keep_alive`. The framing fields are the caller's, already set.
+/* The status line, the fields and the blank line, with `Connection` set from
+ * `is_keep_alive`. The framing fields are the caller's, already set. */
 Result<bytes, Error> response_head(Request http_request, Response http_response, bool is_keep_alive) {
     Headers fields = http_response.head;
     if (!is_keep_alive) {
@@ -2410,38 +2410,38 @@ Result<bytes, Error> response_head(Request http_request, Response http_response,
 }
 
 // --- writing a response body as it is produced -----------------------------
-/// A response whose head has been written and whose body is written a piece
-/// at a time: the server's side of a download, a relayed program's output,
-/// anything not held in memory first. `start_response` makes one.
-///
-/// The framing is chosen once, from the request and the response's fields:
-///
-///   - a bodiless status (1xx, 204, 304) or a `HEAD`: nothing is written,
-///     and `write` accepts and drops the bytes, so a handler need not know;
-///   - a `Content-Length` the caller set: exactly that many bytes, and
-///     `finish` refuses (`Framing`) a body that came to any other size;
-///   - otherwise, from a 1.1 peer, `Transfer-Encoding: chunked`;
-///   - otherwise (a 1.0 peer has no chunked coding) the body runs to the end
-///     of the connection, which is then closed: `is_keep_alive` says false.
+/** A response whose head has been written and whose body is written a piece
+ * at a time: the server's side of a download, a relayed program's output,
+ * anything not held in memory first. `start_response` makes one.
+ *
+ * The framing is chosen once, from the request and the response's fields:
+ *
+ *   - a bodiless status (1xx, 204, 304) or a `HEAD`: nothing is written,
+ *     and `write` accepts and drops the bytes, so a handler need not know;
+ *   - a `Content-Length` the caller set: exactly that many bytes, and
+ *     `finish` refuses (`Framing`) a body that came to any other size;
+ *   - otherwise, from a 1.1 peer, `Transfer-Encoding: chunked`;
+ *   - otherwise (a 1.0 peer has no chunked coding) the body runs to the end
+ *     of the connection, which is then closed: `is_keep_alive` says false. */
 pub type BodyWriter {
     io.Stream sink;
-    // 0: drop, 1: counted (`left` bytes still owed), 2: chunked,
-    // 3: until the connection closes.
+    /* 0: drop, 1: counted (`left` bytes still owed), 2: chunked,
+     * 3: until the connection closes. */
     int mode;
     int left = 0;
     bool is_reusable = true;
     bool is_done = false;
 }
 
-/// Whether the connection may carry another request after this response:
-/// false when the caller said so, when the body is delimited by closing the
-/// connection, or when a counted body came to the wrong size.
+/** Whether the connection may carry another request after this response:
+ * false when the caller said so, when the body is delimited by closing the
+ * connection, or when a counted body came to the wrong size. */
 pub bool BodyWriter.is_keep_alive() {
     return is_reusable;
 }
 
-/// Send `data` as the next piece of the body. An empty `data` sends nothing
-/// (an empty chunk would end a chunked body).
+/** Send `data` as the next piece of the body. An empty `data` sends nothing
+ * (an empty chunk would end a chunked body). */
 pub Result<void, Error> BodyWriter.write(bytes data) {
     if (is_done) {
         trap("BodyWriter.write after finish");
@@ -2467,16 +2467,16 @@ pub Result<void, Error> BodyWriter.write(bytes data) {
     return write_all(sink, data);
 }
 
-/// End the body: the zero chunk for a chunked body, a check that a counted
-/// body was sent in full (`Framing` if not), nothing otherwise.
+/** End the body: the zero chunk for a chunked body, a check that a counted
+ * body was sent in full (`Framing` if not), nothing otherwise. */
 pub Result<void, Error> BodyWriter.finish() {
     if (is_done) {
         return Result<void, Error>.Ok;
     }
     is_done = true;
     if (mode == 1 && left != 0) {
-        // The peer is owed bytes that will never come: the connection is
-        // now out of step and must close.
+        /* The peer is owed bytes that will never come: the connection is
+         * now out of step and must close. */
         is_reusable = false;
         return Result<void, Error>.Err(Error.Framing);
     }
@@ -2489,12 +2489,12 @@ pub Result<void, Error> BodyWriter.finish() {
     return Result<void, Error>.Ok;
 }
 
-/// Write `http_response`'s head to `stream` as the answer to `http_request`,
-/// and hand back the writer for its body. The response's own body
-/// (`set_body`) is not sent; the writer's is. `is_keep_alive` is
-/// `should_keep_alive`'s answer, or false when the request's body was not
-/// read to the end; the framing may turn it to false, which
-/// `BodyWriter.is_keep_alive` reports.
+/** Write `http_response`'s head to `stream` as the answer to `http_request`,
+ * and hand back the writer for its body. The response's own body
+ * (`set_body`) is not sent; the writer's is. `is_keep_alive` is
+ * `should_keep_alive`'s answer, or false when the request's body was not
+ * read to the end; the framing may turn it to false, which
+ * `BodyWriter.is_keep_alive` reports. */
 pub Result<BodyWriter, Error> start_response(io.Stream stream, Request http_request, Response http_response, bool is_keep_alive) {
     Headers fields = http_response.head;
     BodyWriter out = BodyWriter(stream, 3);
@@ -2527,15 +2527,15 @@ pub Result<BodyWriter, Error> start_response(io.Stream stream, Request http_requ
     return Result<BodyWriter, Error>.Ok(out);
 }
 
-/// Whether this connection can carry another request after this exchange.
-///
-/// Either side may say `close`. A 1.0 peer closes by default and reuses only
-/// when it asked to; a 1.1 peer reuses by default.
-///
-/// It is part of the seam rather than of the server, because it is a question
-/// about two messages and not about a socket: a proxy deciding whether to
-/// reuse an upstream connection asks it too, and a test asks it of two
-/// transcripts.
+/** Whether this connection can carry another request after this exchange.
+ *
+ * Either side may say `close`. A 1.0 peer closes by default and reuses only
+ * when it asked to; a 1.1 peer reuses by default.
+ *
+ * It is part of the seam rather than of the server, because it is a question
+ * about two messages and not about a socket: a proxy deciding whether to
+ * reuse an upstream connection asks it too, and a test asks it of two
+ * transcripts. */
 pub bool should_keep_alive(Request http_request, Response http_response) {
     if (has_token(http_request.head.get("connection"), "close")) {
         return false;
@@ -2549,9 +2549,9 @@ pub bool should_keep_alive(Request http_request, Response http_response) {
     return true;
 }
 
-// `body` appended to `out` as chunks, ending with the zero chunk and an
-// empty trailer. `CHUNK` bytes at a time, so a body larger than that crosses
-// several chunks and a decoder that handles only one is caught.
+/* `body` appended to `out` as chunks, ending with the zero chunk and an
+ * empty trailer. `CHUNK` bytes at a time, so a body larger than that crosses
+ * several chunks and a decoder that handles only one is caught. */
 void chunk_into(bytes out, bytes body) {
     int off = 0;
     while (off < body.size()) {
@@ -2582,55 +2582,55 @@ Result<void, Error> write_all(io.Stream stream, bytes out) {
 }
 
 // --- the server ------------------------------------------------------------
-/// What a server does with a request.
-///
-/// **A one-method interface is this language's callback** (§3.4,
-/// `docs/closures-decision.md`): a type with a `Response handle(Request)`
-/// method satisfies it structurally, with nothing declared, and so does a
-/// **plain function's name** --
-///
-///     Response hello(http.Request req) { return http.text_response("hi"); }
-///     http.serve(ln, hello, connections: 1);
-///
-/// -- which is the shape most handlers want and costs no type at all. A
-/// handler that needs state is a type with fields and the same method. A
-/// lambda will satisfy it too, when there are lambdas; nothing here changes
-/// when they arrive, which is the whole point of the interface being the
-/// callback type rather than a function type.
-///
-/// A handler may not fail: it returns a `Response`, and a handler that meets
-/// a problem answers `http.text_response("...", status: 500)`. An interface
-/// method returning a `Result` would make every server write the same two
-/// lines turning it into a 500, and would leave open what to do with an
-/// error nobody can answer.
+/** What a server does with a request.
+ *
+ * **A one-method interface is this language's callback** (§3.4,
+ * `docs/closures-decision.md`): a type with a `Response handle(Request)`
+ * method satisfies it structurally, with nothing declared, and so does a
+ * **plain function's name** --
+ *
+ *     Response hello(http.Request req) { return http.text_response("hi"); }
+ *     http.serve(ln, hello, connections: 1);
+ *
+ * -- which is the shape most handlers want and costs no type at all. A
+ * handler that needs state is a type with fields and the same method. A
+ * lambda will satisfy it too, when there are lambdas; nothing here changes
+ * when they arrive, which is the whole point of the interface being the
+ * callback type rather than a function type.
+ *
+ * A handler may not fail: it returns a `Response`, and a handler that meets
+ * a problem answers `http.text_response("...", status: 500)`. An interface
+ * method returning a `Result` would make every server write the same two
+ * lines turning it into a 500, and would leave open what to do with an
+ * error nobody can answer. */
 pub interface Handler {
     Response handle(Request http_request);
 }
 
-/// Serve requests on one `io.Stream` until the peer stops, either side says
-/// `close`, or `max_requests` have been served. The number served.
-///
-/// **Any stream will do.** A `net.Conn`, a TLS connection, or a test's own
-/// pair of buffers: this loop calls only `read_request`, `write_response` and
-/// `should_keep_alive`, which is the seam above, so it never learns whether
-/// there is a socket behind the stream. `serve_conn` is the same loop for the
-/// plain-socket case; a program with a different transport -- the https
-/// server, a proxy, a test -- calls this instead of copying the loop.
-///
-/// **A malformed request is not this server's failure.** It is answered --
-/// with `e.status()` and the sentence `e.to_str()` -- the connection is
-/// closed, and this returns `Ok` with the count of requests that completed.
-/// `Err` is for a failure that could not be answered on: a stream that is
-/// gone, a response this module could not write.
-///
-/// A read that times out ends the connection quietly: a kept-alive connection
-/// that goes idle is the ordinary way one ends, and there is nobody to tell.
-/// The deadline is the stream's own business (`net.Conn.set_read_timeout`, or
-/// whatever the transport offers); this loop sets none, because it cannot
-/// know how.
-///
-/// **The stream is not closed here**; it closes when its owner lets go of it,
-/// as everywhere else.
+/** Serve requests on one `io.Stream` until the peer stops, either side says
+ * `close`, or `max_requests` have been served. The number served.
+ *
+ * **Any stream will do.** A `net.Conn`, a TLS connection, or a test's own
+ * pair of buffers: this loop calls only `read_request`, `write_response` and
+ * `should_keep_alive`, which is the seam above, so it never learns whether
+ * there is a socket behind the stream. `serve_conn` is the same loop for the
+ * plain-socket case; a program with a different transport -- the https
+ * server, a proxy, a test -- calls this instead of copying the loop.
+ *
+ * **A malformed request is not this server's failure.** It is answered --
+ * with `e.status()` and the sentence `e.to_str()` -- the connection is
+ * closed, and this returns `Ok` with the count of requests that completed.
+ * `Err` is for a failure that could not be answered on: a stream that is
+ * gone, a response this module could not write.
+ *
+ * A read that times out ends the connection quietly: a kept-alive connection
+ * that goes idle is the ordinary way one ends, and there is nobody to tell.
+ * The deadline is the stream's own business (`net.Conn.set_read_timeout`, or
+ * whatever the transport offers); this loop sets none, because it cannot
+ * know how.
+ *
+ * **The stream is not closed here**; it closes when its owner lets go of it,
+ * as everywhere else. */
 pub Result<int, Error> serve_stream(io.Stream stream, Handler handler, int max_requests = MAX_REQUESTS) {
     int served = 0;
     while (max_requests < 0 || served < max_requests) {
@@ -2659,18 +2659,18 @@ pub Result<int, Error> serve_stream(io.Stream stream, Handler handler, int max_r
     return Result<int, Error>.Ok(served);
 }
 
-/// Serve requests on one connection: `serve_stream` over a `net.Conn`.
-///
-/// It exists so that the plain-socket call reads as what it is, and so that
-/// every caller written before `serve_stream` kept compiling; it adds
-/// nothing to the loop. A timeout, if `set_read_timeout` was called on the connection,
-/// ends the connection quietly, as `serve_stream` says.
+/** Serve requests on one connection: `serve_stream` over a `net.Conn`.
+ *
+ * It exists so that the plain-socket call reads as what it is, and so that
+ * every caller written before `serve_stream` kept compiling; it adds
+ * nothing to the loop. A timeout, if `set_read_timeout` was called on the connection,
+ * ends the connection quietly, as `serve_stream` says. */
 pub Result<int, Error> serve_connection(net.Conn connection, Handler handler, int max_requests = MAX_REQUESTS) {
     return serve_stream(connection, handler, max_requests: max_requests);
 }
 
-// Answer a refusal and stop. A transport failure is not answered: there is
-// nothing to answer it on.
+/* Answer a refusal and stop. A transport failure is not answered: there is
+ * nothing to answer it on. */
 Result<int, Error> refuse(io.Stream stream, Error error, int served) {
     match (error) {
         case Refused: {
@@ -2723,9 +2723,9 @@ Result<int, Error> refuse(io.Stream stream, Error error, int served) {
             return Result<int, Error>.Ok(served);
         }
     }
-    // A refusal is answered on a connection whose framing this end no longer
-    // trusts, so it is the last thing written and the connection closes after
-    // it -- which `Connection: close` says and the `false` below arranges.
+    /* A refusal is answered on a connection whose framing this end no longer
+     * trusts, so it is the last thing written and the connection closes after
+     * it -- which `Connection: close` says and the `false` below arranges. */
     Response refusal = text_response(error.to_str() + "\n", status: error.status());
     Request bare = bare_request();
     match (write_response(stream, bare, refusal, false)) {
@@ -2738,71 +2738,71 @@ Result<int, Error> refuse(io.Stream stream, Error error, int served) {
     }
 }
 
-// The request a refusal is answered to when there is no parsed request to
-// answer: 1.1, no method, so nothing is suppressed and no keep-alive is
-// offered.
+/* The request a refusal is answered to when there is no parsed request to
+ * answer: 1.1, no method, so nothing is suppressed and no keep-alive is
+ * offered. */
 Request bare_request() {
     return Request("GET", Url("http", "", DEFAULT_PORT, "/", "", "/"), "1.1", headers());
 }
 
-/// Accept connections on `listener` and serve each one with `handler`. The number of
-/// connections served.
-///
-/// `connections` is how many to accept before returning; **-1 serves
-/// forever**, and a number is what a test uses so that the loop ends.
-/// `timeout_ms` is set on each connection as both a read and a write timeout,
-/// so a peer that opens a connection and says nothing cannot hold this server
-/// -- which matters, because of the next paragraph. `max_requests` bounds one
-/// connection's turn for the same reason.
-///
-/// ### One connection at a time, and why
-///
-/// This loop serves one connection to its end before accepting the next.
-/// That is a real limit -- one slow client delays every other -- and it is
-/// what the language can express today, not a preference:
-///
-/// `spawn f(..)` **moves** its arguments, and only a value the current block
-/// owns may be moved (§8.3). The connection half works: a `case Ok(net.Conn
-/// c)` binding of a temporary may be moved, and the reference says so in as
-/// many words. The **handler** half does not. `handler` is a parameter, which is
-/// borrowed and may not be moved; `clone(h)` would hand each connection a
-/// different handler object, which is not what one handler means, and is
-/// refused outright for a handler that owns a resource. There is no way to
-/// give the same handler to two threads, because non-atomic refcounts are
-/// sound only while one thread can reach a value (docs/concurrency-decision.md),
-/// and that is the point rather than a gap to work around.
-///
-/// What would change it is a handler that is a **module constant** -- those
-/// are immortal and shared, and every thread may read one (§8.3) -- or
-/// channels: an accept loop that `send`s each moved `Conn` to a fixed set of
-/// worker threads, each holding its own handler. Both are programs a caller
-/// can write today on top of `serve_conn`, which is why `serve_conn` is
-/// public and takes one connection. This module does not pick one for them.
-///
-/// `timeout_ms` and `max_requests` are the mitigation that is available, and
-/// they are the reason they are arguments rather than constants.
+/** Accept connections on `listener` and serve each one with `handler`. The number of
+ * connections served.
+ *
+ * `connections` is how many to accept before returning; **-1 serves
+ * forever**, and a number is what a test uses so that the loop ends.
+ * `timeout_ms` is set on each connection as both a read and a write timeout,
+ * so a peer that opens a connection and says nothing cannot hold this server
+ * -- which matters, because of the next paragraph. `max_requests` bounds one
+ * connection's turn for the same reason.
+ *
+ * ### One connection at a time, and why
+ *
+ * This loop serves one connection to its end before accepting the next.
+ * That is a real limit -- one slow client delays every other -- and it is
+ * what the language can express today, not a preference:
+ *
+ * `spawn f(..)` **moves** its arguments, and only a value the current block
+ * owns may be moved (§8.3). The connection half works: a `case Ok(net.Conn
+ * c)` binding of a temporary may be moved, and the reference says so in as
+ * many words. The **handler** half does not. `handler` is a parameter, which is
+ * borrowed and may not be moved; `clone(h)` would hand each connection a
+ * different handler object, which is not what one handler means, and is
+ * refused outright for a handler that owns a resource. There is no way to
+ * give the same handler to two threads, because non-atomic refcounts are
+ * sound only while one thread can reach a value (docs/concurrency-decision.md),
+ * and that is the point rather than a gap to work around.
+ *
+ * What would change it is a handler that is a **module constant** -- those
+ * are immortal and shared, and every thread may read one (§8.3) -- or
+ * channels: an accept loop that `send`s each moved `Conn` to a fixed set of
+ * worker threads, each holding its own handler. Both are programs a caller
+ * can write today on top of `serve_conn`, which is why `serve_conn` is
+ * public and takes one connection. This module does not pick one for them.
+ *
+ * `timeout_ms` and `max_requests` are the mitigation that is available, and
+ * they are the reason they are arguments rather than constants. */
 pub Result<int, Error> serve(net.Listener listener, Handler handler, int connections = -1, int timeout_ms = TIMEOUT_MS, int max_requests = MAX_REQUESTS) {
     int done = 0;
     while (connections < 0 || done < connections) {
         match (listener.accept()) {
             case Ok(net.Conn connection): {
-                // One connection's failure is not the server's. A peer that
-                // hangs up in the middle of a response, or goes quiet until
-                // the read timeout, ends that connection and nothing else --
-                // a server that stopped accepting because one client did
-                // would be a server any client could stop. `serve_conn` is
-                // public for a caller who wants to see these.
+                /* One connection's failure is not the server's. A peer that
+                 * hangs up in the middle of a response, or goes quiet until
+                 * the read timeout, ends that connection and nothing else --
+                 * a server that stopped accepting because one client did
+                 * would be a server any client could stop. `serve_conn` is
+                 * public for a caller who wants to see these. */
                 one_connection(connection, handler, timeout_ms, max_requests);
             }
             case Err(net.Error error): {
-                // The same rule one level down: a failed accept that is the
-                // weather -- out of descriptors, a client that gave up in
-                // the backlog -- is not the server's failure either. It is
-                // not a served connection, so it is not counted, and the
-                // loop asks again after a pause (an exhausted descriptor
-                // table leaves the connection queued, so asking at once
-                // would spin). Anything else means the listener is no
-                // good, and that ends the loop.
+                /* The same rule one level down: a failed accept that is the
+                 * weather -- out of descriptors, a client that gave up in
+                 * the backlog -- is not the server's failure either. It is
+                 * not a served connection, so it is not counted, and the
+                 * loop asks again after a pause (an exhausted descriptor
+                 * table leaves the connection queued, so asking at once
+                 * would spin). Anything else means the listener is no
+                 * good, and that ends the loop. */
                 if (!error.is_transient()) {
                     return Result<int, Error>.Err(from_net(error));
                 }
@@ -2815,15 +2815,15 @@ pub Result<int, Error> serve(net.Listener listener, Handler handler, int connect
     return Result<int, Error>.Ok(done);
 }
 
-// Wait `milliseconds` before asking `accept` again. It parks this green
-// thread only (`timer.sleep_ms`), so the carrier runs other connections
-// meanwhile.
+/* Wait `milliseconds` before asking `accept` again. It parks this green
+ * thread only (`timer.sleep_ms`), so the carrier runs other connections
+ * meanwhile. */
 void back_off(int milliseconds) {
     timer.sleep_ms(milliseconds);
 }
 
-// One accepted connection, to its end, with whatever went wrong on it kept
-// on it. The `Conn` closes itself when this returns (§7.1).
+/* One accepted connection, to its end, with whatever went wrong on it kept
+ * on it. The `Conn` closes itself when this returns (§7.1). */
 void one_connection(net.Conn connection, Handler handler, int timeout_ms, int max_requests) {
     match (deadline(connection, timeout_ms)) {
         case Ok: {
@@ -2840,9 +2840,9 @@ void one_connection(net.Conn connection, Handler handler, int timeout_ms, int ma
     }
 }
 
-// Both timeouts, or the failure that stopped them being set. A connection
-// with no deadline is a connection an idle peer can hold forever, and this
-// server has one at a time.
+/* Both timeouts, or the failure that stopped them being set. A connection
+ * with no deadline is a connection an idle peer can hold forever, and this
+ * server has one at a time. */
 Result<void, Error> deadline(net.Conn connection, int timeout_ms) {
     match (connection.set_read_timeout(timeout_ms)) {
         case Ok: {
@@ -2862,74 +2862,74 @@ Result<void, Error> deadline(net.Conn connection, int timeout_ms) {
 }
 
 // --- the client ------------------------------------------------------------
-/// `GET url`, with the body read and the connection closed.
-///
-///     match (http.get("http://127.0.0.1:8080/health")) { ... }
-///
-/// There is no `post`, `put` or `delete` beside it: each would be `fetch`
-/// with a string spelled in, one more name frozen, and a set of verbs that
-/// is wrong the moment somebody needs `PROPFIND`. `get` earns its place
-/// because a GET of a URL with no body and no headers is most of what a
-/// client does; anything else is `http.request(method, url)` and `fetch`.
+/** `GET url`, with the body read and the connection closed.
+ *
+ *     match (http.get("http://127.0.0.1:8080/health")) { ... }
+ *
+ * There is no `post`, `put` or `delete` beside it: each would be `fetch`
+ * with a string spelled in, one more name frozen, and a set of verbs that
+ * is wrong the moment somebody needs `PROPFIND`. `get` earns its place
+ * because a GET of a URL with no body and no headers is most of what a
+ * client does; anything else is `http.request(method, url)` and `fetch`. */
 pub Result<Response, Error> get(str url) {
     return fetch(request("GET", url)?);
 }
 
-/// Make `http_request`, follow up to `redirects` redirects, and answer with the
-/// response, its body already read and its connection already closed.
-///
-/// This is the `send(request)` an HTTP library usually calls `send`. It
-/// cannot be called that: `send` is the channel builtin (§6.6) and the
-/// language refuses a module function that shadows one.
-///
-/// **One call is one connection.** It sends `Connection: close`, reads the
-/// answer and hangs up. There is no pool, so there is no idle connection to
-/// go stale, no half-closed socket to hand to the next caller, and no
-/// lifetime for a caller to get wrong. That costs a handshake per call and it
-/// is the honest price.
-///
-/// ### Redirects: five hops, and never off the origin
-///
-/// `redirects` is how many `Location` hops to follow; **0 hands back the 3xx
-/// itself**, which is what a caller who wants to decide for themselves
-/// passes. The default is `MAX_REDIRECTS`.
-///
-/// **A redirect to another host or port is refused**, as is one from `https`
-/// to `http` (`InsecureRedirect`); the single change followed is the same
-/// host from `http` to `https`.
-///
-/// **The target is named in the error.** Following one would forward whatever the
-/// caller set -- an `Authorization` field above all -- to a host they never
-/// wrote down, and this client has no credential model, no cookie jar and no
-/// header-stripping policy with which to make that safe. A caller who means
-/// to cross hosts reads `Location` off the 3xx and calls `fetch` again,
-/// which is the same number of lines and says what it is doing. Oro's client
-/// does not follow redirects at all and gives this reason for it; five
-/// same-origin hops is the smallest useful thing above that.
-///
-/// A `Location` that is an absolute path (`/other`) is resolved against the
-/// current URL. A relative reference (`other`, `../other`) is refused:
-/// resolving one is RFC 3986 §5's algorithm, with its dot-segment removal,
-/// and a client that gets that subtly wrong sends a request somewhere
-/// nobody asked for.
-///
-/// **301, 302 and 303 turn a non-GET into a GET with no body**, which is
-/// what every browser and every other client does and what 303 means
-/// outright. **307 and 308 keep the method and the body**, which is what
-/// they were added to the standard to promise.
+/** Make `http_request`, follow up to `redirects` redirects, and answer with the
+ * response, its body already read and its connection already closed.
+ *
+ * This is the `send(request)` an HTTP library usually calls `send`. It
+ * cannot be called that: `send` is the channel builtin (§6.6) and the
+ * language refuses a module function that shadows one.
+ *
+ * **One call is one connection.** It sends `Connection: close`, reads the
+ * answer and hangs up. There is no pool, so there is no idle connection to
+ * go stale, no half-closed socket to hand to the next caller, and no
+ * lifetime for a caller to get wrong. That costs a handshake per call and it
+ * is the honest price.
+ *
+ * ### Redirects: five hops, and never off the origin
+ *
+ * `redirects` is how many `Location` hops to follow; **0 hands back the 3xx
+ * itself**, which is what a caller who wants to decide for themselves
+ * passes. The default is `MAX_REDIRECTS`.
+ *
+ * **A redirect to another host or port is refused**, as is one from `https`
+ * to `http` (`InsecureRedirect`); the single change followed is the same
+ * host from `http` to `https`.
+ *
+ * **The target is named in the error.** Following one would forward whatever the
+ * caller set -- an `Authorization` field above all -- to a host they never
+ * wrote down, and this client has no credential model, no cookie jar and no
+ * header-stripping policy with which to make that safe. A caller who means
+ * to cross hosts reads `Location` off the 3xx and calls `fetch` again,
+ * which is the same number of lines and says what it is doing. Oro's client
+ * does not follow redirects at all and gives this reason for it; five
+ * same-origin hops is the smallest useful thing above that.
+ *
+ * A `Location` that is an absolute path (`/other`) is resolved against the
+ * current URL. A relative reference (`other`, `../other`) is refused:
+ * resolving one is RFC 3986 §5's algorithm, with its dot-segment removal,
+ * and a client that gets that subtly wrong sends a request somewhere
+ * nobody asked for.
+ *
+ * **301, 302 and 303 turn a non-GET into a GET with no body**, which is
+ * what every browser and every other client does and what 303 means
+ * outright. **307 and 308 keep the method and the body**, which is what
+ * they were added to the standard to promise. */
 pub Result<Response, Error> fetch(Request http_request, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS) {
     return fetch_via(PlainTransport(), http_request, redirects: redirects, timeout_ms: timeout_ms);
 }
 
-/// One connection, one request, one response: what `fetch_via` calls once per
-/// hop. `lib/net/https.m31` is the other implementation, which puts a verified
-/// TLS connection over the socket first.
+/** One connection, one request, one response: what `fetch_via` calls once per
+ * hop. `lib/net/https.m31` is the other implementation, which puts a verified
+ * TLS connection over the socket first. */
 pub interface Transport {
     Result<Response, Error> round_trip(Request http_request, int timeout_ms);
 }
 
-/// `fetch`, with the connection made by `carrier`. The redirect rules above
-/// are here and nowhere else, so every transport follows the same ones.
+/** `fetch`, with the connection made by `carrier`. The redirect rules above
+ * are here and nowhere else, so every transport follows the same ones. */
 pub Result<Response, Error> fetch_via(Transport carrier, Request http_request, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS) {
     Request current = http_request;
     int hops = 0;
@@ -2947,10 +2947,10 @@ bool is_redirect(int code) {
     return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
 }
 
-/// A connected socket to `http_request`'s host, with both timeouts set and Nagle
-/// off. A request is a message that waits for an answer, so there is nothing
-/// for the kernel to coalesce it with. Any scheme: it is the caller that
-/// decides whether TLS goes over it.
+/** A connected socket to `http_request`'s host, with both timeouts set and Nagle
+ * off. A request is a message that waits for an answer, so there is nothing
+ * for the kernel to coalesce it with. Any scheme: it is the caller that
+ * decides whether TLS goes over it. */
 pub Result<net.Conn, Error> open(Request http_request, int timeout_ms) {
     match (net.connect(http_request.loc.host(), http_request.loc.port())) {
         case Ok(net.Conn connection): {
@@ -2976,12 +2976,12 @@ pub Result<net.Conn, Error> open(Request http_request, int timeout_ms) {
     }
 }
 
-/// `http_request` sent on a new connection with its response head read and
-/// the body left to be read incrementally -- `fetch` without the buffering and
-/// without redirects (a 3xx is the answer). `http://` only: a TLS transport
-/// calls `read_response_stream` on its own connection.
-///
-/// The connection is closed when the returned `BodyStream` goes away.
+/** `http_request` sent on a new connection with its response head read and
+ * the body left to be read incrementally -- `fetch` without the buffering and
+ * without redirects (a 3xx is the answer). `http://` only: a TLS transport
+ * calls `read_response_stream` on its own connection.
+ *
+ * The connection is closed when the returned `BodyStream` goes away. */
 pub Result<BodyStream, Error> fetch_stream(Request http_request, int timeout_ms = TIMEOUT_MS) {
     if (http_request.loc.scheme() == "https") {
         return Result<BodyStream, Error>.Err(Error.SchemeNeedsTls);
@@ -3021,11 +3021,11 @@ Result<Request, Error> redirected(Request http_request, Response http_response) 
     if (http_request.loc.scheme() == "https" && next.scheme() != "https") {
         return Result<Request, Error>.Err(Error.InsecureRedirect);
     }
-    // The one change of origin that is followed: the same host, `http` to
-    // `https`, which is the upgrade nearly every site answers a plain request
-    // with. Whatever the caller set went in the clear to that host already,
-    // and now goes encrypted to it. Anything else -- another host, another
-    // port on the same scheme -- is refused, for the reason `fetch` gives.
+    /* The one change of origin that is followed: the same host, `http` to
+     * `https`, which is the upgrade nearly every site answers a plain request
+     * with. Whatever the caller set went in the clear to that host already,
+     * and now goes encrypted to it. Anything else -- another host, another
+     * port on the same scheme -- is refused, for the reason `fetch` gives. */
     bool is_upgrade = http_request.loc.scheme() == "http" && next.scheme() == "https" && next.host() == http_request.loc.host();
     if (!is_upgrade && (next.scheme() != http_request.loc.scheme() || next.host() != http_request.loc.host() || next.port() != http_request.loc.port())) {
         return Result<Request, Error>.Err(Error.BadUrl);
@@ -3052,8 +3052,8 @@ Result<Request, Error> redirected(Request http_request, Response http_response) 
     return Result<Request, Error>.Ok(out);
 }
 
-// A `Location` against the URL it arrived at: an absolute `http://` URL, or
-// an absolute path. Anything else is refused -- see `fetch`.
+/* A `Location` against the URL it arrived at: an absolute `http://` URL, or
+ * an absolute path. Anything else is refused -- see `fetch`. */
 Result<Url, Error> resolve(Url base, str where) {
     bytes location_bytes = where.to_bytes();
     if (location_bytes.contains("://".to_bytes())) {

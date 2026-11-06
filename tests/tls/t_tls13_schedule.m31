@@ -1,15 +1,15 @@
-// The TLS 1.3 key schedule (`lib/tls/tls13schedule.m31`) fed RFC 8448's traces.
-// Every line this prints is printed again by `oracle_tls13_schedule.py`, which
-// derives the same values from `hashlib`, `hmac` and the `cryptography`
-// package's HKDF-Expand, and asserts RFC 8448's published ones against them.
-// `test_tls13.sh` hands this program the RFC's messages as arguments:
-//
-//   shared_secret psk client_hello server_hello encrypted_extensions
-//   certificate certificate_verify server_finished client_finished
-//   psk_client_hello
-//
-//   ./build.sh tests/tls/t_tls13_schedule.m31 -o t_tls13_schedule
-//   ./t_tls13_schedule <hex>...
+/* The TLS 1.3 key schedule (`lib/tls/tls13schedule.m31`) fed RFC 8448's traces.
+ * Every line this prints is printed again by `oracle_tls13_schedule.py`, which
+ * derives the same values from `hashlib`, `hmac` and the `cryptography`
+ * package's HKDF-Expand, and asserts RFC 8448's published ones against them.
+ * `test_tls13.sh` hands this program the RFC's messages as arguments:
+ *
+ *   shared_secret psk client_hello server_hello encrypted_extensions
+ *   certificate certificate_verify server_finished client_finished
+ *   psk_client_hello
+ *
+ *   ./build.sh tests/tls/t_tls13_schedule.m31 -o t_tls13_schedule
+ *   ./t_tls13_schedule <hex>... */
 
 import os;
 import crypto.sha256;
@@ -100,9 +100,9 @@ void scenario(Trace trace, tls13schedule.Suite suite, str label) {
     out.show("server_application_next", server_next);
     out.show("client_application_next2", tls13schedule.next_traffic_secret(suite, client_next));
     out.show_keys(suite, "client_application_next", client_next);
-    // A HelloRetryRequest rewrites the transcript to a message_hash of the first
-    // ClientHello, then the HelloRetryRequest (stood in for by the ServerHello
-    // bytes) and the second ClientHello (stood in for by the PSK one) follow.
+    /* A HelloRetryRequest rewrites the transcript to a message_hash of the first
+     * ClientHello, then the HelloRetryRequest (stood in for by the ServerHello
+     * bytes) and the second ClientHello (stood in for by the PSK one) follow. */
     tls13schedule.Transcript retried = tls13schedule.transcript();
     retried.add(trace.client_hello);
     retried.restart_after_retry_request(suite);

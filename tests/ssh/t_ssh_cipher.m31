@@ -1,13 +1,13 @@
-// `lib/ssh/sshcipher.m31` driven by `oracle_sshcipher.py`, which feeds it
-// lines on standard input and checks the answers with OpenSSL (the
-// `cryptography` package) and its own independent packet code.
-//
-//   open KIND KEYHEX IVHEX MACHEX SEQ WIRE...   -> payload HEX... | error NAME
-//   seal KIND KEYHEX IVHEX MACHEX SEQ PAYLOAD... -> wire HEX...
-//
-// KIND is chacha, gcm, ctr or ctretm. Several WIRE or PAYLOAD fields are
-// consecutive packets through one cipher object (SEQ, SEQ+1, ...), so the
-// keystream and the invocation counter are checked across packets.
+/* `lib/ssh/sshcipher.m31` driven by `oracle_sshcipher.py`, which feeds it
+ * lines on standard input and checks the answers with OpenSSL (the
+ * `cryptography` package) and its own independent packet code.
+ *
+ *   open KIND KEYHEX IVHEX MACHEX SEQ WIRE...   -> payload HEX... | error NAME
+ *   seal KIND KEYHEX IVHEX MACHEX SEQ PAYLOAD... -> wire HEX...
+ *
+ * KIND is chacha, gcm, ctr or ctretm. Several WIRE or PAYLOAD fields are
+ * consecutive packets through one cipher object (SEQ, SEQ+1, ...), so the
+ * keystream and the invocation counter are checked across packets. */
 import io;
 import os;
 import random;

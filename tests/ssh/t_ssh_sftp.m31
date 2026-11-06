@@ -1,7 +1,7 @@
-// `lib/ssh/sshsftp.m31`'s pure parts: attributes and name lists (round
-// trips, every proper prefix refused, absurd counts refused), and the
-// predicates that keep a hostile server's names from leaving the directory
-// the user named. The live behaviour is `test_m31sftp.sh`'s.
+/* `lib/ssh/sshsftp.m31`'s pure parts: attributes and name lists (round
+ * trips, every proper prefix refused, absurd counts refused), and the
+ * predicates that keep a hostile server's names from leaving the directory
+ * the user named. The live behaviour is `test_m31sftp.sh`'s. */
 import ssh;
 import ssh.sshsftp;
 

@@ -1,7 +1,7 @@
-// `lib/ssh/sshshell.m31`'s pure parts (the `~.` filter, the terminal-modes
-// string) and the new channel message layouts in `lib/ssh/sshexec.m31`
-// (pty-req, shell, window-change, keepalive), against hand-derived RFC 4254
-// bytes. A `trap` means a check failed.
+/* `lib/ssh/sshshell.m31`'s pure parts (the `~.` filter, the terminal-modes
+ * string) and the new channel message layouts in `lib/ssh/sshexec.m31`
+ * (pty-req, shell, window-change, keepalive), against hand-derived RFC 4254
+ * bytes. A `trap` means a check failed. */
 import ssh.sshshell;
 import ssh.sshexec;
 

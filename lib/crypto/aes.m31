@@ -1,64 +1,64 @@
-// AES-128 and AES-256 block encryption (FIPS 197), encrypt direction only --
-// all that GCM and CTR mode need. `lib/crypto/aesgcm.m31` is the AEAD built on it.
-//
-//   import aes;
-//   aes.Cipher cipher = aes.cipher(key);          // key: 16 or 32 octets
-//   bytes out = cipher.encrypt_block(block);      // block: 16 octets
-//   bytes many = cipher.encrypt_blocks(blocks);   // ECB over any multiple of 16 octets
-//
-// A key of any other length, or input that is not a whole number of blocks,
-// is a bug in the caller and **traps** (docs/errors-decision.md): nothing in
-// here is network-facing, and there is no `Result` because nothing can fail
-// once the lengths are right. AES-192 is deliberately absent -- TLS 1.3 has no
-// suite for it and a code path nothing exercises is a code path nothing checks.
-//
+/* AES-128 and AES-256 block encryption (FIPS 197), encrypt direction only --
+ * all that GCM and CTR mode need. `lib/crypto/aesgcm.m31` is the AEAD built on it.
+ *
+ *   import aes;
+ *   aes.Cipher cipher = aes.cipher(key);          // key: 16 or 32 octets
+ *   bytes out = cipher.encrypt_block(block);      // block: 16 octets
+ *   bytes many = cipher.encrypt_blocks(blocks);   // ECB over any multiple of 16 octets
+ *
+ * A key of any other length, or input that is not a whole number of blocks,
+ * is a bug in the caller and **traps** (docs/errors-decision.md): nothing in
+ * here is network-facing, and there is no `Result` because nothing can fail
+ * once the lengths are right. AES-192 is deliberately absent -- TLS 1.3 has no
+ * suite for it and a code path nothing exercises is a code path nothing checks.
+ * */
 // --- Side channels: the stance ---------------------------------------------
-//
-// The usual software AES is four 1 KiB lookup tables indexed by secret data.
-// That leaks the key through the cache (Bernstein 2005, Osvik-Shamir-Tromer
-// 2006), and this language cannot promise otherwise: an `Array<int>` read is
-// a memory access whose address depends on the index. So this module has **no
-// lookup table, no branch and no memory index that depends on the key or on
-// the data**.
-//
-//   * It is bitsliced: four blocks at a time, held as eight 64-bit ints
-//     ("planes"), plane k holding bit k of all 64 state bytes (bit position
-//     16 * block + 4 * column + row). SubBytes is the Boyar-Peralta 113-gate
-//     boolean circuit for the S-box (J. Cryptology 2012, "A small depth-16
-//     circuit for the AES S-box") run on whole planes -- XOR, AND and NOT only.
-//     ShiftRows and MixColumns are fixed masks and shifts of the planes.
-//   * The cost per block is therefore a fixed number of word operations that
-//     cannot depend on the key or the data, and it is shared by four blocks,
-//     which is what makes it fast: about 100 times the speed of the previous
-//     one-byte-at-a-time x^254 formulation (docs/CRYPTO-PERF.md).
-//   * Moving bytes into and out of planes is a fixed network of masked
-//     shifts (an 8x8 bit transpose and an 8x8 byte transpose), no table.
-//   * The key schedule runs the same circuit (`substitute_word`); its `if`s
-//     test the word index and the round constant, which are public. The only
-//     loop bounds are the round count (a function of the key *length*), the
-//     number of blocks (public) and constants.
-//
-// What this does and does not buy. It is constant-time **at the source
-// level**: the sequence of operations and the addresses touched are
-// independent of key and data, which removes the cache-timing channel that
-// table AES has. It is not verified at the machine-code level -- this
-// language compiles to C and the C compiler is free to turn a mask into a
-// branch (in practice it does not for this pattern, and the arithmetic
-// overflow checks it adds are branches whose outcome never depends on
-// secrets, since no value here ever gets near 2^63). No timing measurement
-// was done on a real CPU, and nothing here defends against power or
-// electromagnetic analysis, fault injection, or an attacker who can read the
-// process's memory. It is still far from AES-NI (see docs/CRYPTO-ACCEL.md):
-// a few tens of MiB/s against several GiB/s.
+/*
+ * The usual software AES is four 1 KiB lookup tables indexed by secret data.
+ * That leaks the key through the cache (Bernstein 2005, Osvik-Shamir-Tromer
+ * 2006), and this language cannot promise otherwise: an `Array<int>` read is
+ * a memory access whose address depends on the index. So this module has **no
+ * lookup table, no branch and no memory index that depends on the key or on
+ * the data**.
+ *
+ *   * It is bitsliced: four blocks at a time, held as eight 64-bit ints
+ *     ("planes"), plane k holding bit k of all 64 state bytes (bit position
+ *     16 * block + 4 * column + row). SubBytes is the Boyar-Peralta 113-gate
+ *     boolean circuit for the S-box (J. Cryptology 2012, "A small depth-16
+ *     circuit for the AES S-box") run on whole planes -- XOR, AND and NOT only.
+ *     ShiftRows and MixColumns are fixed masks and shifts of the planes.
+ *   * The cost per block is therefore a fixed number of word operations that
+ *     cannot depend on the key or the data, and it is shared by four blocks,
+ *     which is what makes it fast: about 100 times the speed of the previous
+ *     one-byte-at-a-time x^254 formulation (docs/CRYPTO-PERF.md).
+ *   * Moving bytes into and out of planes is a fixed network of masked
+ *     shifts (an 8x8 bit transpose and an 8x8 byte transpose), no table.
+ *   * The key schedule runs the same circuit (`substitute_word`); its `if`s
+ *     test the word index and the round constant, which are public. The only
+ *     loop bounds are the round count (a function of the key *length*), the
+ *     number of blocks (public) and constants.
+ *
+ * What this does and does not buy. It is constant-time **at the source
+ * level**: the sequence of operations and the addresses touched are
+ * independent of key and data, which removes the cache-timing channel that
+ * table AES has. It is not verified at the machine-code level -- this
+ * language compiles to C and the C compiler is free to turn a mask into a
+ * branch (in practice it does not for this pattern, and the arithmetic
+ * overflow checks it adds are branches whose outcome never depends on
+ * secrets, since no value here ever gets near 2^63). No timing measurement
+ * was done on a real CPU, and nothing here defends against power or
+ * electromagnetic analysis, fault injection, or an attacker who can read the
+ * process's memory. It is still far from AES-NI (see docs/CRYPTO-ACCEL.md):
+ * a few tens of MiB/s against several GiB/s. */
 
 import crypto.accel;
 
-// The hardware kernels (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
-// runtime/crypto_*.S, called with spans the compiler range-checks. A kernel runs
-// only if the CPU has AES-NI and PCLMULQDQ (or ARMv8 AES and PMULL), the key is
-// AES-128 or AES-256, and `M31_CRYPTO_ACCEL` has not switched it off
-// (`accel.features()`); otherwise the bitsliced m31 code below does the work,
-// with the same bytes out. `schedule` is the standard expanded key.
+/* The hardware kernels (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
+ * runtime/crypto_*.S, called with spans the compiler range-checks. A kernel runs
+ * only if the CPU has AES-NI and PCLMULQDQ (or ARMv8 AES and PMULL), the key is
+ * AES-128 or AES-256, and `M31_CRYPTO_ACCEL` has not switched it off
+ * (`accel.features()`); otherwise the bitsliced m31 code below does the work,
+ * with the same bytes out. `schedule` is the standard expanded key. */
 prim "c" nonblocking void __k_aes_ecb(
     in bytes schedule[0 .. 16 * (rounds + 1)],
     int rounds in 10 | 14,
@@ -79,15 +79,15 @@ prim "c" nonblocking void __k_aes_ctr(
 pub type Cipher {
     /// The standard expanded key, `rounds + 1` round keys of 16 octets, for the kernels.
     bytes schedule;
-    /// Eight planes per round key, `(rounds + 1)` round keys: each round key's
-    /// 16 octets broadcast to the four block slots of the bitsliced layout.
+    /** Eight planes per round key, `(rounds + 1)` round keys: each round key's
+     * 16 octets broadcast to the four block slots of the bitsliced layout. */
     Array<int> round_keys;
     int rounds;
 }
 
-/// Encrypts one 16-octet block; any other length traps. (A whole bitsliced
-/// batch is computed and three of its four slots are thrown away: use
-/// `encrypt_blocks` for more than one block.)
+/** Encrypts one 16-octet block; any other length traps. (A whole bitsliced
+ * batch is computed and three of its four slots are thrown away: use
+ * `encrypt_blocks` for more than one block.) */
 pub bytes Cipher.encrypt_block(bytes block) {
     if (block.size() != 16) {
         trap("aes: a block is 16 bytes");
@@ -95,15 +95,15 @@ pub bytes Cipher.encrypt_block(bytes block) {
     return encrypt_blocks(block);
 }
 
-// Whether the kernels may run for this key: the CPU has them, they are not
-// switched off, and the key is AES-128 or AES-256 (the round counts they take).
+/* Whether the kernels may run for this key: the CPU has them, they are not
+ * switched off, and the key is AES-128 or AES-256 (the round counts they take). */
 bool Cipher.has_kernel() {
     return (accel.features() & accel.AES) != 0 && (rounds == 10 || rounds == 14);
 }
 
-/// Encrypts `blocks`, any whole number of 16-octet blocks, each independently
-/// (ECB -- the building block of CTR and GCM, not a mode to use on its own).
-/// Any length that is not a multiple of 16 traps.
+/** Encrypts `blocks`, any whole number of 16-octet blocks, each independently
+ * (ECB -- the building block of CTR and GCM, not a mode to use on its own).
+ * Any length that is not a multiple of 16 traps. */
 pub bytes Cipher.encrypt_blocks(bytes blocks) {
     int size = blocks.size();
     if (size % 16 != 0) {
@@ -147,19 +147,19 @@ pub bytes Cipher.encrypt_blocks(bytes blocks) {
     return out;
 }
 
-/// CTR mode through the hardware kernel, if there is one: `out[0 .. count)`
-/// becomes `data[0 .. count)` XOR the keystream of the 128-bit big-endian
-/// counter block `counter` (16 octets), which is advanced in place by one per
-/// block used (a partial last block counts as one). Returns `false` and does
-/// nothing when this CPU has no kernel, so the caller runs its own loop.
-/// `out` may be `data` itself. The increment is over all 128 bits, so a
-/// caller whose counter is only the low 32 bits (GCM) must not wrap it.
+/** CTR mode through the hardware kernel, if there is one: `out[0 .. count)`
+ * becomes `data[0 .. count)` XOR the keystream of the 128-bit big-endian
+ * counter block `counter` (16 octets), which is advanced in place by one per
+ * block used (a partial last block counts as one). Returns `false` and does
+ * nothing when this CPU has no kernel, so the caller runs its own loop.
+ * `out` may be `data` itself. The increment is over all 128 bits, so a
+ * caller whose counter is only the low 32 bits (GCM) must not wrap it. */
 pub bool Cipher.did_ctr_xor(bytes counter, bytes data, int count, bytes out) {
     return did_ctr_xor_at(counter, data, 0, count, out);
 }
 
-/// `ctr_xor` for `data[off .. off + count)` into `out[off .. off + count)`:
-/// the same range of both, so a caller can work through a buffer in pieces.
+/** `ctr_xor` for `data[off .. off + count)` into `out[off .. off + count)`:
+ * the same range of both, so a caller can work through a buffer in pieces. */
 pub bool Cipher.did_ctr_xor_at(bytes counter, bytes data, int off, int count, bytes out) {
     if (count <= 0 || !has_kernel() || counter.size() != 16) {
         return false;
@@ -187,9 +187,9 @@ pub bool Cipher.did_ctr_xor_at(bytes counter, bytes data, int off, int count, by
     return true;
 }
 
-// An 8x8 bit transpose inside each 64-bit word: bit 8 * m + b swaps with bit
-// 8 * b + m. Three delta swaps; the masks keep `>>`'s sign fill out. Its own
-// inverse.
+/* An 8x8 bit transpose inside each 64-bit word: bit 8 * m + b swaps with bit
+ * 8 * b + m. Three delta swaps; the masks keep `>>`'s sign fill out. Its own
+ * inverse. */
 int transpose_bits(int x) {
     int temp = (x ^ (x >> 7)) & 0x00AA_00AA_00AA_00AA;
     x = x ^ temp ^ (temp << 7);
@@ -199,8 +199,8 @@ int transpose_bits(int x) {
     return x ^ temp ^ (temp << 28);
 }
 
-// The 8x8 byte transpose across eight words: byte b of out[j] is byte j of
-// in[b]. Three delta swaps at 32, 16 and 8 bits. Its own inverse.
+/* The 8x8 byte transpose across eight words: byte b of out[j] is byte j of
+ * in[b]. Three delta swaps at 32, 16 and 8 bits. Its own inverse. */
 void transpose_bytes(Array<int> lanes) {
     for (int i in 0 .. 4) {
         int temp = (lanes[i] >> 32 ^ lanes[i + 4]) & 0x0000_0000_FFFF_FFFF;
@@ -221,8 +221,8 @@ void transpose_bytes(Array<int> lanes) {
     }
 }
 
-// Eight little-endian words of 64 state bytes (word j holds bytes 8j..8j+7)
-// into eight planes (plane k, bit n = bit k of byte n).
+/* Eight little-endian words of 64 state bytes (word j holds bytes 8j..8j+7)
+ * into eight planes (plane k, bit n = bit k of byte n). */
 void pack_planes(Array<int> words, Array<int> planes) {
     for (int j in 0 .. 8) {
         planes[j] = transpose_bits(words[j]);
@@ -246,8 +246,8 @@ int word_le(bytes data, int offset) {
     return data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24);
 }
 
-// SubBytes on the four bytes of a 32-bit word: the same circuit, with the
-// bytes as positions 0-3 of each plane.
+/* SubBytes on the four bytes of a 32-bit word: the same circuit, with the
+ * bytes as positions 0-3 of each plane. */
 int substitute_word(int word) {
     int u_0 = (word >> 0 & 1) | (word >> 8 & 1) << 1 | (word >> 16 & 1) << 2 | (word >> 24 & 1) << 3;
     int u_1 = (word >> 1 & 1) | (word >> 9 & 1) << 1 | (word >> 17 & 1) << 2 | (word >> 25 & 1) << 3;
@@ -431,8 +431,8 @@ Array<int> expand_words(bytes key, int rounds) {
     return words;
 }
 
-/// The key schedule for `key`, 16 octets (AES-128) or 32 (AES-256); any other
-/// length traps.
+/** The key schedule for `key`, 16 octets (AES-128) or 32 (AES-256); any other
+ * length traps. */
 pub Cipher cipher(bytes key) {
     if (key.size() != 16 && key.size() != 32) {
         trap("aes: key must be 16 or 32 bytes");
@@ -441,9 +441,9 @@ pub Cipher cipher(bytes key) {
     Array<int> words = expand_words(key, rounds);
     Array<int> round_keys = [0; 8 * (rounds + 1)];
     for (int round in 0 .. rounds + 1) {
-        // The round key's 16 octets as two 64-bit words, packed into planes
-        // (the same transposes the data takes), then repeated for the four
-        // block slots.
+        /* The round key's 16 octets as two 64-bit words, packed into planes
+         * (the same transposes the data takes), then repeated for the four
+         * block slots. */
         Array<int> halves = [0; 8];
         halves[0] = words[4 * round] | (words[4 * round + 1] << 32);
         halves[1] = words[4 * round + 2] | (words[4 * round + 3] << 32);
@@ -463,10 +463,10 @@ pub Cipher cipher(bytes key) {
     return Cipher(schedule, round_keys, rounds);
 }
 
-// All rounds on one batch of four blocks, in planes. Everything lives in
-// locals; each loop iteration is one full round (SubBytes circuit,
-// ShiftRows, MixColumns, AddRoundKey) and the last round, which has no
-// MixColumns, is written out after it.
+/* All rounds on one batch of four blocks, in planes. Everything lives in
+ * locals; each loop iteration is one full round (SubBytes circuit,
+ * ShiftRows, MixColumns, AddRoundKey) and the last round, which has no
+ * MixColumns, is written out after it. */
 void encrypt_planes(Array<int> planes, Array<int> round_keys, int rounds) {
     int p_0 = planes[0] ^ round_keys[0];
     int p_1 = planes[1] ^ round_keys[1];

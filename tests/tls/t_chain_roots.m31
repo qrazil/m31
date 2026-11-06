@@ -1,20 +1,20 @@
-// Every root of a CA bundle, checked against itself, driven from
-// `test_chain.sh`.
-//
-//   t_chain_roots <bundle.pem>
-//
-// A root is self-issued, so its own signature has to verify under its own key:
-// the ECDSA and RSA code of `lib/pki/x509chain.m31` run over the real, varied
-// certificates of the system's roots. Prints one `fail` line per root that does
-// not verify (`self <family> <reason> signature <OID>`) and then the counts
-//
-//   roots <parsed> skipped <not parseable> rsa <n> ecdsa <n> other <n>
-//   verified <n> weak <n> unsupported <n> failed <n>
-//
-// `weak` is a root whose own signature uses MD5 or SHA-1: policy refuses such a
-// signature, and it never matters, since a root is trusted by its key and its
-// self-signature is not checked on a path. Exits 0 when no root `failed`, that
-// is when every root signed with a hash this client accepts verified.
+/* Every root of a CA bundle, checked against itself, driven from
+ * `test_chain.sh`.
+ *
+ *   t_chain_roots <bundle.pem>
+ *
+ * A root is self-issued, so its own signature has to verify under its own key:
+ * the ECDSA and RSA code of `lib/pki/x509chain.m31` run over the real, varied
+ * certificates of the system's roots. Prints one `fail` line per root that does
+ * not verify (`self <family> <reason> signature <OID>`) and then the counts
+ *
+ *   roots <parsed> skipped <not parseable> rsa <n> ecdsa <n> other <n>
+ *   verified <n> weak <n> unsupported <n> failed <n>
+ *
+ * `weak` is a root whose own signature uses MD5 or SHA-1: policy refuses such a
+ * signature, and it never matters, since a root is trusted by its key and its
+ * self-signature is not checked on a path. Exits 0 when no root `failed`, that
+ * is when every root signed with a hash this client accepts verified. */
 
 import io;
 import os;

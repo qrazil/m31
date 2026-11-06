@@ -1,94 +1,94 @@
-// SSH Phase 2 (`docs/ssh-decision.md`): the transport protocol. Version
-// exchange, the binary packet protocol (both before and after keys exist),
-// `KEXINIT` negotiation, the curve25519-sha256 key exchange, session key
-// derivation, and `SSH_MSG_NEWKEYS` -- ending with a `Transport` a future
-// Phase 3 (`ssh-userauth`, RFC 4252) and Phase 4 (the connection protocol,
-// RFC 4254) build on, touching only `send`/`recv`/`session_id`/`close`.
-//
-// API
+/* SSH Phase 2 (`docs/ssh-decision.md`): the transport protocol. Version
+ * exchange, the binary packet protocol (both before and after keys exist),
+ * `KEXINIT` negotiation, the curve25519-sha256 key exchange, session key
+ * derivation, and `SSH_MSG_NEWKEYS` -- ending with a `Transport` a future
+ * Phase 3 (`ssh-userauth`, RFC 4252) and Phase 4 (the connection protocol,
+ * RFC 4254) build on, touching only `send`/`recv`/`session_id`/`close`.
+ *
+ * API */
 // ---
-//   ssh.connect(host, port, expected_host_key) -> Result<Transport, Error>
-//   ssh.connect_any(host, port, host_keys)     -> Result<Transport, Error>
-//   ssh.presented_host_key(host, port)         -> Result<HostKey, Error>
-//   key.fingerprint()  -> str     "SHA256:..." exactly as `ssh-keygen -lf` prints it
-//   key.blob_base64()  -> str     the key column of a `known_hosts` line
-//   t.send(payload)   -> Result<int, Error>     all of `payload`, or an error
-//   t.recv()          -> Result<bytes, Error>   one application message
-//   t.session_id()    -> bytes                  for Phase 3's auth signature
-//   t.close()         -> Result<bool, Error>
-//
-// `Link` (below) is the three-method interface Phase 3 (`lib/ssh/sshauth.m31`)
-// and Phase 4 (`lib/ssh/sshexec.m31`) are written against -- `Transport`
-// satisfies it structurally, and so does the scripted in-memory fake their
-// pure tests drive, which is what lets every message parser and state
-// machine in those modules be tested with no `sshd` in sight.
-//
-// The seam, testable with no `sshd` in sight (the same split
-// `apps/git/httpfetch.m31` draws, for the same reason -- see its own
-// header): every wire-format function below is pure, operating on `bytes`
-// already in memory. Only `connect` (via the private `do_handshake`) touches
-// a socket.
-//
-// Per `docs/ssh-decision.md` §2, this client proposes, and accepts, exactly
-// one algorithm suite -- curve25519-sha256 / ssh-ed25519 /
-// chacha20-poly1305@openssh.com -- and refuses cleanly if a server does not
-// offer all three. There is no fallback, ever.
-//
+/*   ssh.connect(host, port, expected_host_key) -> Result<Transport, Error>
+ *   ssh.connect_any(host, port, host_keys)     -> Result<Transport, Error>
+ *   ssh.presented_host_key(host, port)         -> Result<HostKey, Error>
+ *   key.fingerprint()  -> str     "SHA256:..." exactly as `ssh-keygen -lf` prints it
+ *   key.blob_base64()  -> str     the key column of a `known_hosts` line
+ *   t.send(payload)   -> Result<int, Error>     all of `payload`, or an error
+ *   t.recv()          -> Result<bytes, Error>   one application message
+ *   t.session_id()    -> bytes                  for Phase 3's auth signature
+ *   t.close()         -> Result<bool, Error>
+ *
+ * `Link` (below) is the three-method interface Phase 3 (`lib/ssh/sshauth.m31`)
+ * and Phase 4 (`lib/ssh/sshexec.m31`) are written against -- `Transport`
+ * satisfies it structurally, and so does the scripted in-memory fake their
+ * pure tests drive, which is what lets every message parser and state
+ * machine in those modules be tested with no `sshd` in sight.
+ *
+ * The seam, testable with no `sshd` in sight (the same split
+ * `apps/git/httpfetch.m31` draws, for the same reason -- see its own
+ * header): every wire-format function below is pure, operating on `bytes`
+ * already in memory. Only `connect` (via the private `do_handshake`) touches
+ * a socket.
+ *
+ * Per `docs/ssh-decision.md` §2, this client proposes, and accepts, exactly
+ * one algorithm suite -- curve25519-sha256 / ssh-ed25519 /
+ * chacha20-poly1305@openssh.com -- and refuses cleanly if a server does not
+ * offer all three. There is no fallback, ever.
+ * */
 // --- `chacha20-poly1305@openssh.com` is not generic AEAD ChaCha20-Poly1305 --
-//
-// `/usr/share/doc/openssh/PROTOCOL.chacha20poly1305` describes a
-// construction built on the *original* (pre-IETF) ChaCha20 word layout, two
-// separate 256-bit keys per direction (`K_1`, used only to encrypt the
-// 4-byte packet length; `K_2`, used for the Poly1305 one-time key and the
-// payload itself), and a nonce that is simply the packet sequence number --
-// nothing is exchanged for it. `lib/crypto/chacha20poly1305.m31`'s `seal`/`open`
-// implement RFC 8439's *different* construction (a cleartext length, an
-// AAD, a single key) and are not used here directly -- only
-// `chacha20poly1305.openssh_block` (the matching word layout),
-// `chacha20poly1305.mac` (Poly1305 alone) are, plus `consttime.is_equal` for
-// the tag check. See Part 6.
-//
+/*
+ * `/usr/share/doc/openssh/PROTOCOL.chacha20poly1305` describes a
+ * construction built on the *original* (pre-IETF) ChaCha20 word layout, two
+ * separate 256-bit keys per direction (`K_1`, used only to encrypt the
+ * 4-byte packet length; `K_2`, used for the Poly1305 one-time key and the
+ * payload itself), and a nonce that is simply the packet sequence number --
+ * nothing is exchanged for it. `lib/crypto/chacha20poly1305.m31`'s `seal`/`open`
+ * implement RFC 8439's *different* construction (a cleartext length, an
+ * AAD, a single key) and are not used here directly -- only
+ * `chacha20poly1305.openssh_block` (the matching word layout),
+ * `chacha20poly1305.mac` (Poly1305 alone) are, plus `consttime.is_equal` for
+ * the tag check. See Part 6.
+ * */
 // --- the shared secret's byte order: the RFC text vs. a real server ---------
-//
-// RFC 8731 §3.1 reads as if `x25519`'s shared-secret output (little-endian,
-// per RFC 7748) must be byte-reversed to big-endian before it becomes the
-// exchange hash's `mpint K`. A real `sshd` disagrees: the host-key signature
-// only verifies when `x25519`'s raw little-endian output is mpint-encoded
-// directly, with NO reversal -- found and confirmed the hard way, with
-// `tests/ssh/test_transport.sh`'s live fixture, exactly the kind of gap
-// `docs/ssh-decision.md` §4's "the oracle is a real implementation" rule
-// exists to catch. Part 4/`do_handshake` does what OpenSSH actually does,
-// not what the RFC's own wording suggests.
-//
-// `mpint` itself (RFC 4251 §5) is not a bare big-endian encoding regardless:
-// a leading `0x00` is *required* whenever the leading byte's top bit would
-// otherwise be set, true for roughly half of all real shared secrets -- an
-// ordinary-handshake case, not an edge case. Handled in `encode_mpint`.
-//
+/*
+ * RFC 8731 §3.1 reads as if `x25519`'s shared-secret output (little-endian,
+ * per RFC 7748) must be byte-reversed to big-endian before it becomes the
+ * exchange hash's `mpint K`. A real `sshd` disagrees: the host-key signature
+ * only verifies when `x25519`'s raw little-endian output is mpint-encoded
+ * directly, with NO reversal -- found and confirmed the hard way, with
+ * `tests/ssh/test_transport.sh`'s live fixture, exactly the kind of gap
+ * `docs/ssh-decision.md` §4's "the oracle is a real implementation" rule
+ * exists to catch. Part 4/`do_handshake` does what OpenSSH actually does,
+ * not what the RFC's own wording suggests.
+ *
+ * `mpint` itself (RFC 4251 §5) is not a bare big-endian encoding regardless:
+ * a leading `0x00` is *required* whenever the leading byte's top bit would
+ * otherwise be set, true for roughly half of all real shared secrets -- an
+ * ordinary-handshake case, not an edge case. Handled in `encode_mpint`.
+ * */
 // --- what is NOT here (`docs/ssh-decision.md` §1, §3) ------------------------
-//
-//   - Time-based rekeying (the client rekeys by traffic volume only; a
-//     server's rekey, whatever its reason, is answered).
-//   - Algorithm fallback of any kind. See above.
-//   - Compression (always negotiates "none").
-//   - Authentication (`ssh-userauth`, RFC 4252) and the connection protocol
-//     (RFC 4254, channels/`exec`) -- Phase 3 and Phase 4, each its own file
-//     on top of `Transport` (`lib/ssh/sshauth.m31`, `lib/ssh/sshexec.m31`).
-//   - A graceful `SSH_MSG_DISCONNECT` on `close()` -- nothing downstream
-//     depends on one yet; a two-line follow-up once something does.
-//   - Host-key *management*: `connect`/`connect_any` take the expected
-//     key(s) as plain arguments and refuse outright on a mismatch, never
-//     trusting on first use; where that expectation comes from is the
-//     caller's problem (`lib/ssh/sshhosts.m31` reads and appends to OpenSSH
-//     `known_hosts` files). What the library does give a caller who wants to
-//     ask a person ("the authenticity of host ... can't be established,
-//     fingerprint SHA256:..., continue?") is `presented_host_key`: the key a
-//     server offers, proved by its signature, with nothing trusted and no
-//     login attempted. The caller shows `key.fingerprint()`, and only if the
-//     person agrees records it (`sshhosts.add`) and connects again -- through
-//     the same refusing check as any other connection. `Error` stays
-//     payload-free (`docs/errors-decision.md` §4), so `HostKeyMismatch`
-//     does not carry the key; ask for it with `presented_host_key` instead.
+/*
+ *   - Time-based rekeying (the client rekeys by traffic volume only; a
+ *     server's rekey, whatever its reason, is answered).
+ *   - Algorithm fallback of any kind. See above.
+ *   - Compression (always negotiates "none").
+ *   - Authentication (`ssh-userauth`, RFC 4252) and the connection protocol
+ *     (RFC 4254, channels/`exec`) -- Phase 3 and Phase 4, each its own file
+ *     on top of `Transport` (`lib/ssh/sshauth.m31`, `lib/ssh/sshexec.m31`).
+ *   - A graceful `SSH_MSG_DISCONNECT` on `close()` -- nothing downstream
+ *     depends on one yet; a two-line follow-up once something does.
+ *   - Host-key *management*: `connect`/`connect_any` take the expected
+ *     key(s) as plain arguments and refuse outright on a mismatch, never
+ *     trusting on first use; where that expectation comes from is the
+ *     caller's problem (`lib/ssh/sshhosts.m31` reads and appends to OpenSSH
+ *     `known_hosts` files). What the library does give a caller who wants to
+ *     ask a person ("the authenticity of host ... can't be established,
+ *     fingerprint SHA256:..., continue?") is `presented_host_key`: the key a
+ *     server offers, proved by its signature, with nothing trusted and no
+ *     login attempted. The caller shows `key.fingerprint()`, and only if the
+ *     person agrees records it (`sshhosts.add`) and connects again -- through
+ *     the same refusing check as any other connection. `Error` stays
+ *     payload-free (`docs/errors-decision.md` §4), so `HostKeyMismatch`
+ *     does not carry the key; ask for it with `presented_host_key` instead. */
 
 import io;
 import net;
@@ -105,55 +105,55 @@ import timer;
 import encoding.base64;
 import ssh.sshcipher;
 
-/// Why a handshake, or a later `send`/`recv`, could not be completed.
-/// Payload-free (`docs/errors-decision.md` §4): nothing here needs more
-/// context than the caller already has.
+/** Why a handshake, or a later `send`/`recv`, could not be completed.
+ * Payload-free (`docs/errors-decision.md` §4): nothing here needs more
+ * context than the caller already has. */
 pub enum Error {
     /// The peer's version line was missing, malformed, or not `SSH-2.x`.
     BadVersion;
-    /// A length-prefixed field (a packet, a `string`, a name-list) named
-    /// more bytes than were actually present.
+    /** A length-prefixed field (a packet, a `string`, a name-list) named
+     * more bytes than were actually present. */
     Truncated;
-    /// A packet's own length or padding-length field is not self-consistent
-    /// (RFC 4253 §6's own bounds), or an encrypted length decoded to
-    /// something absurd.
+    /** A packet's own length or padding-length field is not self-consistent
+     * (RFC 4253 §6's own bounds), or an encrypted length decoded to
+     * something absurd. */
     BadPacketLength;
-    /// The computed Poly1305 tag did not match the one a packet carried --
-    /// nothing about that packet is trusted past this point.
+    /** The computed Poly1305 tag did not match the one a packet carried --
+     * nothing about that packet is trusted past this point. */
     MacMismatch;
-    /// A message's own type byte was not the one this step of the handshake
-    /// (or `recv`) expects.
+    /** A message's own type byte was not the one this step of the handshake
+     * (or `recv`) expects. */
     UnexpectedMessage;
     /// The server's `KEXINIT` did not offer `curve25519-sha256`.
     NoCommonKex;
     /// The server's `KEXINIT` did not offer `ssh-ed25519`.
     NoCommonHostKey;
-    /// The server's `KEXINIT` did not offer `chacha20-poly1305@openssh.com`
-    /// in both directions.
+    /** The server's `KEXINIT` did not offer `chacha20-poly1305@openssh.com`
+     * in both directions. */
     NoCommonCipher;
-    /// A host-key or signature blob named an algorithm other than
-    /// `ssh-ed25519` -- this client never negotiated anything else, so this
-    /// means a confused or malicious server, not a compatibility gap.
+    /** A host-key or signature blob named an algorithm other than
+     * `ssh-ed25519` -- this client never negotiated anything else, so this
+     * means a confused or malicious server, not a compatibility gap. */
     UnsupportedHostKeyType;
-    /// The server's host key (whose signature did verify) is none of the keys
-    /// the caller expected. `presented_host_key` says which key it was.
+    /** The server's host key (whose signature did verify) is none of the keys
+     * the caller expected. `presented_host_key` says which key it was. */
     HostKeyMismatch;
     /// The host key's signature over the exchange hash did not verify.
     BadSignature;
     /// The peer sent `SSH_MSG_DISCONNECT`.
     Disconnected;
-    /// The underlying connection failed -- a reset, a closed peer. `net`/`io`'s
-    /// own error already said which; there is nothing more specific to add
-    /// here.
+    /** The underlying connection failed -- a reset, a closed peer. `net`/`io`'s
+     * own error already said which; there is nothing more specific to add
+     * here. */
     Io;
-    /// The server's key-exchange value or host key was not a valid point or
-    /// key (off the curve, a modulus under 2048 bits, ...).
+    /** The server's key-exchange value or host key was not a valid point or
+     * key (off the curve, a modulus under 2048 bits, ...). */
     BadKeyExchange;
-    /// A read waited as long as the read timeout allows (`connect_any`'s
-    /// `timeout_ms`, `Transport.set_read_timeout`). **The transport cannot be
-    /// used afterwards**: the timeout may have fallen part way through a
-    /// packet, whose bytes were consumed, so the next packet would be read
-    /// from the middle of this one. Close it.
+    /** A read waited as long as the read timeout allows (`connect_any`'s
+     * `timeout_ms`, `Transport.set_read_timeout`). **The transport cannot be
+     * used afterwards**: the timeout may have fallen part way through a
+     * packet, whose bytes were consumed, so the next packet would be read
+     * from the middle of this one. Close it. */
     TimedOut;
 }
 
@@ -207,8 +207,8 @@ pub str Error.to_str() {
     }
 }
 
-/// Whether this is `UnsupportedHostKeyType`: a key or signature that is
-/// well formed but of a kind (or strength) this client does not use.
+/** Whether this is `UnsupportedHostKeyType`: a key or signature that is
+ * well formed but of a kind (or strength) this client does not use. */
 pub bool Error.is_unsupported_key() {
     return to_str() == Error.UnsupportedHostKeyType.to_str();
 }
@@ -225,17 +225,17 @@ const int SSH_MESSAGE_KEXINIT = 20;
 const int SSH_MESSAGE_NEWKEYS = 21;
 const int SSH_MESSAGE_KEX_ECDH_INIT = 30;
 const int SSH_MESSAGE_KEX_ECDH_REPLY = 31;
-// The one suite this client ever proposes or accepts (`docs/ssh-decision.md`
-// §2) -- spelled once, here, rather than repeated at each call site.
+/* The one suite this client ever proposes or accepts (`docs/ssh-decision.md`
+ * §2) -- spelled once, here, rather than repeated at each call site. */
 const str KEX_ALGO = "curve25519-sha256";
 const str HOST_KEY_ALGO = "ssh-ed25519";
 const str CIPHER_ALGO = "chacha20-poly1305@openssh.com";
 
 // --- Part 0: wire primitives --------------------------------------------------
 
-// A 32-bit word, big-endian, at `buf[at .. at+4)` -- the caller's own
-// responsibility to have already checked those bytes exist, exactly
-// `apps/git/httpfetch.m31`'s own `be32`.
+/* A 32-bit word, big-endian, at `buf[at .. at+4)` -- the caller's own
+ * responsibility to have already checked those bytes exist, exactly
+ * `apps/git/httpfetch.m31`'s own `be32`. */
 int be32(bytes buffer, int offset) {
     return buffer[offset] << 24 | buffer[offset + 1] << 16 | buffer[offset + 2] << 8 | buffer[offset + 3];
 }
@@ -247,23 +247,23 @@ void push_u32(bytes out, int value) {
     out.push(value & 0xFF);
 }
 
-/// One field parsed off the wire: its raw content, and the caller's next
-/// offset -- this language has no tuples (`apps/git/FRICTION.md` §2), the
-/// same reason `apps/git/httpfetch.m31`'s own `Packet` carries both.
+/** One field parsed off the wire: its raw content, and the caller's next
+ * offset -- this language has no tuples (`apps/git/FRICTION.md` §2), the
+ * same reason `apps/git/httpfetch.m31`'s own `Packet` carries both. */
 pub type Field {
     pub bytes value;
     pub int next;
 }
 
-/// An SSH `string` (RFC 4251 §5): `uint32` length, then that many octets,
-/// appended to `out`.
+/** An SSH `string` (RFC 4251 §5): `uint32` length, then that many octets,
+ * appended to `out`. */
 pub void push_string(bytes out, bytes content) {
     push_u32(out, content.size());
     out.extend(content);
 }
 
-/// An SSH `string` parsed out of `buf[at ..]`. `Err(Error.Truncated)` if the
-/// length field itself, or the content it names, is not all there.
+/** An SSH `string` parsed out of `buf[at ..]`. `Err(Error.Truncated)` if the
+ * length field itself, or the content it names, is not all there. */
 pub Result<Field, Error> parse_string(bytes buffer, int offset) {
     if (offset < 0 || offset + 4 > buffer.size()) {
         return Result<Field, Error>.Err(Error.Truncated);
@@ -276,9 +276,9 @@ pub Result<Field, Error> parse_string(bytes buffer, int offset) {
     return Result<Field, Error>.Ok(Field(value, offset + 4 + length));
 }
 
-/// A name-list (RFC 4251 §5): an SSH `string` whose content is a
-/// comma-separated list of algorithm names, parsed into `List<str>`. Empty
-/// content is an empty list, not a one-element list holding `""`.
+/** A name-list (RFC 4251 §5): an SSH `string` whose content is a
+ * comma-separated list of algorithm names, parsed into `List<str>`. Empty
+ * content is an empty list, not a one-element list holding `""`. */
 pub type NameList {
     pub List<str> names;
     pub int next;
@@ -308,12 +308,12 @@ pub Result<NameList, Error> parse_name_list(bytes buffer, int offset) {
     return Result<NameList, Error>.Ok(NameList(names, field.next));
 }
 
-/// RFC 4251 §5 `mpint`: `be_value`'s big-endian bytes, re-encoded as the
-/// shortest unsigned representation (zero is the empty string; a leading
-/// `0x00` is added exactly when needed to keep the top bit clear, never
-/// otherwise), then wrapped as an SSH `string` -- ready to append into the
-/// exchange hash or a packet payload. See this module's header for why the
-/// leading-zero rule is not an edge case here.
+/** RFC 4251 §5 `mpint`: `be_value`'s big-endian bytes, re-encoded as the
+ * shortest unsigned representation (zero is the empty string; a leading
+ * `0x00` is added exactly when needed to keep the top bit clear, never
+ * otherwise), then wrapped as an SSH `string` -- ready to append into the
+ * exchange hash or a packet payload. See this module's header for why the
+ * leading-zero rule is not an edge case here. */
 pub bytes encode_mpint(bytes be_value) {
     bool is_all_zero = true;
     for (int octet in be_value) {
@@ -340,10 +340,10 @@ pub bytes encode_mpint(bytes be_value) {
     return out;
 }
 
-// A failed read, as this module's error: the socket's read timeout expiring
-// (EAGAIN, 11, which `net` documents as how a timeout arrives through a
-// stream method) is `TimedOut`, anything else `Io`. The cases are listed one
-// by one because `io.Error`'s `match` has no default.
+/* A failed read, as this module's error: the socket's read timeout expiring
+ * (EAGAIN, 11, which `net` documents as how a timeout arrives through a
+ * stream method) is `TimedOut`, anything else `Io`. The cases are listed one
+ * by one because `io.Error`'s `match` has no default. */
 Error failure_of(io.Error cause) {
     match (cause) {
         case Other(int code): {
@@ -376,12 +376,12 @@ Error failure_of(io.Error cause) {
     }
 }
 
-/// Server-supplied text made safe to print: C0 and C1 control characters
-/// (except newline and tab), DEL, and the invisible or direction-changing
-/// characters (zero-width, bidi overrides and isolates, the BOM) are dropped,
-/// so a banner, a name or a message cannot move the cursor, retitle the
-/// window, inject escape sequences or reorder what the reader sees. Linear
-/// in the length of `text`.
+/** Server-supplied text made safe to print: C0 and C1 control characters
+ * (except newline and tab), DEL, and the invisible or direction-changing
+ * characters (zero-width, bidi overrides and isolates, the BOM) are dropped,
+ * so a banner, a name or a message cannot move the cursor, retitle the
+ * window, inject escape sequences or reorder what the reader sees. Linear
+ * in the length of `text`. */
 pub str sanitize_text(str text) {
     List<int> kept = [];
     for (int code in text.chars()) {
@@ -396,10 +396,10 @@ pub str sanitize_text(str text) {
     return str.from_chars(kept);
 }
 
-/// What the transport needs of the byte stream under it. A `net.Conn` is
-/// one; `sshjump.ChannelWire` (a TCP connection tunnelled through another
-/// SSH session, for `ProxyJump`) is the other. Nothing here is specific to a
-/// socket except `fileno`, which an event loop may poll on.
+/** What the transport needs of the byte stream under it. A `net.Conn` is
+ * one; `sshjump.ChannelWire` (a TCP connection tunnelled through another
+ * SSH session, for `ProxyJump`) is the other. Nothing here is specific to a
+ * socket except `fileno`, which an event loop may poll on. */
 pub interface Wire {
     Result<bytes, io.Error> read(int byte_count);
     Result<bytes, io.Error> read_until(bytes delimiter, int limit);
@@ -412,21 +412,21 @@ pub interface Wire {
 
 prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
 
-/// A `net.Conn` as a `Wire` that **never parks on the reactor**: every wait
-/// for the socket is a `poll(2)` on the carrier's own thread, so a program
-/// with one thread of control (an interactive client) depends on nothing but
-/// the kernel for its connection. (A server running many green threads
-/// wants the other thing -- the parked wait -- and should use the `net.Conn`
-/// itself.) Reads honour the read timeout (`Error.TimedOut`); writes wait for
-/// the socket to be writable before each attempt, so `write_some` never
-/// finds it full.
+/** A `net.Conn` as a `Wire` that **never parks on the reactor**: every wait
+ * for the socket is a `poll(2)` on the carrier's own thread, so a program
+ * with one thread of control (an interactive client) depends on nothing but
+ * the kernel for its connection. (A server running many green threads
+ * wants the other thing -- the parked wait -- and should use the `net.Conn`
+ * itself.) Reads honour the read timeout (`Error.TimedOut`); writes wait for
+ * the socket to be writable before each attempt, so `write_some` never
+ * finds it full. */
 pub type PollWire {
     pub net.Conn connection;
     int timeout_ms = 0;
 }
 
-// Waits for `events` (1 readable, 4 writable) for up to the read timeout;
-// 1 ready, 0 timed out, -1 failed.
+/* Waits for `events` (1 readable, 4 writable) for up to the read timeout;
+ * 1 ready, 0 timed out, -1 failed. */
 int PollWire.await(int events) {
     List<int> fds = [connection.fileno()];
     List<int> wanted = [events];
@@ -535,13 +535,13 @@ pub int PollWire.fileno() {
     return connection.fileno();
 }
 
-// Reads exactly `byte_count` bytes from `connection`, looping over `net.Conn.read`'s own
-// "1..n bytes, no exact-read primitive" contract. A 0-length read before `byte_count`
-// bytes have arrived means the peer is gone.
-//
-// With `deadline_ns` above 0 (a `timer.monotonic_ns` time) the whole read has
-// until then, not each chunk: a peer that sends one byte just inside every
-// per-read timeout cannot hold the reader for ever.
+/* Reads exactly `byte_count` bytes from `connection`, looping over `net.Conn.read`'s own
+ * "1..n bytes, no exact-read primitive" contract. A 0-length read before `byte_count`
+ * bytes have arrived means the peer is gone.
+ *
+ * With `deadline_ns` above 0 (a `timer.monotonic_ns` time) the whole read has
+ * until then, not each chunk: a peer that sends one byte just inside every
+ * per-read timeout cannot hold the reader for ever. */
 Result<bytes, Error> read_exact(Wire connection, int byte_count, int deadline_ns = 0) {
     bytes out = [];
     while (out.size() < byte_count) {
@@ -567,10 +567,10 @@ Result<bytes, Error> read_exact(Wire connection, int byte_count, int deadline_ns
 
 const str CLIENT_VERSION_STR = "SSH-2.0-m31_0.1";
 
-// Both version strings, verbatim minus their trailing CRLF -- fed unmodified
-// into the exchange hash later (Part 4). Private: version exchange is one of
-// the two functions in this module that touches a socket, tested only
-// against a real `sshd`, per this module's own header.
+/* Both version strings, verbatim minus their trailing CRLF -- fed unmodified
+ * into the exchange hash later (Part 4). Private: version exchange is one of
+ * the two functions in this module that touches a socket, tested only
+ * against a real `sshd`, per this module's own header. */
 type VersionPair {
     bytes v_c;
     bytes v_s;
@@ -616,8 +616,8 @@ Result<VersionPair, Error> exchange_version(Wire connection) {
             }
             return Result<VersionPair, Error>.Ok(VersionPair(v_c, v_s));
         }
-        // RFC 4253 §4.2: the server MAY send other lines before its version
-        // line, which a client MUST tolerate -- loop and read another.
+        /* RFC 4253 §4.2: the server MAY send other lines before its version
+         * line, which a client MUST tolerate -- loop and read another. */
     }
 }
 
@@ -626,29 +626,29 @@ Result<VersionPair, Error> exchange_version(Wire connection) {
 const int MIN_PADDING = 4;
 const int BLOCK_SIZE = 8;
 
-// RFC 4253 §6's padding rule, for the PLAINTEXT framing only (Part 2): the
-// smallest value in `[MIN_PADDING, 255]` making the WHOLE wire packet -- the
-// 4-byte `packet_length` field itself, `padding_length`, `payload` and the
-// random padding, concatenated -- a multiple of `BLOCK_SIZE`. The RFC's own
-// wording is explicit that the length field is part of what gets aligned,
-// not just the value it names: "the length of the concatenation of
-// 'packet_length', 'padding_length', 'payload', and 'random padding' MUST be
-// a multiple of the cipher block size or 8" -- so this is `4 + 1 +
-// payload_len + pad`, not `1 + payload_len + pad`. Confirmed against a real
-// `sshd` (`tests/ssh/test_transport.sh`): without the `+4` it rejected this
-// client's own `KEXINIT` with "padding error ... block 8 mod 4" before any
-// cipher existed to blame.
-//
-// **`chacha20-poly1305@openssh.com`'s ciphered framing (Part 6) does NOT
-// use this function -- see `compute_padding_len_ciphered` below, and do not
-// "simplify" these back into one.** The two genuinely differ: this cipher
-// encrypts its 4-byte length field with a wholly separate keystream (`K_1`),
-// so that field is never part of the block-aligned run the way it is for an
-// ordinary block cipher RFC 4253 §6 was written for. Confirmed the same way,
-// against the same real `sshd`: using *this* function for Part 6 produced
-// "padding error ... block 8 mod 4" on the very first post-`NEWKEYS` packet,
-// even though the plaintext handshake before it (using this exact rule) had
-// just succeeded -- the cipher's own padding target is smaller.
+/* RFC 4253 §6's padding rule, for the PLAINTEXT framing only (Part 2): the
+ * smallest value in `[MIN_PADDING, 255]` making the WHOLE wire packet -- the
+ * 4-byte `packet_length` field itself, `padding_length`, `payload` and the
+ * random padding, concatenated -- a multiple of `BLOCK_SIZE`. The RFC's own
+ * wording is explicit that the length field is part of what gets aligned,
+ * not just the value it names: "the length of the concatenation of
+ * 'packet_length', 'padding_length', 'payload', and 'random padding' MUST be
+ * a multiple of the cipher block size or 8" -- so this is `4 + 1 +
+ * payload_len + pad`, not `1 + payload_len + pad`. Confirmed against a real
+ * `sshd` (`tests/ssh/test_transport.sh`): without the `+4` it rejected this
+ * client's own `KEXINIT` with "padding error ... block 8 mod 4" before any
+ * cipher existed to blame.
+ *
+ * **`chacha20-poly1305@openssh.com`'s ciphered framing (Part 6) does NOT
+ * use this function -- see `compute_padding_len_ciphered` below, and do not
+ * "simplify" these back into one.** The two genuinely differ: this cipher
+ * encrypts its 4-byte length field with a wholly separate keystream (`K_1`),
+ * so that field is never part of the block-aligned run the way it is for an
+ * ordinary block cipher RFC 4253 §6 was written for. Confirmed the same way,
+ * against the same real `sshd`: using *this* function for Part 6 produced
+ * "padding error ... block 8 mod 4" on the very first post-`NEWKEYS` packet,
+ * even though the plaintext handshake before it (using this exact rule) had
+ * just succeeded -- the cipher's own padding target is smaller. */
 int compute_padding_length(int payload_length) {
     int pad = BLOCK_SIZE - (5 + payload_length) % BLOCK_SIZE;
     if (pad < MIN_PADDING) {
@@ -657,11 +657,11 @@ int compute_padding_length(int payload_length) {
     return pad;
 }
 
-// The padding rule for `chacha20-poly1305@openssh.com`'s own framing (Part
-// 6): `padding_length + payload + random padding` alone -- never the 4-byte
-// length field, which this cipher always encrypts separately. See
-// `compute_padding_len`'s own comment for why these two are not the same
-// function, confirmed against a real `sshd`.
+/* The padding rule for `chacha20-poly1305@openssh.com`'s own framing (Part
+ * 6): `padding_length + payload + random padding` alone -- never the 4-byte
+ * length field, which this cipher always encrypts separately. See
+ * `compute_padding_len`'s own comment for why these two are not the same
+ * function, confirmed against a real `sshd`. */
 int compute_padding_length_ciphered(int payload_length) {
     int pad = BLOCK_SIZE - (1 + payload_length) % BLOCK_SIZE;
     if (pad < MIN_PADDING) {
@@ -670,16 +670,16 @@ int compute_padding_length_ciphered(int payload_length) {
     return pad;
 }
 
-/// One packet's payload, and the caller's next offset -- used for both the
-/// plaintext framing below and, once a whole ciphered packet has been
-/// decrypted, to strip its own padding (Part 6).
+/** One packet's payload, and the caller's next offset -- used for both the
+ * plaintext framing below and, once a whole ciphered packet has been
+ * decrypted, to strip its own padding (Part 6). */
 pub type RawPacket {
     pub bytes payload;
     pub int next;
 }
 
-/// RFC 4253 §6, before any cipher exists: `uint32 packet_length`, `byte
-/// padding_length`, `payload`, random padding -- no MAC.
+/** RFC 4253 §6, before any cipher exists: `uint32 packet_length`, `byte
+ * padding_length`, `payload`, random padding -- no MAC. */
 pub bytes encode_plain_packet(bytes payload, random.System rng) {
     int pad_length = compute_padding_length(payload.size());
     int packet_length = 1 + payload.size() + pad_length;
@@ -708,11 +708,11 @@ pub Result<RawPacket, Error> parse_plain_packet(bytes buffer, int offset) {
     return Result<RawPacket, Error>.Ok(RawPacket(payload, offset + 4 + packet_length));
 }
 
-// Reads one whole plaintext packet off `connection` and hands back just its
-// payload -- the length is sent in clear at this stage, so the total size
-// is known as soon as the first four bytes arrive, and this reuses
-// `parse_plain_packet` on the assembled buffer rather than duplicating its
-// padding-bounds logic.
+/* Reads one whole plaintext packet off `connection` and hands back just its
+ * payload -- the length is sent in clear at this stage, so the total size
+ * is known as soon as the first four bytes arrive, and this reuses
+ * `parse_plain_packet` on the assembled buffer rather than duplicating its
+ * padding-bounds logic. */
 Result<bytes, Error> recv_plain_payload(Wire connection) {
     bytes length_bytes = read_exact(connection, 4)?;
     int packet_length = be32(length_bytes, 0);
@@ -740,10 +740,10 @@ Result<void, Error> send_plain_payload(Wire connection, bytes payload, random.Sy
 
 // --- Part 3: KEXINIT and algorithm negotiation (RFC 4253 §7.1) ---------------
 
-/// One `KEXINIT` message, parsed or about to be built. `raw` is the exact
-/// payload bytes this was parsed from (or, for this client's own, that
-/// `build_kexinit` produced) -- needed verbatim, unmodified, as `I_C`
-/// or `I_S` in the exchange hash (Part 4).
+/** One `KEXINIT` message, parsed or about to be built. `raw` is the exact
+ * payload bytes this was parsed from (or, for this client's own, that
+ * `build_kexinit` produced) -- needed verbatim, unmodified, as `I_C`
+ * or `I_S` in the exchange hash (Part 4). */
 pub type KexInit {
     pub bytes cookie;
     pub List<str> kex_algorithms;
@@ -760,14 +760,14 @@ pub type KexInit {
     pub bytes raw;
 }
 
-/// What this client is willing to speak, each list in order of preference
-/// (RFC 4253 §7.1: the algorithm used is the first one on the *client's*
-/// list that the server also lists). **Nothing weaker than what is listed
-/// here is ever used**: there is no `none` cipher, no SHA-1, no CBC, no
-/// `diffie-hellman-group1`, no `ssh-rsa` signatures over SHA-1, no
-/// compression. `kex-strict-c-v00@openssh.com` is a marker, not a key
-/// exchange: it asks a server that understands it to apply "strict kex"
-/// (see `exchange_keys`).
+/** What this client is willing to speak, each list in order of preference
+ * (RFC 4253 §7.1: the algorithm used is the first one on the *client's*
+ * list that the server also lists). **Nothing weaker than what is listed
+ * here is ever used**: there is no `none` cipher, no SHA-1, no CBC, no
+ * `diffie-hellman-group1`, no `ssh-rsa` signatures over SHA-1, no
+ * compression. `kex-strict-c-v00@openssh.com` is a marker, not a key
+ * exchange: it asks a server that understands it to apply "strict kex"
+ * (see `exchange_keys`). */
 pub type Offer {
     pub List<str> kex;
     pub List<str> host_keys;
@@ -795,18 +795,18 @@ pub Offer default_offer() {
     return Offer([KEX_ALGO, KEX_C25519_ALIAS, KEX_ECDH_P256, KEX_STRICT_CLIENT], [HOST_KEY_ALGO, HOST_KEY_ECDSA_P256, SIG_RSA_SHA512, SIG_RSA_SHA256], [CIPHER_ALGO, CIPHER_GCM256, CIPHER_GCM128, CIPHER_CTR256, CIPHER_CTR128], [MAC_ETM, MAC_PLAIN]);
 }
 
-/// The default offer with `host_key_algorithms` first, in that order, then
-/// the rest of the defaults not already named: how a client that holds a
-/// `known_hosts` entry of one type asks the server for that type (a server
-/// presents the first of the client's list it has; OpenSSH does the same).
-/// Names that are not host-key algorithms this client implements are
-/// ignored, so a file's `ssh-dss` line cannot widen the offer.
+/** The default offer with `host_key_algorithms` first, in that order, then
+ * the rest of the defaults not already named: how a client that holds a
+ * `known_hosts` entry of one type asks the server for that type (a server
+ * presents the first of the client's list it has; OpenSSH does the same).
+ * Names that are not host-key algorithms this client implements are
+ * ignored, so a file's `ssh-dss` line cannot widen the offer. */
 pub Offer offer_preferring(List<str> host_key_algorithms) {
     Offer offer = default_offer();
     List<str> ordered = [];
     for (str given in host_key_algorithms) {
-        // A key *type* from a known_hosts line; RSA's signature algorithms
-        // are the SHA-2 ones (never `ssh-rsa`, which is SHA-1).
+        /* A key *type* from a known_hosts line; RSA's signature algorithms
+         * are the SHA-2 ones (never `ssh-rsa`, which is SHA-1). */
         List<str> names = [given];
         if (given == HOST_KEY_RSA) {
             names = [SIG_RSA_SHA512, SIG_RSA_SHA256];
@@ -826,9 +826,9 @@ pub Offer offer_preferring(List<str> host_key_algorithms) {
     return offer;
 }
 
-/// This client's `KEXINIT` for `offer`: empty MAC lists when no CTR cipher
-/// is offered (the AEAD ciphers authenticate themselves), `"none"`
-/// compression, no languages.
+/** This client's `KEXINIT` for `offer`: empty MAC lists when no CTR cipher
+ * is offered (the AEAD ciphers authenticate themselves), `"none"`
+ * compression, no languages. */
 pub bytes build_kexinit(random.System rng, Offer offer) {
     List<str> empty = [];
     bytes out = [];
@@ -888,8 +888,8 @@ pub type Suite {
     pub str cipher_server_to_client;
     pub str mac_client_to_server;
     pub str mac_server_to_client;
-    /// The server also speaks strict kex (RFC-less, OpenSSH 9.6's Terrapin
-    /// fix): sequence numbers restart at 0 after NEWKEYS.
+    /** The server also speaks strict kex (RFC-less, OpenSSH 9.6's Terrapin
+     * fix): sequence numbers restart at 0 after NEWKEYS. */
     pub bool is_strict;
 }
 
@@ -907,9 +907,9 @@ bool is_aead(str cipher) {
     return cipher == CIPHER_ALGO || cipher == CIPHER_GCM256 || cipher == CIPHER_GCM128;
 }
 
-/// RFC 4253 §7.1 negotiation of `offer` against the server's `KEXINIT`.
-/// The three refusals are separate and named; a partial agreement is never
-/// returned. `kex-strict-*` markers are never chosen as an algorithm.
+/** RFC 4253 §7.1 negotiation of `offer` against the server's `KEXINIT`.
+ * The three refusals are separate and named; a partial agreement is never
+ * returned. `kex-strict-*` markers are never chosen as an algorithm. */
 pub Result<Suite, Error> negotiate(Offer offer, KexInit server) {
     List<str> markers = [KEX_STRICT_CLIENT, KEX_STRICT_SERVER];
     str kex = first_common(offer.kex, server.kex_algorithms, markers);
@@ -944,8 +944,8 @@ pub Result<Suite, Error> negotiate(Offer offer, KexInit server) {
     return Result<Suite, Error>.Ok(Suite(kex, host_key, cipher_c2s, cipher_s2c, mac_c2s, mac_s2c, is_strict));
 }
 
-/// `negotiate` against `default_offer()`, as a yes/no: `Ok` means a
-/// connection with this server can proceed.
+/** `negotiate` against `default_offer()`, as a yes/no: `Ok` means a
+ * connection with this server can proceed. */
 pub Result<void, Error> check_server_kexinit(KexInit server) {
     negotiate(default_offer(), server)?;
     return Result<void, Error>.Ok;
@@ -960,8 +960,8 @@ pub bytes build_kex_ecdh_init(bytes q_c) {
     return out;
 }
 
-// `K_S` (host key blob), `Q_S` (server's ephemeral public key) and the
-// signature blob, exactly as `SSH_MSG_KEX_ECDH_REPLY` carries them.
+/* `K_S` (host key blob), `Q_S` (server's ephemeral public key) and the
+ * signature blob, exactly as `SSH_MSG_KEX_ECDH_REPLY` carries them. */
 type KexEcdhReply {
     bytes k_s;
     bytes q_s;
@@ -981,10 +981,10 @@ Result<KexEcdhReply, Error> parse_kex_ecdh_reply(bytes payload) {
     return Result<KexEcdhReply, Error>.Ok(KexEcdhReply(k_s.value, q_s.value, sig.value));
 }
 
-// `K_S` and a signature blob share the same shape (RFC 8709): `string
-// "ssh-ed25519"` then `string <raw octets>`. A name other than
-// `ssh-ed25519` means a confused or malicious server -- this client never
-// negotiated anything else.
+/* `K_S` and a signature blob share the same shape (RFC 8709): `string
+ * "ssh-ed25519"` then `string <raw octets>`. A name other than
+ * `ssh-ed25519` means a confused or malicious server -- this client never
+ * negotiated anything else. */
 Result<bytes, Error> parse_blob(bytes blob) {
     Field name = parse_string(blob, 0)?;
     match (name.value.utf8()) {
@@ -1011,11 +1011,11 @@ pub Result<bytes, Error> parse_signature_blob(bytes blob) {
     return parse_blob(blob);
 }
 
-/// `H`, RFC 5656 §4: `HASH(string V_C || string V_S || string I_C ||
-/// string I_S || string K_S || string Q_C || string Q_S || mpint K)`, with
-/// SHA-256 (what both `curve25519-sha256` and `ecdh-sha2-nistp256` use).
-/// `k_mpint` is already the full, length-prefixed encoding `encode_mpint`
-/// produces, so it is appended verbatim rather than wrapped again.
+/** `H`, RFC 5656 §4: `HASH(string V_C || string V_S || string I_C ||
+ * string I_S || string K_S || string Q_C || string Q_S || mpint K)`, with
+ * SHA-256 (what both `curve25519-sha256` and `ecdh-sha2-nistp256` use).
+ * `k_mpint` is already the full, length-prefixed encoding `encode_mpint`
+ * produces, so it is appended verbatim rather than wrapped again. */
 pub bytes exchange_hash(bytes v_c, bytes v_s, bytes i_c, bytes i_s, bytes k_s, bytes q_c, bytes q_s, bytes k_mpint) {
     bytes hash_input = [];
     push_string(hash_input, v_c);
@@ -1031,8 +1031,8 @@ pub bytes exchange_hash(bytes v_c, bytes v_s, bytes i_c, bytes i_s, bytes k_s, b
 
 // --- host keys of every type this client accepts -------------------------------
 
-// The octets of an SSH `mpint` content (its leading zero removed), as a
-// fixed-width big-endian value; `None` if it does not fit or is negative.
+/* The octets of an SSH `mpint` content (its leading zero removed), as a
+ * fixed-width big-endian value; `None` if it does not fit or is negative. */
 Option<bytes> mpint_fixed(bytes content, int width) {
     if (content.size() == 0) {
         return Option<bytes>.None;
@@ -1057,13 +1057,13 @@ Option<bytes> mpint_fixed(bytes content, int width) {
     return Option<bytes>.Some(out);
 }
 
-/// Parses a host-key blob of any accepted type into a `HostKey`, checking
-/// that its shape is valid for the type: ed25519 (32 octets), ecdsa-sha2-
-/// nistp256 (curve name `nistp256` and a 65-octet uncompressed point that is
-/// on the curve), ssh-rsa (an odd modulus of 2048 to 4096 bits and a usable
-/// exponent). A type this client does not implement, or an RSA key outside
-/// 2048-4096 bits, is `UnsupportedHostKeyType` (well formed, but not usable);
-/// a malformed key of a known type is `BadKeyExchange`.
+/** Parses a host-key blob of any accepted type into a `HostKey`, checking
+ * that its shape is valid for the type: ed25519 (32 octets), ecdsa-sha2-
+ * nistp256 (curve name `nistp256` and a 65-octet uncompressed point that is
+ * on the curve), ssh-rsa (an odd modulus of 2048 to 4096 bits and a usable
+ * exponent). A type this client does not implement, or an RSA key outside
+ * 2048-4096 bits, is `UnsupportedHostKeyType` (well formed, but not usable);
+ * a malformed key of a known type is `BadKeyExchange`. */
 pub Result<HostKey, Error> parse_host_key(bytes blob) {
     Field name = parse_string(blob, 0)?;
     str algorithm = "";
@@ -1116,10 +1116,10 @@ pub Result<HostKey, Error> parse_host_key(bytes blob) {
     return Result<HostKey, Error>.Err(Error.UnsupportedHostKeyType);
 }
 
-// Verifies the server's signature `signature` (a `string alg, string data`
-// blob) over `message` with `key`; `algorithm` is the host-key algorithm
-// that was negotiated, which the signature's own name must equal (for RSA
-// the key type is `ssh-rsa` and the signature name `rsa-sha2-256/512`).
+/* Verifies the server's signature `signature` (a `string alg, string data`
+ * blob) over `message` with `key`; `algorithm` is the host-key algorithm
+ * that was negotiated, which the signature's own name must equal (for RSA
+ * the key type is `ssh-rsa` and the signature name `rsa-sha2-256/512`). */
 Result<void, Error> verify_host_signature(HostKey key, str algorithm, bytes message, bytes signature) {
     Field name = parse_string(signature, 0)?;
     Field data = parse_string(signature, name.next)?;
@@ -1214,9 +1214,9 @@ Result<void, Error> verify_host_signature(HostKey key, str algorithm, bytes mess
 
 // --- Part 5: key derivation (RFC 4253 §7.2) -------------------------------------
 
-/// `size` octets of key material for `letter` (A..F): `K1 = HASH(K || H ||
-/// letter || session_id)`, `K(n+1) = HASH(K || H || K1 || ... || Kn)`, as
-/// many blocks as `size` needs, truncated. `HASH` is SHA-256 here.
+/** `size` octets of key material for `letter` (A..F): `K1 = HASH(K || H ||
+ * letter || session_id)`, `K(n+1) = HASH(K || H || K1 || ... || Kn)`, as
+ * many blocks as `size` needs, truncated. `HASH` is SHA-256 here. */
 pub bytes derive(bytes k_mpint, bytes exchange_digest, int letter, bytes session_id, int size) {
     bytes buf1 = clone(k_mpint);
     buf1.extend(exchange_digest);
@@ -1232,25 +1232,25 @@ pub bytes derive(bytes k_mpint, bytes exchange_digest, int letter, bytes session
     return material.substr(0, size);
 }
 
-/// 64 bytes of key material for one direction's `letter`: `derive` with
-/// `size` 64, what `chacha20-poly1305@openssh.com` takes per direction.
+/** 64 bytes of key material for one direction's `letter`: `derive` with
+ * `size` 64, what `chacha20-poly1305@openssh.com` takes per direction. */
 pub bytes derive64(bytes k_mpint, bytes exchange_digest, int letter, bytes session_id) {
     return derive(k_mpint, exchange_digest, letter, session_id, 64);
 }
 
 // --- Part 6: the packet ciphers (see lib/ssh/sshcipher.m31) ----------------------
 
-/// One ciphered packet of `chacha20-poly1305@openssh.com`, kept for its
-/// tests: `PROTOCOL.chacha20poly1305`'s construction exactly. `seq` is this
-/// direction's running sequence number.
+/** One ciphered packet of `chacha20-poly1305@openssh.com`, kept for its
+ * tests: `PROTOCOL.chacha20poly1305`'s construction exactly. `seq` is this
+ * direction's running sequence number. */
 pub bytes encrypt_packet(bytes payload, bytes length_key, bytes payload_key, int seq, random.System rng) {
     bytes material = clone(payload_key);
     material.extend(length_key);
     return sshcipher.new_chacha(material).seal(payload, seq, rng);
 }
 
-/// The reverse of `encrypt_packet`, given the three wire components already
-/// read -- **verifies the tag before decrypting anything**.
+/** The reverse of `encrypt_packet`, given the three wire components already
+ * read -- **verifies the tag before decrypting anything**. */
 pub Result<bytes, Error> decrypt_packet(bytes length_ct, bytes rest_ct, bytes tag, bytes length_key, bytes payload_key, int seq) {
     bytes material = clone(payload_key);
     material.extend(length_key);
@@ -1277,8 +1277,8 @@ Result<bytes, Error> cipher_result(Result<bytes, sshcipher.Error> result) {
     }
 }
 
-// One packet off the wire through `cipher`: the header, the length check,
-// the rest, then open (which authenticates before it trusts anything).
+/* One packet off the wire through `cipher`: the header, the length check,
+ * the rest, then open (which authenticates before it trusts anything). */
 Result<bytes, Error> recv_ciphered_payload(Wire connection, sshcipher.Cipher cipher, int seq, int budget_ms = 0) {
     bytes header = read_exact(connection, cipher.header_size())?;
     int deadline_ns = 0;
@@ -1312,18 +1312,18 @@ Result<void, Error> send_ciphered_payload(Wire connection, bytes payload, sshcip
 
 // --- Part 7: SSH_MSG_NEWKEYS and the Transport type --------------------------
 
-/// What the layers above the transport need from one, and nothing more:
-/// `lib/ssh/sshauth.m31` and `lib/ssh/sshexec.m31` take a `Link`, never a
-/// `Transport`, so a test can hand them a scripted in-memory peer.
+/** What the layers above the transport need from one, and nothing more:
+ * `lib/ssh/sshauth.m31` and `lib/ssh/sshexec.m31` take a `Link`, never a
+ * `Transport`, so a test can hand them a scripted in-memory peer. */
 pub interface Link {
     Result<int, Error> send(bytes payload);
     Result<bytes, Error> recv();
     bytes session_id();
 }
 
-/// A live, key-exchanged SSH connection: `send`/`recv` carry application
-/// payloads, already encrypted/authenticated in both directions. Every
-/// field is private -- the only way to build one is `ssh.connect`.
+/** A live, key-exchanged SSH connection: `send`/`recv` carry application
+ * payloads, already encrypted/authenticated in both directions. Every
+ * field is private -- the only way to build one is `ssh.connect`. */
 pub type Transport {
     Wire connection;
     int send_seq;
@@ -1333,15 +1333,15 @@ pub type Transport {
     bytes sid;
     random.System rng;
     Suite negotiated;
-    // What a rekey (server-initiated, RFC 4253 §9) needs again: the version
-    // strings and the offer, and the host key's blob, which must not change.
+    /* What a rekey (server-initiated, RFC 4253 §9) needs again: the version
+     * strings and the offer, and the host key's blob, which must not change. */
     VersionPair versions;
     Offer offer;
     bytes host_key_blob;
-    // Payload bytes sent and received since the last key exchange, the
-    // limit at which this client starts the next one (0: never), the
-    // application packets that arrived while a rekey it started was waiting
-    // for the server's KEXINIT, and whether one is under way.
+    /* Payload bytes sent and received since the last key exchange, the
+     * limit at which this client starts the next one (0: never), the
+     * application packets that arrived while a rekey it started was waiting
+     * for the server's KEXINIT, and whether one is under way. */
     int traffic;
     int rekey_limit;
     List<bytes> queued;
@@ -1350,9 +1350,9 @@ pub type Transport {
     int read_budget_ms;
 }
 
-/// This connection's first exchange hash `H`, the session identifier for
-/// its whole life (a rekey does not change it), needed verbatim by the
-/// publickey-auth signature (RFC 4252 §7).
+/** This connection's first exchange hash `H`, the session identifier for
+ * its whole life (a rekey does not change it), needed verbatim by the
+ * publickey-auth signature (RFC 4252 §7). */
 pub bytes Transport.session_id() {
     return sid;
 }
@@ -1362,8 +1362,8 @@ pub Suite Transport.suite() {
     return negotiated;
 }
 
-/// Encrypts, pads and authenticates `payload` as one packet and writes it.
-/// Mirrors `net.Conn.write`'s own "all of it, or an error" contract.
+/** Encrypts, pads and authenticates `payload` as one packet and writes it.
+ * Mirrors `net.Conn.write`'s own "all of it, or an error" contract. */
 pub Result<int, Error> Transport.send(bytes payload) {
     if (!is_rekeying && rekey_limit > 0 && traffic >= rekey_limit) {
         start_rekey()?;
@@ -1374,22 +1374,22 @@ pub Result<int, Error> Transport.send(bytes payload) {
     return Result<int, Error>.Ok(payload.size());
 }
 
-/// Changes how much traffic passes before this client starts a rekey
-/// (`RekeyLimit`); 0 never starts one (the server still may). A small limit
-/// is for tests.
+/** Changes how much traffic passes before this client starts a rekey
+ * (`RekeyLimit`); 0 never starts one (the server still may). A small limit
+ * is for tests. */
 pub void Transport.set_rekey_limit(int limit_bytes) {
     rekey_limit = limit_bytes;
 }
 
-/// Reads, authenticates and decrypts **one** packet. An application message
-/// is returned as it is; `SSH_MSG_IGNORE`/`DEBUG`/`UNIMPLEMENTED` (transport
-/// housekeeping RFC 4253 says any implementation must tolerate at any
-/// time -- OpenSSH sends IGNORE as keystroke-timing chaff) come back as an
-/// **empty** `bytes`; `SSH_MSG_DISCONNECT` is `Err(Error.Disconnected)`.
-///
-/// This is what an event loop calls after `wait(0)` said something was
-/// there: unlike `recv` it never reads *another* packet after swallowing a
-/// housekeeping one, which would block for ever on an idle connection.
+/** Reads, authenticates and decrypts **one** packet. An application message
+ * is returned as it is; `SSH_MSG_IGNORE`/`DEBUG`/`UNIMPLEMENTED` (transport
+ * housekeeping RFC 4253 says any implementation must tolerate at any
+ * time -- OpenSSH sends IGNORE as keystroke-timing chaff) come back as an
+ * **empty** `bytes`; `SSH_MSG_DISCONNECT` is `Err(Error.Disconnected)`.
+ *
+ * This is what an event loop calls after `wait(0)` said something was
+ * there: unlike `recv` it never reads *another* packet after swallowing a
+ * housekeeping one, which would block for ever on an idle connection. */
 pub Result<bytes, Error> Transport.recv_once() {
     if (queued.size() > 0) {
         bytes first = queued[0];
@@ -1411,9 +1411,9 @@ pub Result<bytes, Error> Transport.recv_once() {
         return Result<bytes, Error>.Ok(none);
     }
     if (message_type == SSH_MESSAGE_KEXINIT) {
-        // The server wants new keys (OpenSSH after 1 GB or an hour, or
-        // whatever `RekeyLimit` says). Done here, invisibly to the layers
-        // above: they see only the housekeeping-sized empty answer.
+        /* The server wants new keys (OpenSSH after 1 GB or an hour, or
+         * whatever `RekeyLimit` says). Done here, invisibly to the layers
+         * above: they see only the housekeeping-sized empty answer. */
         rekey(payload)?;
         bytes none = [];
         return Result<bytes, Error>.Ok(none);
@@ -1428,8 +1428,8 @@ Result<void, Error> Transport.emit(bytes payload) {
     return Result<void, Error>.Ok;
 }
 
-// The next packet of a rekey in progress: housekeeping (IGNORE, DEBUG) is
-// skipped, DISCONNECT ends it, anything else is returned.
+/* The next packet of a rekey in progress: housekeeping (IGNORE, DEBUG) is
+ * skipped, DISCONNECT ends it, anything else is returned. */
 Result<bytes, Error> Transport.recv_for_rekey() {
     while (true) {
         bytes payload = recv_ciphered_payload(connection, recv_cipher, recv_seq, budget_ms: read_budget_ms)?;
@@ -1447,13 +1447,13 @@ Result<bytes, Error> Transport.recv_for_rekey() {
     }
 }
 
-// A key re-exchange answering the server's `KEXINIT` (`i_s`, already read):
-// our own `KEXINIT`, the ECDH exchange, the signature checked against the
-// SAME host key as the first exchange (a server whose key changes mid-session
-// is refused, `HostKeyMismatch`), NEWKEYS both ways and fresh keys derived
-// with the original session identifier. Strict kex, if it was agreed, still
-// applies: sequence numbers restart at 0 after each NEWKEYS. Nothing but kex
-// messages can arrive from the server until its NEWKEYS (RFC 4253 §7.1).
+/* A key re-exchange answering the server's `KEXINIT` (`i_s`, already read):
+ * our own `KEXINIT`, the ECDH exchange, the signature checked against the
+ * SAME host key as the first exchange (a server whose key changes mid-session
+ * is refused, `HostKeyMismatch`), NEWKEYS both ways and fresh keys derived
+ * with the original session identifier. Strict kex, if it was agreed, still
+ * applies: sequence numbers restart at 0 after each NEWKEYS. Nothing but kex
+ * messages can arrive from the server until its NEWKEYS (RFC 4253 §7.1). */
 Result<void, Error> Transport.rekey(bytes i_s) {
     is_rekeying = true;
     bytes i_c = build_kexinit(rng, offer);
@@ -1461,10 +1461,10 @@ Result<void, Error> Transport.rekey(bytes i_s) {
     return finish_rekey(i_c, i_s);
 }
 
-// Our own re-exchange, at the traffic limit: KEXINIT first, then the
-// server's packets until its KEXINIT arrives (application packets that were
-// already on their way are kept for `recv_once`, in order), then the same
-// exchange as when the server asks.
+/* Our own re-exchange, at the traffic limit: KEXINIT first, then the
+ * server's packets until its KEXINIT arrives (application packets that were
+ * already on their way are kept for `recv_once`, in order), then the same
+ * exchange as when the server asks. */
 Result<void, Error> Transport.start_rekey() {
     is_rekeying = true;
     bytes i_c = build_kexinit(rng, offer);
@@ -1517,10 +1517,10 @@ Result<void, Error> Transport.finish_rekey(bytes i_c, bytes i_s) {
     return Result<void, Error>.Ok;
 }
 
-/// Reads, authenticates and decrypts packets until one carries an
-/// application-layer payload: housekeeping messages are absorbed (see
-/// `recv_once`) so the layers above only ever see their own messages.
-/// `SSH_MSG_DISCONNECT` becomes `Err(Error.Disconnected)`.
+/** Reads, authenticates and decrypts packets until one carries an
+ * application-layer payload: housekeeping messages are absorbed (see
+ * `recv_once`) so the layers above only ever see their own messages.
+ * `SSH_MSG_DISCONNECT` becomes `Err(Error.Disconnected)`. */
 pub Result<bytes, Error> Transport.recv() {
     while (true) {
         bytes payload = recv_once()?;
@@ -1530,14 +1530,14 @@ pub Result<bytes, Error> Transport.recv() {
     }
 }
 
-/// Bound every later read on this connection -- `recv`, and so every channel
-/// read above it -- to `timeout_ms` milliseconds of waiting for the peer; 0
-/// waits for ever, which is where a connection starts. A read that runs out
-/// of time is `Err(Error.TimedOut)`, after which the transport must be
-/// closed (see `Error.TimedOut`). It bounds one wait for bytes, not a whole
-/// `recv`: a peer that sends a byte a second is never timed out by it.
-///
-/// A negative `timeout_ms` traps, as `net.Conn.set_read_timeout` does.
+/** Bound every later read on this connection -- `recv`, and so every channel
+ * read above it -- to `timeout_ms` milliseconds of waiting for the peer; 0
+ * waits for ever, which is where a connection starts. A read that runs out
+ * of time is `Err(Error.TimedOut)`, after which the transport must be
+ * closed (see `Error.TimedOut`). It bounds one wait for bytes, not a whole
+ * `recv`: a peer that sends a byte a second is never timed out by it.
+ *
+ * A negative `timeout_ms` traps, as `net.Conn.set_read_timeout` does. */
 pub Result<void, Error> Transport.set_read_timeout(int timeout_ms) {
     read_budget_ms = timeout_ms;
     match (connection.set_read_timeout(timeout_ms)) {
@@ -1550,11 +1550,11 @@ pub Result<void, Error> Transport.set_read_timeout(int timeout_ms) {
     }
 }
 
-/// Whether a `recv` would find bytes without waiting: true when part of a
-/// packet is already buffered or the socket is readable (which includes the
-/// peer having closed); false when `timeout_ms` ran out first. A negative
-/// timeout waits for ever. A true answer can still be followed by a `recv`
-/// that waits for the rest of a packet, bounded by the read timeout.
+/** Whether a `recv` would find bytes without waiting: true when part of a
+ * packet is already buffered or the socket is readable (which includes the
+ * peer having closed); false when `timeout_ms` ran out first. A negative
+ * timeout waits for ever. A true answer can still be followed by a `recv`
+ * that waits for the rest of a packet, bounded by the read timeout. */
 pub Result<bool, Error> Transport.wait(int timeout_ms) {
     if (queued.size() > 0) {
         return Result<bool, Error>.Ok(true);
@@ -1569,15 +1569,15 @@ pub Result<bool, Error> Transport.wait(int timeout_ms) {
     }
 }
 
-/// The descriptor an event loop can `poll` for this connection's input. For a
-/// tunnelled connection it is the outermost socket's: readable there means
-/// "something may be waiting", and `wait(0)` is the exact answer.
+/** The descriptor an event loop can `poll` for this connection's input. For a
+ * tunnelled connection it is the outermost socket's: readable there means
+ * "something may be waiting", and `wait(0)` is the exact answer. */
 pub int Transport.descriptor() {
     return connection.fileno();
 }
 
-/// Sends `SSH_MSG_DISCONNECT` (RFC 4253 §11.1, "by application") and closes.
-/// Best effort: a send that fails still closes.
+/** Sends `SSH_MSG_DISCONNECT` (RFC 4253 §11.1, "by application") and closes.
+ * Best effort: a send that fails still closes. */
 pub Result<bool, Error> Transport.disconnect() {
     bytes out = [];
     out.push(SSH_MESSAGE_DISCONNECT);
@@ -1595,8 +1595,8 @@ pub Result<bool, Error> Transport.disconnect() {
     }
 }
 
-/// Closes the underlying connection without a `SSH_MSG_DISCONNECT`
-/// (`disconnect` sends one).
+/** Closes the underlying connection without a `SSH_MSG_DISCONNECT`
+ * (`disconnect` sends one). */
 pub Result<bool, Error> Transport.close() {
     match (connection.close()) {
         case Ok(bool is_closed): {
@@ -1608,25 +1608,25 @@ pub Result<bool, Error> Transport.close() {
     }
 }
 
-/// How much traffic (both directions, payload bytes) this client lets pass
-/// before it starts a rekey itself: 1 GiB, OpenSSH's default for these
-/// ciphers. The server's own limit starts one earlier if it is lower.
+/** How much traffic (both directions, payload bytes) this client lets pass
+ * before it starts a rekey itself: 1 GiB, OpenSSH's default for these
+ * ciphers. The server's own limit starts one earlier if it is lower. */
 const int DEFAULT_REKEY_LIMIT = 1073741824;
 
 /// A host key as a server presented it. Public, so nothing here is secret.
 pub type HostKey {
     /// The key type: `ssh-ed25519`, `ecdsa-sha2-nistp256` or `ssh-rsa`.
     pub str algorithm;
-    /// The wire blob (`string type, ...`): what a `known_hosts` line's
-    /// base64 column encodes and what OpenSSH hashes into a fingerprint.
+    /** The wire blob (`string type, ...`): what a `known_hosts` line's
+     * base64 column encodes and what OpenSSH hashes into a fingerprint. */
     pub bytes blob;
-    /// ed25519: the raw 32-octet key. ecdsa: the 65-octet point. rsa: empty
-    /// (use `blob`).
+    /** ed25519: the raw 32-octet key. ecdsa: the 65-octet point. rsa: empty
+     * (use `blob`). */
     pub bytes key;
 }
 
-/// `SHA256:` and the unpadded base64 of the SHA-256 of the key blob, the
-/// spelling `ssh-keygen -lf` and OpenSSH's host-key prompt use.
+/** `SHA256:` and the unpadded base64 of the SHA-256 of the key blob, the
+ * spelling `ssh-keygen -lf` and OpenSSH's host-key prompt use. */
 pub str HostKey.fingerprint() {
     str encoded = base64.encode(sha256.sum(blob));
     while (encoded.ends_with("=")) {
@@ -1635,15 +1635,15 @@ pub str HostKey.fingerprint() {
     return "SHA256:" + encoded;
 }
 
-/// The blob in base64: the third column of a `known_hosts` line, the second
-/// of a `.pub` file.
+/** The blob in base64: the third column of a `known_hosts` line, the second
+ * of a `.pub` file. */
 pub str HostKey.blob_base64() {
     return base64.encode(blob);
 }
 
-// Whether `host_key` is exactly one of `allowed`. An empty list allows
-// nothing -- a caller with no expectation gets a refusal, never trust on
-// first use. Public keys are not secret, so plain `==` is fine.
+/* Whether `host_key` is exactly one of `allowed`. An empty list allows
+ * nothing -- a caller with no expectation gets a refusal, never trust on
+ * first use. Public keys are not secret, so plain `==` is fine. */
 bool is_key_listed(bytes host_key, List<bytes> allowed) {
     for (bytes allowed_key in allowed) {
         if (allowed_key == host_key) {
@@ -1653,10 +1653,10 @@ bool is_key_listed(bytes host_key, List<bytes> allowed) {
     return false;
 }
 
-// Everything the first half of a handshake leaves behind: the key exchange
-// is done and the server has proved, by signing the exchange hash, that it
-// holds the private half of `host_key` -- but no key has been trusted and no
-// `NEWKEYS` sent.
+/* Everything the first half of a handshake leaves behind: the key exchange
+ * is done and the server has proved, by signing the exchange hash, that it
+ * holds the private half of `host_key` -- but no key has been trusted and no
+ * `NEWKEYS` sent. */
 type Exchange {
     HostKey host_key;
     bytes k_mpint;
@@ -1666,8 +1666,8 @@ type Exchange {
     Offer offer;
 }
 
-// The client half of an ECDH exchange: the curve, the ephemeral secret and
-// the public value `Q_C` to send.
+/* The client half of an ECDH exchange: the curve, the ephemeral secret and
+ * the public value `Q_C` to send. */
 type EcdhState {
     ecdsa.Curve curve;
     bytes secret;
@@ -1691,9 +1691,9 @@ EcdhState ecdh_begin(Suite suite, random.System rng) {
     return EcdhState(curve, secret, q_c);
 }
 
-// The shared secret `K` as an mpint, from the server's public value `q_s`,
-// or `BadKeyExchange` for a value that is not valid (off the curve, the
-// wrong size, or of small order).
+/* The shared secret `K` as an mpint, from the server's public value `q_s`,
+ * or `BadKeyExchange` for a value that is not valid (off the curve, the
+ * wrong size, or of small order). */
 Result<bytes, Error> ecdh_finish(Suite suite, EcdhState state, bytes q_s) {
     bytes shared = [];
     if (suite.kex == KEX_ECDH_P256) {
@@ -1709,15 +1709,15 @@ Result<bytes, Error> ecdh_finish(Suite suite, EcdhState state, bytes q_s) {
         if (q_s.size() != 32) {
             return Result<bytes, Error>.Err(Error.BadKeyExchange);
         }
-        // RFC 8731 §3.1's text says this gets reversed (little-endian, RFC
-        // 7748's own output, into big-endian before mpint-wrapping) -- but a
-        // real `sshd` rejects the host key signature when that reversal is
-        // applied, and accepts it when `x25519`'s raw output is mpint-encoded
-        // directly, confirmed with `tests/ssh/test_transport.sh`'s live
-        // fixture. This is the actual, shipped OpenSSH behavior.
+        /* RFC 8731 §3.1's text says this gets reversed (little-endian, RFC
+         * 7748's own output, into big-endian before mpint-wrapping) -- but a
+         * real `sshd` rejects the host key signature when that reversal is
+         * applied, and accepts it when `x25519`'s raw output is mpint-encoded
+         * directly, confirmed with `tests/ssh/test_transport.sh`'s live
+         * fixture. This is the actual, shipped OpenSSH behavior. */
         shared = x25519.x25519(state.secret, q_s);
-        // RFC 7748 §6.1 / RFC 8731: a peer value of small order makes the
-        // output all zero; OpenSSH refuses it and so do we.
+        /* RFC 7748 §6.1 / RFC 8731: a peer value of small order makes the
+         * output all zero; OpenSSH refuses it and so do we. */
         if (is_all_zero_octets(shared)) {
             return Result<bytes, Error>.Err(Error.BadKeyExchange);
         }
@@ -1725,16 +1725,16 @@ Result<bytes, Error> ecdh_finish(Suite suite, EcdhState state, bytes q_s) {
     return Result<bytes, Error>.Ok(encode_mpint(shared));
 }
 
-// Version exchange, KEXINIT both ways, the ECDH exchange and the check of the
-// host key's signature -- the part of a handshake that is the same whether or
-// not the key is one the caller trusts.
-//
-// Strict kex (OpenSSH 9.6, the Terrapin fix): if both sides advertise it, the
-// handshake must be exactly KEXINIT, the exchange and NEWKEYS with nothing
-// in between (this function reads only those messages and treats any other
-// -- including IGNORE and DEBUG -- as `UnexpectedMessage`), and the sequence
-// numbers restart at 0 after NEWKEYS (`finish_handshake`). Without the peer's
-// marker the old behaviour is kept so older servers still work.
+/* Version exchange, KEXINIT both ways, the ECDH exchange and the check of the
+ * host key's signature -- the part of a handshake that is the same whether or
+ * not the key is one the caller trusts.
+ *
+ * Strict kex (OpenSSH 9.6, the Terrapin fix): if both sides advertise it, the
+ * handshake must be exactly KEXINIT, the exchange and NEWKEYS with nothing
+ * in between (this function reads only those messages and treats any other
+ * -- including IGNORE and DEBUG -- as `UnexpectedMessage`), and the sequence
+ * numbers restart at 0 after NEWKEYS (`finish_handshake`). Without the peer's
+ * marker the old behaviour is kept so older servers still work. */
 Result<Exchange, Error> exchange_keys(Wire connection, random.System rng, Offer offer) {
     VersionPair version_pair = exchange_version(connection)?;
     bytes i_c = build_kexinit(rng, offer);
@@ -1754,9 +1754,9 @@ Result<Exchange, Error> exchange_keys(Wire connection, random.System rng, Offer 
     return Result<Exchange, Error>.Ok(Exchange(host_key, k_mpint, exchange_digest, suite, version_pair, offer));
 }
 
-// Whether every octet is zero. The value is a key-exchange output that is
-// about to be rejected or used; a plain scan is fine, but the whole buffer is
-// always read.
+/* Whether every octet is zero. The value is a key-exchange output that is
+ * about to be rejected or used; a plain scan is fine, but the whole buffer is
+ * always read. */
 bool is_all_zero_octets(bytes value) {
     int accumulated = 0;
     for (int index in 0 .. value.size()) {
@@ -1786,8 +1786,8 @@ int cipher_iv_size(str name) {
     return 16;
 }
 
-// One direction's cipher from the exchange: letters as RFC 4253 §7.2
-// (IV A/B, key C/D, integrity E/F for client-to-server/server-to-client).
+/* One direction's cipher from the exchange: letters as RFC 4253 §7.2
+ * (IV A/B, key C/D, integrity E/F for client-to-server/server-to-client). */
 sshcipher.Cipher make_cipher(Exchange exchange, bytes session_id, str name, str mac, int iv_letter, int key_letter, int mac_letter) {
     bytes key = derive(exchange.k_mpint, exchange.exchange_digest, key_letter, session_id, cipher_key_size(name));
     if (name == CIPHER_ALGO) {
@@ -1801,8 +1801,8 @@ sshcipher.Cipher make_cipher(Exchange exchange, bytes session_id, str name, str 
     return sshcipher.new_aes_ctr(key, initial_vector, mac_key, mac == MAC_ETM);
 }
 
-// The rest of the handshake, given an exchange whose host key the caller has
-// accepted: key derivation, then NEWKEYS both ways.
+/* The rest of the handshake, given an exchange whose host key the caller has
+ * accepted: key derivation, then NEWKEYS both ways. */
 Result<Transport, Error> finish_handshake(Wire connection, Exchange exchange, random.System rng) {
     int send_seq = 2;
     int recv_seq = 2;
@@ -1822,20 +1822,20 @@ Result<Transport, Error> finish_handshake(Wire connection, Exchange exchange, ra
     return Result<Transport, Error>.Ok(Transport(connection, send_seq, recv_seq, send_cipher, recv_cipher, exchange.exchange_digest, rng, exchange.suite, exchange.versions, exchange.offer, exchange.host_key.blob, 0, DEFAULT_REKEY_LIMIT, [], false, 0));
 }
 
-/// What decides, mid-handshake, whether the server's host key is trusted:
-/// `is_acceptable` is called once, after the key's signature over the
-/// exchange hash has verified (so `key` really belongs to whoever answered)
-/// and before any key is derived or any credential offered. `false` ends the
-/// handshake with `Error.HostKeyMismatch`. It may ask a person; it must not
-/// record anything it was not told to.
+/** What decides, mid-handshake, whether the server's host key is trusted:
+ * `is_acceptable` is called once, after the key's signature over the
+ * exchange hash has verified (so `key` really belongs to whoever answered)
+ * and before any key is derived or any credential offered. `false` ends the
+ * handshake with `Error.HostKeyMismatch`. It may ask a person; it must not
+ * record anything it was not told to. */
 pub interface HostKeyCheck {
     bool is_acceptable(HostKey key);
 }
 
-/// The handshake over a connection the caller already made (so it can tell a
-/// refused connection from an unreachable one), with the host-key decision
-/// handed to `check` instead of a fixed list and the algorithms `offer`.
-/// One connection, one key exchange: nothing is asked of the server twice.
+/** The handshake over a connection the caller already made (so it can tell a
+ * refused connection from an unreachable one), with the host-key decision
+ * handed to `check` instead of a fixed list and the algorithms `offer`.
+ * One connection, one key exchange: nothing is asked of the server twice. */
 pub Result<Transport, Error> connect_with_offer(Wire connection, HostKeyCheck check, Offer offer, int timeout_ms = 0) {
     if (timeout_ms > 0) {
         match (connection.set_read_timeout(timeout_ms)) {
@@ -1870,19 +1870,19 @@ bool ListedKeys.is_acceptable(HostKey key) {
     return key.algorithm == HOST_KEY_ALGO && is_key_listed(key.key, keys);
 }
 
-/// Connects to `host`:`port`, runs the whole handshake, and refuses unless
-/// the server's host key is exactly `expected_host_key` (32 raw
-/// `ssh-ed25519` public-key octets) -- `docs/ssh-decision.md` §1's "v0 takes
-/// an expected host key as a parameter and refuses to proceed if it doesn't
-/// match."
+/** Connects to `host`:`port`, runs the whole handshake, and refuses unless
+ * the server's host key is exactly `expected_host_key` (32 raw
+ * `ssh-ed25519` public-key octets) -- `docs/ssh-decision.md` §1's "v0 takes
+ * an expected host key as a parameter and refuses to proceed if it doesn't
+ * match." */
 pub Result<Transport, Error> connect(str host, int port, bytes expected_host_key, int timeout_ms = 0) {
     return connect_any(host, port, [expected_host_key], timeout_ms: timeout_ms);
 }
 
-/// As `connect`, but any one of `host_keys` is acceptable -- a host that
-/// has rotated keys, or a `known_hosts` file listing several. An empty list
-/// refuses every server (`Error.HostKeyMismatch`): there is no trust on
-/// first use. Only `ssh-ed25519` host keys are asked for.
+/** As `connect`, but any one of `host_keys` is acceptable -- a host that
+ * has rotated keys, or a `known_hosts` file listing several. An empty list
+ * refuses every server (`Error.HostKeyMismatch`): there is no trust on
+ * first use. Only `ssh-ed25519` host keys are asked for. */
 pub Result<Transport, Error> connect_any(str host, int port, List<bytes> host_keys, int timeout_ms = 0) {
     match (net.connect(host, port)) {
         case Ok(net.Conn connection): {
@@ -1905,17 +1905,17 @@ bool AnyKey.is_acceptable(HostKey key) {
     return true;
 }
 
-/// The host key the server at `host`:`port` presents, for a caller that
-/// wants to ask a person whether to trust it (`key.fingerprint()`, then
-/// `sshhosts.add`). Runs the key exchange as `connect_any` does, including
-/// the check of the server's signature -- so the key really belongs to
-/// whoever answered -- and then hangs up: nothing is trusted, no
-/// credentials are offered, and no session exists afterwards.
-///
-/// This is a second connection. That is safe: it decides only what to
-/// *show*; the key the person approves is then enforced by an ordinary
-/// `connect_any`, which refuses any other. (`connect_over` with a
-/// `HostKeyCheck` decides on the one connection and is what `m31ssh` uses.)
+/** The host key the server at `host`:`port` presents, for a caller that
+ * wants to ask a person whether to trust it (`key.fingerprint()`, then
+ * `sshhosts.add`). Runs the key exchange as `connect_any` does, including
+ * the check of the server's signature -- so the key really belongs to
+ * whoever answered -- and then hangs up: nothing is trusted, no
+ * credentials are offered, and no session exists afterwards.
+ *
+ * This is a second connection. That is safe: it decides only what to
+ * *show*; the key the person approves is then enforced by an ordinary
+ * `connect_any`, which refuses any other. (`connect_over` with a
+ * `HostKeyCheck` decides on the one connection and is what `m31ssh` uses.) */
 pub Result<HostKey, Error> presented_host_key(str host, int port) {
     match (net.connect(host, port)) {
         case Ok(net.Conn connection): {

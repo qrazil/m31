@@ -1,14 +1,14 @@
-// Behavioural checks for `lib/pki/x509.m31`, driven by what
-// `x509_make_certs.py` writes and by the committed fixture chains.
-//
-//   x509_cases <generated dir> <fixtures dir>
-//
-// Sections: malformed certificates (each mutant has a hand-written expected
-// error), hostname and key-usage tables, validity at an injected `now`, the
-// real github.com / codeload.github.com / dev.meghraj.uk chains, PEM
-// splitting, and a deterministic mutation fuzz that must never trap.
-// Prints one line per failure and `N checks, M failures`; the exit status is
-// the failure count.
+/* Behavioural checks for `lib/pki/x509.m31`, driven by what
+ * `x509_make_certs.py` writes and by the committed fixture chains.
+ *
+ *   x509_cases <generated dir> <fixtures dir>
+ *
+ * Sections: malformed certificates (each mutant has a hand-written expected
+ * error), hostname and key-usage tables, validity at an injected `now`, the
+ * real github.com / codeload.github.com / dev.meghraj.uk chains, PEM
+ * splitting, and a deterministic mutation fuzz that must never trap.
+ * Prints one line per failure and `N checks, M failures`; the exit status is
+ * the failure count. */
 import io;
 import os;
 import pki.x509;
@@ -312,8 +312,8 @@ void check_pem(Tally tally) {
     }
 }
 
-// A cheap deterministic generator: reproducible, and enough to spread
-// mutations over a certificate.
+/* A cheap deterministic generator: reproducible, and enough to spread
+ * mutations over a certificate. */
 type Lcg {
     int state;
 }
@@ -342,13 +342,13 @@ bytes flipped(bytes original, Lcg random) {
     return copy;
 }
 
-// Parses `data` both ways and exercises every accessor of what comes out;
-// a trap here fails the whole program, which is the point. The result is
-// 0 when both parsers refuse it, 2 when only `parse_trust_anchor` accepts
-// it, 3 when both do, and 1, or 4 and up, when an invariant is broken:
-// `parse` accepting what `parse_trust_anchor` refuses, or an accepted
-// certificate whose `encoded` is not its input or whose `tbs_certificate`
-// is not a slice of it.
+/* Parses `data` both ways and exercises every accessor of what comes out;
+ * a trap here fails the whole program, which is the point. The result is
+ * 0 when both parsers refuse it, 2 when only `parse_trust_anchor` accepts
+ * it, 3 when both do, and 1, or 4 and up, when an invariant is broken:
+ * `parse` accepting what `parse_trust_anchor` refuses, or an accepted
+ * certificate whose `encoded` is not its input or whose `tbs_certificate`
+ * is not a slice of it. */
 int exercise(bytes data, List<str> hosts) {
     int verdict = 0;
     match (x509.parse(data)) {

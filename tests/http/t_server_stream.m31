@@ -3,11 +3,11 @@ import io;
 import net;
 import fs;
 
-// The server half of tests/http/test_server_stream.sh. It listens on a port
-// the kernel picks, prints it on stderr, takes one connection, and echoes
-// the request body back as a chunked response, a piece at a time, through
-// `read_request_stream` and `start_response`. Then it prints the bytes it
-// relayed and, where `/proc` exists, its peak resident memory in KiB.
+/* The server half of tests/http/test_server_stream.sh. It listens on a port
+ * the kernel picks, prints it on stderr, takes one connection, and echoes
+ * the request body back as a chunked response, a piece at a time, through
+ * `read_request_stream` and `start_response`. Then it prints the bytes it
+ * relayed and, where `/proc` exists, its peak resident memory in KiB. */
 
 // `VmHWM` from /proc/self/status, or -1 off Linux.
 int peak_kib() {

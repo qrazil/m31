@@ -1,24 +1,24 @@
-// Arithmetic beyond the operators, written entirely in this language.
-//
-// There is no C underneath any of it -- no libm, no `prim`. Everything below
-// is built from `+ - * /`, comparison, and the truncating `int(x)`, which is
-// all IEEE 754 promises and all this needs. Two consequences follow, and both
-// are the point: the answers are the same on every target, because nothing
-// here asks the platform; and the standard library is evidence that the
-// language can do real numerical work, not a thin coat over somebody else's.
-//
-// Accuracy, measured against glibc's libm on ~3,500 values per function
-// across the whole range, subnormals included: `sqrt`, `floor`, `ceil`,
-// `round` and `trunc` are exact -- the correctly rounded answer, bit for bit
-// what C gives. `exp` and `log` are within 1 ulp and exact for over 90% of
-// inputs; `pow` is within 1 ulp for a whole exponent and within 3 otherwise.
-// glibc is correctly rounded in practice for those three; closing that gap
-// needs double-double `exp` and `log`, and is worth doing when something
-// needs it.
-//
-// The answers are the same bits on every target and at every optimisation
-// level, provided the C compiler does not fuse `a * b + c` into one rounding
-// -- `-ffp-contract=off`, which `sqrt`'s exact residual depends on.
+/* Arithmetic beyond the operators, written entirely in this language.
+ *
+ * There is no C underneath any of it -- no libm, no `prim`. Everything below
+ * is built from `+ - * /`, comparison, and the truncating `int(x)`, which is
+ * all IEEE 754 promises and all this needs. Two consequences follow, and both
+ * are the point: the answers are the same on every target, because nothing
+ * here asks the platform; and the standard library is evidence that the
+ * language can do real numerical work, not a thin coat over somebody else's.
+ *
+ * Accuracy, measured against glibc's libm on ~3,500 values per function
+ * across the whole range, subnormals included: `sqrt`, `floor`, `ceil`,
+ * `round` and `trunc` are exact -- the correctly rounded answer, bit for bit
+ * what C gives. `exp` and `log` are within 1 ulp and exact for over 90% of
+ * inputs; `pow` is within 1 ulp for a whole exponent and within 3 otherwise.
+ * glibc is correctly rounded in practice for those three; closing that gap
+ * needs double-double `exp` and `log`, and is worth doing when something
+ * needs it.
+ *
+ * The answers are the same bits on every target and at every optimisation
+ * level, provided the C compiler does not fuse `a * b + c` into one rounding
+ * -- `-ffp-contract=off`, which `sqrt`'s exact residual depends on. */
 
 /// Not a number. `0.0 / 0.0` is the IEEE way to spell it.
 pub float nan() {
@@ -36,27 +36,27 @@ pub bool is_nan(float x) {
     return x != x;
 }
 
-/// Neither infinite nor NaN. `x - x` is 0 for every finite x and NaN for the
-/// rest, which is the whole test.
+/** Neither infinite nor NaN. `x - x` is 0 for every finite x and NaN for the
+ * rest, which is the whole test. */
 pub bool is_finite(float x) {
     return x - x == 0.0;
 }
 
-// 2^52. At or above it every float is a whole number: the significand has no
-// bits left for a fraction. Below it, `int(x)` is exact.
+/* 2^52. At or above it every float is a whole number: the significand has no
+ * bits left for a fraction. Below it, `int(x)` is exact. */
 float whole_from() {
     return 4503599627370496.0;
 }
 
-/// `x` with its fraction removed, towards zero. Whole numbers, infinities,
-/// NaN and both zeros come back unchanged, sign included.
+/** `x` with its fraction removed, towards zero. Whole numbers, infinities,
+ * NaN and both zeros come back unchanged, sign included. */
 pub float trunc(float x) {
     if (!(fabs(x) < whole_from())) {
         return x;
     }
     float truncated = float(int(x));
-    // int(-0.5) is 0, and the answer is -0.0, not 0.0: C keeps the sign of a
-    // zero result, so this does too.
+    /* int(-0.5) is 0, and the answer is -0.0, not 0.0: C keeps the sign of a
+     * zero result, so this does too. */
     if (truncated == 0.0 && x < 0.0) {
         return -0.0;
     }
@@ -66,8 +66,8 @@ pub float trunc(float x) {
     return truncated;
 }
 
-/// The largest whole number no greater than `x`, as a float. It stays a
-/// float: `floor` of 1e300 has no int to become.
+/** The largest whole number no greater than `x`, as a float. It stays a
+ * float: `floor` of 1e300 has no int to become. */
 pub float floor(float x) {
     float truncated = trunc(x);
     if (truncated > x) {
@@ -79,19 +79,19 @@ pub float floor(float x) {
 /// The smallest whole number no less than `x`, as a float.
 pub float ceil(float x) {
     float truncated = trunc(x);
-    // ceil(-0.5) is -0.0, and trunc already gave exactly that: t < x only
-    // happens for a positive fraction, so the +1 never produces a zero.
+    /* ceil(-0.5) is -0.0, and trunc already gave exactly that: t < x only
+     * happens for a positive fraction, so the +1 never produces a zero. */
     if (truncated < x) {
         return truncated + 1.0;
     }
     return truncated;
 }
 
-/// `x` to the nearest whole number, halves away from zero -- C's `round`.
-///
-/// Not `floor(x + 0.5)`, which is wrong for 0.49999999999999994: the
-/// addition itself rounds up to 1.0. `x - trunc(x)` is exact below 2^52, so
-/// comparing the fraction loses nothing.
+/** `x` to the nearest whole number, halves away from zero -- C's `round`.
+ *
+ * Not `floor(x + 0.5)`, which is wrong for 0.49999999999999994: the
+ * addition itself rounds up to 1.0. `x - trunc(x)` is exact below 2^52, so
+ * comparing the fraction loses nothing. */
 pub float round(float x) {
     float truncated = trunc(x);
     float frac = x - truncated;
@@ -104,11 +104,11 @@ pub float round(float x) {
     return truncated;
 }
 
-/// The square root, correctly rounded -- the same bits C's `sqrt` gives.
-///
-/// Scale into [0.25, 1) by exact powers of four, take five Newton steps from
-/// a linear guess (1% error, then quadratic convergence: 1e-4, 1e-8, 1e-16),
-/// then settle the last bit exactly. Negative `x` is NaN, as in C.
+/** The square root, correctly rounded -- the same bits C's `sqrt` gives.
+ *
+ * Scale into [0.25, 1) by exact powers of four, take five Newton steps from
+ * a linear guess (1% error, then quadratic convergence: 1e-4, 1e-8, 1e-16),
+ * then settle the last bit exactly. Negative `x` is NaN, as in C. */
 pub float sqrt(float x) {
     if (x < 0.0) {
         return nan();
@@ -116,8 +116,8 @@ pub float sqrt(float x) {
     if (x == 0.0 || !is_finite(x)) {
         return x;
     }
-    // Multiplying by 4 is exact, subnormals included, so the scaled value
-    // carries every bit of the original.
+    /* Multiplying by 4 is exact, subnormals included, so the scaled value
+     * carries every bit of the original. */
     float scaled = x;
     int exponent = 0;
     while (scaled >= 1.0) {
@@ -133,8 +133,8 @@ pub float sqrt(float x) {
         y = 0.5 * (y + scaled / y);
     }
     y = settle_sqrt(scaled, y);
-    // Undo the scaling: sqrt(m * 4^k) = sqrt(m) * 2^k, exact because the
-    // result only shrinks towards 1.
+    /* Undo the scaling: sqrt(m * 4^k) = sqrt(m) * 2^k, exact because the
+     * result only shrinks towards 1. */
     while (exponent > 0) {
         y = y * 2.0;
         exponent = exponent - 1;
@@ -146,14 +146,14 @@ pub float sqrt(float x) {
     return y;
 }
 
-// Pick the correctly rounded root of m in [0.25, 1), given y within an ulp.
-//
-// The root lies in [0.5, 1], where an ulp is u = 2^-53. y is right exactly
-// when m lies between (y - u/2)^2 and (y + u/2)^2, i.e. when the residual
-// r = m - y*y satisfies -y*u < r <= y*u. The inequalities are exact rather
-// than approximate: r is a multiple of u^2 and the u^2/4 terms of the squares
-// fall between multiples, so they can never decide a comparison. A square
-// root of a double never lands on a midpoint, so there is no tie to break.
+/* Pick the correctly rounded root of m in [0.25, 1), given y within an ulp.
+ *
+ * The root lies in [0.5, 1], where an ulp is u = 2^-53. y is right exactly
+ * when m lies between (y - u/2)^2 and (y + u/2)^2, i.e. when the residual
+ * r = m - y*y satisfies -y*u < r <= y*u. The inequalities are exact rather
+ * than approximate: r is a multiple of u^2 and the u^2/4 terms of the squares
+ * fall between multiples, so they can never decide a comparison. A square
+ * root of a double never lands on a midpoint, so there is no tie to break. */
 float settle_sqrt(float scaled, float y) {
     float ulp = 1.1102230246251565e-16;
     for (int guard in 0 .. 4) {
@@ -169,10 +169,10 @@ float settle_sqrt(float scaled, float y) {
     return y;
 }
 
-// m - y*y, exactly. y*y is split into a rounded product and its rounding
-// error (Dekker's two-product), and m - p is exact because p is within a
-// factor of two of m (Sterbenz). This needs the C compiler not to fuse
-// `a * b + c` into one instruction -- see the note at the top.
+/* m - y*y, exactly. y*y is split into a rounded product and its rounding
+ * error (Dekker's two-product), and m - p is exact because p is within a
+ * factor of two of m (Sterbenz). This needs the C compiler not to fuse
+ * `a * b + c` into one instruction -- see the note at the top. */
 float residual(float scaled, float y) {
     float product = y * y;
     float high = split_hi(y);
@@ -181,15 +181,15 @@ float residual(float scaled, float y) {
     return scaled - product - rounding_error;
 }
 
-// The top 26 bits of a float, by Veltkamp's split: 2^27 + 1 scales it so the
-// rounding of the product discards exactly the low bits.
+/* The top 26 bits of a float, by Veltkamp's split: 2^27 + 1 scales it so the
+ * rounding of the product discards exactly the low bits. */
 float split_hi(float value) {
     float scaled = 134217729.0 * value;
     return scaled - (scaled - value);
 }
 
-// ln 2 in two parts: `hi` has trailing zero bits, so k * hi is exact for the
-// k range reduction ever needs, and `lo` carries the rest.
+/* ln 2 in two parts: `hi` has trailing zero bits, so k * hi is exact for the
+ * k range reduction ever needs, and `lo` carries the rest. */
 float ln2_hi() {
     return 0.6931471803691238;
 }
@@ -198,10 +198,10 @@ float ln2_lo() {
     return 1.9082149292705877e-10;
 }
 
-/// e raised to `x`. Within 1 ulp.
-///
-/// Reduce x = k*ln2 + r with |r| <= ln2/2, sum the Taylor series for e^r --
-/// 20 terms is past double precision for |r| < 0.35 -- and scale by 2^k.
+/** e raised to `x`. Within 1 ulp.
+ *
+ * Reduce x = k*ln2 + r with |r| <= ln2/2, sum the Taylor series for e^r --
+ * 20 terms is past double precision for |r| < 0.35 -- and scale by 2^k. */
 pub float exp(float x) {
     if (is_nan(x)) {
         return x;
@@ -214,9 +214,9 @@ pub float exp(float x) {
     }
     float multiple = round(x / 0.6931471805599453);
     float reduced = x - multiple * ln2_hi() - multiple * ln2_lo();
-    // Horner form, innermost term first: 1 + r(1 + r/2(1 + r/3(...))).
-    // Summing the smallest terms first means the one rounding that matters
-    // is the final `1 + r * t`, instead of twenty of them accumulating.
+    /* Horner form, innermost term first: 1 + r(1 + r/2(1 + r/3(...))).
+     * Summing the smallest terms first means the one rounding that matters
+     * is the final `1 + r * t`, instead of twenty of them accumulating. */
     float series = 1.0;
     int term = 20;
     while (term >= 1) {
@@ -226,9 +226,9 @@ pub float exp(float x) {
     return scale2(series, int(multiple));
 }
 
-// x * 2^k, one exact doubling at a time. Going through the subnormal range
-// in single steps rounds once per step instead of once in total, so the
-// scale-down is split: most of it while the value is still normal.
+/* x * 2^k, one exact doubling at a time. Going through the subnormal range
+ * in single steps rounds once per step instead of once in total, so the
+ * scale-down is split: most of it while the value is still normal. */
 float scale2(float x, int exponent) {
     float y = x;
     int remaining = exponent;
@@ -251,12 +251,12 @@ float scale2(float x, int exponent) {
     return y;
 }
 
-/// The natural logarithm. Within 1 ulp. log(0) is -inf and a negative
-/// argument is NaN, as in C.
-///
-/// Write x = m * 2^k with m in [sqrt(1/2), sqrt(2)), then
-/// log(m) = 2 * atanh(s) with s = (m-1)/(m+1), |s| < 0.172, whose odd series
-/// has converged by the 23rd power.
+/** The natural logarithm. Within 1 ulp. log(0) is -inf and a negative
+ * argument is NaN, as in C.
+ *
+ * Write x = m * 2^k with m in [sqrt(1/2), sqrt(2)), then
+ * log(m) = 2 * atanh(s) with s = (m-1)/(m+1), |s| < 0.172, whose odd series
+ * has converged by the 23rd power. */
 pub float log(float x) {
     if (is_nan(x) || x < 0.0) {
         return nan();
@@ -278,8 +278,8 @@ pub float log(float x) {
         exponent = exponent - 1;
     }
     float ratio = (mantissa - 1.0) / (mantissa + 1.0);
-    // The odd series s + s^3/3 + s^5/5 + ..., summed innermost first for the
-    // same reason as in `exp`.
+    /* The odd series s + s^3/3 + s^5/5 + ..., summed innermost first for the
+     * same reason as in `exp`. */
     float ratio_squared = ratio * ratio;
     float series = 0.0;
     int term = 23;
@@ -291,17 +291,17 @@ pub float log(float x) {
     return float_exponent * ln2_hi() + (2.0 * ratio + (2.0 * ratio * series + float_exponent * ln2_lo()));
 }
 
-/// `x` raised to `y`.
-///
-/// A whole exponent is repeated squaring -- exact whenever the answer fits,
-/// so `pow(2.0, 10.0)` is 1024 and not 1023.9999999999998. Otherwise the
-/// exponent is split into a whole part and a fraction, so `exp(y * log(x))`
-/// only ever sees a small argument and its error is not amplified by a large
-/// one. A negative base with a fractional exponent is NaN, as in C. Every
-/// special case -- zeros, infinities, NaN -- gives what C99 Annex F says.
+/** `x` raised to `y`.
+ *
+ * A whole exponent is repeated squaring -- exact whenever the answer fits,
+ * so `pow(2.0, 10.0)` is 1024 and not 1023.9999999999998. Otherwise the
+ * exponent is split into a whole part and a fraction, so `exp(y * log(x))`
+ * only ever sees a small argument and its error is not amplified by a large
+ * one. A negative base with a fractional exponent is NaN, as in C. Every
+ * special case -- zeros, infinities, NaN -- gives what C99 Annex F says. */
 pub float pow(float x, float y) {
-    // 1 to any power and anything to the power 0 are 1, NaN included: the
-    // answer does not depend on the other operand at all (Annex F.9.4.4).
+    /* 1 to any power and anything to the power 0 are 1, NaN included: the
+     * answer does not depend on the other operand at all (Annex F.9.4.4). */
     if (y == 0.0 || x == 1.0) {
         return 1.0;
     }
@@ -311,19 +311,19 @@ pub float pow(float x, float y) {
     if (!is_finite(y)) {
         return pow_infinite(fabs(x), y);
     }
-    // Any whole exponent, however large. There used to be a `< 2^53` limit
-    // here, and a negative base past it fell through to the fractional case
-    // and came out NaN -- but every float from 2^53 up is an even integer, so
-    // pow(-1, 1e300) is 1. pow_whole handles such an exponent exactly: its
-    // parity test reads the bits correctly at any size, and the loop runs
-    // once per bit of the exponent, about a thousand times at the most.
+    /* Any whole exponent, however large. There used to be a `< 2^53` limit
+     * here, and a negative base past it fell through to the fractional case
+     * and came out NaN -- but every float from 2^53 up is an even integer, so
+     * pow(-1, 1e300) is 1. pow_whole handles such an exponent exactly: its
+     * parity test reads the bits correctly at any size, and the loop runs
+     * once per bit of the exponent, about a thousand times at the most. */
     float whole = trunc(y);
     if (whole == y) {
         return pow_whole(x, y);
     }
-    // An infinite base to a fractional power: infinity or zero by the sign of
-    // the exponent. A fraction is never an odd integer, so the sign of -inf
-    // does not survive -- pow(-inf, 0.5) is +inf, not NaN.
+    /* An infinite base to a fractional power: infinity or zero by the sign of
+     * the exponent. A fraction is never an odd integer, so the sign of -inf
+     * does not survive -- pow(-inf, 0.5) is +inf, not NaN. */
     if (!is_finite(x)) {
         if (y > 0.0) {
             return inf();
@@ -343,10 +343,10 @@ pub float pow(float x, float y) {
     return pow_whole(x, whole) * exp(frac * log(x));
 }
 
-// |x| to an infinite power, C's rules: a base above 1 runs away to infinity
-// or collapses to zero depending on the sign, a base below 1 the other way
-// round, and exactly 1 stays 1 -- including -1, whose sign an infinite
-// exponent cannot settle.
+/* |x| to an infinite power, C's rules: a base above 1 runs away to infinity
+ * or collapses to zero depending on the sign, a base below 1 the other way
+ * round, and exactly 1 stays 1 -- including -1, whose sign an infinite
+ * exponent cannot settle. */
 float pow_infinite(float magnitude, float y) {
     if (magnitude == 1.0) {
         return 1.0;
@@ -357,14 +357,14 @@ float pow_infinite(float magnitude, float y) {
     return 0.0;
 }
 
-// x^n for a whole n.
-//
-// Plain repeated squaring is not good enough: squaring doubles the relative
-// error, so x^60 comes out up to ~60 ulp wrong. Instead the running values
-// are kept in double-double -- a float plus the rounding error it missed --
-// which carries about 106 bits, and each is held as a mantissa in [1, 2)
-// with its power of two apart, so no intermediate can overflow however
-// large n is. The answer is rounded to a float once, at the end.
+/* x^n for a whole n.
+ *
+ * Plain repeated squaring is not good enough: squaring doubles the relative
+ * error, so x^60 comes out up to ~60 ulp wrong. Instead the running values
+ * are kept in double-double -- a float plus the rounding error it missed --
+ * which carries about 106 bits, and each is held as a mantissa in [1, 2)
+ * with its power of two apart, so no intermediate can overflow however
+ * large n is. The answer is rounded to a float once, at the end. */
 float pow_whole(float x, float exponent) {
     if (x == 0.0 || !is_finite(x)) {
         return pow_plain(x, exponent);
@@ -404,8 +404,8 @@ float pow_whole(float x, float exponent) {
                 blo = blo / 2.0;
                 bexp = bexp + 1;
             }
-            // Past this the answer is certainly out of range, and the
-            // exponent would soon overflow an int if squaring went on.
+            /* Past this the answer is certainly out of range, and the
+             * exponent would soon overflow an int if squaring went on. */
             if (bexp > 4000 || bexp < -4000) {
                 return pow_out_of_range(x < 0.0 && is_odd, bexp > 0 != is_negative);
             }
@@ -417,8 +417,8 @@ float pow_whole(float x, float exponent) {
     if (!is_negative) {
         return scale2(ahi + alo, aexp);
     }
-    // 1 / (ahi + alo) = q * (1 + d), with d = 1 - q * (ahi + alo) computed
-    // exactly enough to correct the one rounding of the division.
+    /* 1 / (ahi + alo) = q * (1 + d), with d = 1 - q * (ahi + alo) computed
+     * exactly enough to correct the one rounding of the division. */
     float reciprocal = 1.0 / ahi;
     float reciprocal_product = reciprocal * ahi;
     float correction = 1.0 - reciprocal_product - two_prod_error(reciprocal, ahi, reciprocal_product);
@@ -437,8 +437,8 @@ float pow_out_of_range(bool is_negative, bool is_huge) {
     return magnitude;
 }
 
-// The power of two that brings |x| into [1, 2), for finite nonzero x. Every
-// step is an exact doubling or halving, subnormals included.
+/* The power of two that brings |x| into [1, 2), for finite nonzero x. Every
+ * step is an exact doubling or halving, subnormals included. */
 int exponent_of(float x) {
     float mantissa = fabs(x);
     int exponent = 0;
@@ -453,9 +453,9 @@ int exponent_of(float x) {
     return exponent;
 }
 
-// The rounding error of p = a * b, exactly: a*b - p. Dekker's algorithm, on
-// Veltkamp halves of each factor. Only called with factors in [1, 4), where
-// the split cannot overflow.
+/* The rounding error of p = a * b, exactly: a*b - p. Dekker's algorithm, on
+ * Veltkamp halves of each factor. Only called with factors in [1, 4), where
+ * the split cannot overflow. */
 float two_prod_error(float left, float right, float product) {
     float left_high = split_hi(left);
     float left_low = left - left_high;
@@ -464,8 +464,8 @@ float two_prod_error(float left, float right, float product) {
     return left_high * right_high - product + left_high * right_low + left_low * right_high + left_low * right_low;
 }
 
-// Zero and infinite bases, where every answer is 0, infinity or NaN and
-// plain squaring is exact.
+/* Zero and infinite bases, where every answer is 0, infinity or NaN and
+ * plain squaring is exact. */
 float pow_plain(float x, float exponent) {
     bool is_negative = exponent < 0.0;
     float remaining = fabs(exponent);
@@ -494,8 +494,8 @@ pub int abs(int x) {
     return x;
 }
 
-/// The absolute value of a float. `-0.0` gives `0.0` and NaN stays NaN: the
-/// sign test is false for both, and `x * -1` is not reached.
+/** The absolute value of a float. `-0.0` gives `0.0` and NaN stays NaN: the
+ * sign test is false for both, and `x * -1` is not reached. */
 pub float fabs(float x) {
     if (x < 0.0) {
         return -x;

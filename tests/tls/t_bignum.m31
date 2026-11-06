@@ -1,10 +1,10 @@
-// `lib/crypto/bignum.m31` against Python's integers. Reads the cases
-// `bignum_oracle.py` writes (one `op|modulus|a|b` per line, all hex) and
-// prints `index answer` for each; `test_ecdsa.sh` diffs that against the
-// oracle's expected list.
-//
-//   python3 tests/tls/bignum_oracle.py cases.txt expected.txt
-//   ./build.sh tests/tls/t_bignum.m31 -o t_bignum && ./t_bignum cases.txt
+/* `lib/crypto/bignum.m31` against Python's integers. Reads the cases
+ * `bignum_oracle.py` writes (one `op|modulus|a|b` per line, all hex) and
+ * prints `index answer` for each; `test_ecdsa.sh` diffs that against the
+ * oracle's expected list.
+ *
+ *   python3 tests/tls/bignum_oracle.py cases.txt expected.txt
+ *   ./build.sh tests/tls/t_bignum.m31 -o t_bignum && ./t_bignum cases.txt */
 
 import crypto.bignum;
 import encoding.hexcodec;

@@ -1,11 +1,11 @@
-// `lib/pki/x509chain.m31` under test, driven from `test_chain.sh`.
-//
-//   t_chain_verify <anchors.pem> <chain.pem> <host> <now, epoch seconds>
-//
-// Prints `ok <number of certificates in the path>` or `error <Name>`, where
-// `<Name>` is the `x509chain.Error` variant, or `LeafUnparseable` when the
-// first certificate of the chain is refused by `x509.parse`, and exits 0 for
-// an `ok` and 1 for an error.
+/* `lib/pki/x509chain.m31` under test, driven from `test_chain.sh`.
+ *
+ *   t_chain_verify <anchors.pem> <chain.pem> <host> <now, epoch seconds>
+ *
+ * Prints `ok <number of certificates in the path>` or `error <Name>`, where
+ * `<Name>` is the `x509chain.Error` variant, or `LeafUnparseable` when the
+ * first certificate of the chain is refused by `x509.parse`, and exits 0 for
+ * an `ok` and 1 for an error. */
 
 import io;
 import os;
@@ -64,8 +64,8 @@ str read_text(str path) {
     }
 }
 
-// The chain as a server presents it: the first certificate has to parse, any
-// other that does not is left out, as `lib/tls.m31` leaves it out.
+/* The chain as a server presents it: the first certificate has to parse, any
+ * other that does not is left out, as `lib/tls.m31` leaves it out. */
 List<x509.Certificate> presented_from(str path) {
     List<x509.Certificate> certificates = [];
     match (x509.pem_certificates(read_text(path))) {

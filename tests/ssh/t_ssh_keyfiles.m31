@@ -1,14 +1,14 @@
-// `lib/ssh/sshkey.m31` on real files from `ssh-keygen`: every key type, every
-// supported file cipher, with and without a passphrase.
-//
-//   t_ssh_keyfiles PASSPHRASE KEYFILE...
-//
-// For each file prints `PATH ALGORITHM PUBLIC-BLOB-BASE64 COMMENT` and, per
-// signature algorithm the key offers, `sig ALGORITHM HEX` over the fixed
-// message below; then, for an encrypted file, whether the wrong passphrase
-// is refused as WrongPassphrase and no passphrase as Encrypted.
-// `oracle_sshkeyfiles.py` checks the lines against `ssh-keygen -y` and
-// verifies every signature with OpenSSL.
+/* `lib/ssh/sshkey.m31` on real files from `ssh-keygen`: every key type, every
+ * supported file cipher, with and without a passphrase.
+ *
+ *   t_ssh_keyfiles PASSPHRASE KEYFILE...
+ *
+ * For each file prints `PATH ALGORITHM PUBLIC-BLOB-BASE64 COMMENT` and, per
+ * signature algorithm the key offers, `sig ALGORITHM HEX` over the fixed
+ * message below; then, for an encrypted file, whether the wrong passphrase
+ * is refused as WrongPassphrase and no passphrase as Encrypted.
+ * `oracle_sshkeyfiles.py` checks the lines against `ssh-keygen -y` and
+ * verifies every signature with OpenSSL. */
 import io;
 import os;
 import encoding.hexcodec;

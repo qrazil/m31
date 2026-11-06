@@ -1,8 +1,8 @@
-// AES block encryption (`lib/crypto/aes.m31`) against `aes_block_oracle.py`, which
-// computes the same lines with the `cryptography` package and asserts the
-// FIPS 197 published values against it. `test_aesgcm.sh` diffs the two.
-//
-//   ./build.sh tests/tls/aes_block.m31 -o aes_block && ./aes_block
+/* AES block encryption (`lib/crypto/aes.m31`) against `aes_block_oracle.py`, which
+ * computes the same lines with the `cryptography` package and asserts the
+ * FIPS 197 published values against it. `test_aesgcm.sh` diffs the two.
+ *
+ *   ./build.sh tests/tls/aes_block.m31 -o aes_block && ./aes_block */
 
 import crypto.aes;
 import TLS13_hex;
@@ -40,8 +40,8 @@ for (int key_size in key_sizes) {
     aes.Cipher ones = aes.cipher([0xFF; key_size]);
     print("ones-" + (key_size * 8).to_str() + " " + ones.encrypt_block([0xFF; 16]).hex());
 }
-// Every byte value goes through the S-box at least once: block `n` holds
-// n*16 .. n*16+15 and the key is fixed.
+/* Every byte value goes through the S-box at least once: block `n` holds
+ * n*16 .. n*16+15 and the key is fixed. */
 aes.Cipher all_values = aes.cipher(pattern(16, 3, 5));
 for (int block in 0 .. 16) {
     print("values " + block.to_str() + " " + all_values.encrypt_block(pattern(16, 1, block * 16)).hex());

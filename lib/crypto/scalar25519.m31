@@ -1,75 +1,75 @@
-// Arithmetic modulo `L = 2^252 + 27742317777372353535851937790883648493`,
-// the order of the edwards25519 base point -- RFC 8032's other modulus, used
-// for the scalars Ed25519 signs and verifies with, as distinct from
-// `field25519`'s `2^255 - 19`, the CURVE's coordinate field. Two different
-// prime moduli, two small modules; nothing here is field25519 with a
-// different constant swapped in, because `L` does not have field25519's
-// prime's convenient shape (`2^255 - 19`, whose one property -- `2^256`
-// reduces to the small constant 38 -- is the whole reason that carry chain
-// works. `L` reduces to nothing nearly as small, so this module reduces
-// differently: see below).
-//
-// API
+/* Arithmetic modulo `L = 2^252 + 27742317777372353535851937790883648493`,
+ * the order of the edwards25519 base point -- RFC 8032's other modulus, used
+ * for the scalars Ed25519 signs and verifies with, as distinct from
+ * `field25519`'s `2^255 - 19`, the CURVE's coordinate field. Two different
+ * prime moduli, two small modules; nothing here is field25519 with a
+ * different constant swapped in, because `L` does not have field25519's
+ * prime's convenient shape (`2^255 - 19`, whose one property -- `2^256`
+ * reduces to the small constant 38 -- is the whole reason that carry chain
+ * works. `L` reduces to nothing nearly as small, so this module reduces
+ * differently: see below).
+ *
+ * API */
 // ---
-//   scalar25519.reduce64(bytes)         -- a 64-octet hash, reduced mod L
-//   scalar25519.muladd(k, a, r)         -- (k*a + r) mod L
-//   scalar25519.from_bytes(bytes)       -- a raw 32-octet load, NOT reduced
-//   scalar25519.to_bytes(s)             -- 32 little-endian octets
-//   scalar25519.is_reduced(s)           -- s < L, for checking a signature's
-//                                          `S` before using it (RFC 8032
-//                                          §5.1.7 requires this)
-//
-// Representation is the same as `field25519`'s: 16 limbs, radix 2^16 --
-// `L` is about 2^252.6, so this has the same headroom above it that
-// field25519 has above `p`.
-//
+/*   scalar25519.reduce64(bytes)         -- a 64-octet hash, reduced mod L
+ *   scalar25519.muladd(k, a, r)         -- (k*a + r) mod L
+ *   scalar25519.from_bytes(bytes)       -- a raw 32-octet load, NOT reduced
+ *   scalar25519.to_bytes(s)             -- 32 little-endian octets
+ *   scalar25519.is_reduced(s)           -- s < L, for checking a signature's
+ *                                          `S` before using it (RFC 8032
+ *                                          §5.1.7 requires this)
+ *
+ * Representation is the same as `field25519`'s: 16 limbs, radix 2^16 --
+ * `L` is about 2^252.6, so this has the same headroom above it that
+ * field25519 has above `p`.
+ * */
 // --- reduction: constant-time binary long division, not a fast reduction --
-//
-// Two of RFC 8032's steps need a value REDUCED mod L from something wider
-// than 16 limbs: the 64-octet SHA-512 output that becomes the nonce `r` or
-// the challenge `k` (512 bits), and the product `k*a` inside `S = r + k*a`
-// (up to about 506 bits). A hand-tuned fast reduction (as ref10's
-// `sc_reduce.c` has) exploits `L`'s exact bit pattern with a sequence of
-// per-limb subtraction constants that is fast but genuinely hard to check
-// by eye against the modulus. This uses ordinary **binary long division**
-// instead: process the wide value one bit at a time, from the most
-// significant down, keeping a running remainder that is always kept below
-// `L` by one constant-time conditional subtraction per bit. It is O(bits)
-// instead of O(limbs) -- 512 steps instead of a handful -- which this
-// module can afford, because nothing here is on a hot path, and correctness
-// of a loop this simple is easy to see directly from the code rather than
-// from trusting a derivation.
-//
-// CONSTANT TIME: `r` (the nonce, RFC 8032 §5.1.6) and `a` (the expanded
-// secret scalar) both pass through this module while secret, exactly the
-// values this whole project exists to keep off a timing side channel
-// (`sha512.m31`'s header makes the same point about the hash underneath
-// them). Every step below is fixed-count (the bit-loop is always exactly
-// `nbits` iterations, never fewer) and every reduction is the same
-// masked-select-after-a-borrow-chain technique `field25519.m31`'s
-// `reduce_canonical` already uses and documents at length -- see that file
-// for the fuller argument about why the `>>` inside the borrow chain is
-// safe. Nothing here branches, compares, or indexes on a secret value.
+/*
+ * Two of RFC 8032's steps need a value REDUCED mod L from something wider
+ * than 16 limbs: the 64-octet SHA-512 output that becomes the nonce `r` or
+ * the challenge `k` (512 bits), and the product `k*a` inside `S = r + k*a`
+ * (up to about 506 bits). A hand-tuned fast reduction (as ref10's
+ * `sc_reduce.c` has) exploits `L`'s exact bit pattern with a sequence of
+ * per-limb subtraction constants that is fast but genuinely hard to check
+ * by eye against the modulus. This uses ordinary **binary long division**
+ * instead: process the wide value one bit at a time, from the most
+ * significant down, keeping a running remainder that is always kept below
+ * `L` by one constant-time conditional subtraction per bit. It is O(bits)
+ * instead of O(limbs) -- 512 steps instead of a handful -- which this
+ * module can afford, because nothing here is on a hot path, and correctness
+ * of a loop this simple is easy to see directly from the code rather than
+ * from trusting a derivation.
+ *
+ * CONSTANT TIME: `r` (the nonce, RFC 8032 §5.1.6) and `a` (the expanded
+ * secret scalar) both pass through this module while secret, exactly the
+ * values this whole project exists to keep off a timing side channel
+ * (`sha512.m31`'s header makes the same point about the hash underneath
+ * them). Every step below is fixed-count (the bit-loop is always exactly
+ * `nbits` iterations, never fewer) and every reduction is the same
+ * masked-select-after-a-borrow-chain technique `field25519.m31`'s
+ * `reduce_canonical` already uses and documents at length -- see that file
+ * for the fuller argument about why the `>>` inside the borrow chain is
+ * safe. Nothing here branches, compares, or indexes on a secret value. */
 
 import crypto.field25519;
 
 const int M16 = 0xFFFF;
 
-// `L`, as 16 limbs -- generated by, and checked against, the same one-line
-// Python this module's report verifies every constant with:
-//   L = 2**252 + 27742317777372353535851937790883648493
-//   [(L >> (16*i)) & 0xFFFF for i in range(16)]
+/* `L`, as 16 limbs -- generated by, and checked against, the same one-line
+ * Python this module's report verifies every constant with:
+ *   L = 2**252 + 27742317777372353535851937790883648493
+ *   [(L >> (16*i)) & 0xFFFF for i in range(16)] */
 const Array<int> L_LIMBS = [
     0xD3ED, 0x5CF5, 0x631A, 0x5812, 0x9CD6, 0xA2F7, 0xF9DE, 0x14DE,
     0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1000
 ];
 
-/// A raw 32-octet little-endian load into 16 limbs -- NOT reduced. Matches
-/// `field25519.from_bytes`'s contract exactly: two octets per limb, nothing
-/// else done to it. A caller decoding a signature's `S` must check
-/// `is_reduced` itself (RFC 8032 §5.1.7); a caller building a scalar it
-/// knows is already below `L` (nothing in this file does that without also
-/// reducing) may skip the check.
+/** A raw 32-octet little-endian load into 16 limbs -- NOT reduced. Matches
+ * `field25519.from_bytes`'s contract exactly: two octets per limb, nothing
+ * else done to it. A caller decoding a signature's `S` must check
+ * `is_reduced` itself (RFC 8032 §5.1.7); a caller building a scalar it
+ * knows is already below `L` (nothing in this file does that without also
+ * reducing) may skip the check. */
 pub Array<int> from_bytes(bytes data) {
     Array<int> out = [0; 16];
     for (int limb_index in 0 .. 16) {
@@ -78,10 +78,10 @@ pub Array<int> from_bytes(bytes data) {
     return out;
 }
 
-/// `scalar`, packed as 32 little-endian octets. `scalar` is assumed already below
-/// `L` (every function in this module that returns a scalar keeps that
-/// true), so this is a direct pack with no reduction step -- unlike
-/// `field25519.to_bytes`, which always canonicalizes first.
+/** `scalar`, packed as 32 little-endian octets. `scalar` is assumed already below
+ * `L` (every function in this module that returns a scalar keeps that
+ * true), so this is a direct pack with no reduction step -- unlike
+ * `field25519.to_bytes`, which always canonicalizes first. */
 pub bytes to_bytes(Array<int> scalar) {
     bytes out = [0; 32];
     for (int limb_index in 0 .. 16) {
@@ -91,8 +91,8 @@ pub bytes to_bytes(Array<int> scalar) {
     return out;
 }
 
-// A public bias for the borrow chain -- same role and same margin as
-// `field25519.m31`'s `SBIAS`.
+/* A public bias for the borrow chain -- same role and same margin as
+ * `field25519.m31`'s `SBIAS`. */
 const int SBIAS = 1 << 20;
 const int SBIAS_HI = SBIAS >> 16;
 
@@ -101,10 +101,10 @@ type Borrowed {
     int borrow;
 }
 
-// `v - L`, elementwise, with an explicit (not folded) borrow chain --
-// `field25519.m31`'s `sub_p_borrow`, with `L` in place of `p`. See that
-// function's comment for the constant-time argument, which is identical
-// here.
+/* `v - L`, elementwise, with an explicit (not folded) borrow chain --
+ * `field25519.m31`'s `sub_p_borrow`, with `L` in place of `p`. See that
+ * function's comment for the constant-time argument, which is identical
+ * here. */
 Borrowed sub_l_borrow(Array<int> value) {
     Array<int> out = [0; 16];
     int borrow = 0;
@@ -118,12 +118,12 @@ Borrowed sub_l_borrow(Array<int> value) {
     return Borrowed(out, borrow);
 }
 
-/// `when_one` if `cond` is 1, `when_zero` if `cond` is 0 -- `field25519.cselect`'s exact
-/// technique, repeated here rather than imported so this module has no
-/// dependency on which internal helpers `field25519` chooses to keep
-/// private in the future; the public `field25519.cselect` operates on
-/// `field25519`'s own values, which happen to share this representation,
-/// but a scalar is not a field element and should not be passed to it.
+/** `when_one` if `cond` is 1, `when_zero` if `cond` is 0 -- `field25519.cselect`'s exact
+ * technique, repeated here rather than imported so this module has no
+ * dependency on which internal helpers `field25519` chooses to keep
+ * private in the future; the public `field25519.cselect` operates on
+ * `field25519`'s own values, which happen to share this representation,
+ * but a scalar is not a field element and should not be passed to it. */
 Array<int> cselect(int cond, Array<int> when_one, Array<int> when_zero) {
     int mask = 0 - cond;
     int notmask = mask ^ -1;
@@ -134,16 +134,16 @@ Array<int> cselect(int cond, Array<int> when_one, Array<int> when_zero) {
     return out;
 }
 
-// `value` assumed `< 2*L`; returns `v mod L` with exactly one conditional
-// subtraction.
+/* `value` assumed `< 2*L`; returns `v mod L` with exactly one conditional
+ * subtraction. */
 Array<int> reduce_once(Array<int> value) {
     Borrowed borrowed = sub_l_borrow(value);
     return cselect(1 - borrowed.borrow, borrowed.diff, value);
 }
 
-/// Whether `s < L` -- RFC 8032 §5.1.7 requires a verifier to check this of a
-/// signature's `S` before doing anything else with it. Not constant time
-/// (nor does it need to be: `S` is the public half of a signature).
+/** Whether `s < L` -- RFC 8032 §5.1.7 requires a verifier to check this of a
+ * signature's `S` before doing anything else with it. Not constant time
+ * (nor does it need to be: `S` is the public half of a signature). */
 pub bool is_reduced(Array<int> scalar) {
     Borrowed borrowed = sub_l_borrow(scalar);
     return borrowed.borrow == 1;
@@ -156,19 +156,19 @@ int bit_at_limbs(Array<int> limbs, int bit_index) {
     return limbs[limb] >> off & 1;
 }
 
-// Binary long division of a `nlimbs`-limb, radix-2^16 value (bits
-// `0 .. nbits` significant; `nbits` a multiple of 16) by `L`, one bit at a
-// time from the top. See the header for why this is a loop over bits
-// rather than a fast, hand-tuned reduction.
+/* Binary long division of a `nlimbs`-limb, radix-2^16 value (bits
+ * `0 .. nbits` significant; `nbits` a multiple of 16) by `L`, one bit at a
+ * time from the top. See the header for why this is a loop over bits
+ * rather than a fast, hand-tuned reduction. */
 Array<int> reduce_wide_bits(Array<int> wide, int nbits) {
     Array<int> rem = [0; 16];
     int bit_index = nbits - 1;
     while (bit_index >= 0) {
         int bit = bit_at_limbs(wide, bit_index);
-        // rem = rem*2 + bit, kept to 16 limbs. Invariant: `rem < L` on
-        // entry to this step (true at `i == nbits-1`, since `rem` starts at
-        // 0), so `rem*2 + bit < 2*L` here, and the one `reduce_once` below
-        // restores the invariant for the next bit.
+        /* rem = rem*2 + bit, kept to 16 limbs. Invariant: `rem < L` on
+         * entry to this step (true at `i == nbits-1`, since `rem` starts at
+         * 0), so `rem*2 + bit < 2*L` here, and the one `reduce_once` below
+         * restores the invariant for the next bit. */
         int carry = bit;
         Array<int> out = [0; 16];
         for (int limb_index in 0 .. 16) {
@@ -182,9 +182,9 @@ Array<int> reduce_wide_bits(Array<int> wide, int nbits) {
     return rem;
 }
 
-/// The 64 octets of a SHA-512 output, read little-endian and reduced mod
-/// `L` -- RFC 8032 §5.1.6's nonce `r = H(...) mod L` and §5.1.7's challenge
-/// `k = H(...) mod L`.
+/** The 64 octets of a SHA-512 output, read little-endian and reduced mod
+ * `L` -- RFC 8032 §5.1.6's nonce `r = H(...) mod L` and §5.1.7's challenge
+ * `k = H(...) mod L`. */
 pub Array<int> reduce64(bytes digest) {
     Array<int> wide = [0; 32];
     for (int limb_index in 0 .. 32) {
@@ -193,25 +193,25 @@ pub Array<int> reduce64(bytes digest) {
     return reduce_wide_bits(wide, 512);
 }
 
-/// A 16-limb value, reduced mod `L`. For a scalar that is already below `L`
-/// this is a (constant-time) no-op; it exists for RFC 8032 §5.1.5's clamped
-/// secret scalar `a`, which the clamp (top bit cleared, second-highest bit
-/// set) puts below `2^255` but not necessarily below `L` -- `muladd` below
-/// wants every argument already reduced, and this is how a caller gets
-/// there without hand-rolling a second reduction.
+/** A 16-limb value, reduced mod `L`. For a scalar that is already below `L`
+ * this is a (constant-time) no-op; it exists for RFC 8032 §5.1.5's clamped
+ * secret scalar `a`, which the clamp (top bit cleared, second-highest bit
+ * set) puts below `2^255` but not necessarily below `L` -- `muladd` below
+ * wants every argument already reduced, and this is how a caller gets
+ * there without hand-rolling a second reduction. */
 pub Array<int> reduce256(Array<int> value) {
     return reduce_wide_bits(value, 256);
 }
 
-// One left-to-right ripple carry over 32 limbs, WITHOUT folding a final
-// carry back in -- unlike `field25519.carry_pass`, there is nothing to fold
-// it into: this is used only to normalize an exact, not-yet-modular wide
-// product, and the bound comment on `muladd` below is what guarantees no
-// carry ever escapes limb 31 for a legal call.
-//
-// CONSTANT TIME: identical technique to `field25519.carry_pass` -- see its
-// comment for why the bias makes every `>>` here operate on a provably
-// non-negative value.
+/* One left-to-right ripple carry over 32 limbs, WITHOUT folding a final
+ * carry back in -- unlike `field25519.carry_pass`, there is nothing to fold
+ * it into: this is used only to normalize an exact, not-yet-modular wide
+ * product, and the bound comment on `muladd` below is what guarantees no
+ * carry ever escapes limb 31 for a legal call.
+ *
+ * CONSTANT TIME: identical technique to `field25519.carry_pass` -- see its
+ * comment for why the bias makes every `>>` here operate on a provably
+ * non-negative value. */
 Array<int> carry_pass32(Array<int> limbs) {
     Array<int> out = clone(limbs);
     int bias = 1 << 32;
@@ -228,16 +228,16 @@ Array<int> carry_pass32(Array<int> limbs) {
     return out;
 }
 
-// The exact (not reduced) 32-limb product of two 16-limb values -- plain
-// schoolbook, no fold: `L` has no `field25519`-style small-wraparound
-// identity to fold with, so the whole point is to keep every bit of the
-// product and hand it to `reduce_wide_bits` instead.
-//
-// Size bound: each term is under `2^32` (two limbs below `2^16`), up to 16
-// terms land in one `t[k]` before normalizing, so every entry is under
-// `2^36` going into `carry_pass32` -- far below the trap threshold, and (as
-// in `field25519.mul_raw`) always non-negative, so the overflow check
-// inside `+` always takes its "no overflow" path.
+/* The exact (not reduced) 32-limb product of two 16-limb values -- plain
+ * schoolbook, no fold: `L` has no `field25519`-style small-wraparound
+ * identity to fold with, so the whole point is to keep every bit of the
+ * product and hand it to `reduce_wide_bits` instead.
+ *
+ * Size bound: each term is under `2^32` (two limbs below `2^16`), up to 16
+ * terms land in one `t[k]` before normalizing, so every entry is under
+ * `2^36` going into `carry_pass32` -- far below the trap threshold, and (as
+ * in `field25519.mul_raw`) always non-negative, so the overflow check
+ * inside `+` always takes its "no overflow" path. */
 Array<int> mul_wide_raw(Array<int> left, Array<int> right) {
     Array<int> product = [0; 32];
     for (int i in 0 .. 16) {
@@ -249,13 +249,13 @@ Array<int> mul_wide_raw(Array<int> left, Array<int> right) {
     return product;
 }
 
-/// `(k*a + r) mod L` -- RFC 8032 §5.1.6's `S = (r + k*s) mod L`, with `challenge`
-/// and `secret_scalar` in either order (multiplication commutes) and `nonce` the additive
-/// term. Every one of `challenge`, `secret_scalar`, `nonce` must already be below `L` (every value
-/// this module hands out is); the product is then under `L^2 < 2^506`, plus
-/// `r < L < 2^253` is under `2^507` -- comfortably inside the 32 limbs
-/// (512 bits) `mul_wide_raw` and `carry_pass32` work with, so no carry is
-/// ever lost off the top.
+/** `(k*a + r) mod L` -- RFC 8032 §5.1.6's `S = (r + k*s) mod L`, with `challenge`
+ * and `secret_scalar` in either order (multiplication commutes) and `nonce` the additive
+ * term. Every one of `challenge`, `secret_scalar`, `nonce` must already be below `L` (every value
+ * this module hands out is); the product is then under `L^2 < 2^506`, plus
+ * `r < L < 2^253` is under `2^507` -- comfortably inside the 32 limbs
+ * (512 bits) `mul_wide_raw` and `carry_pass32` work with, so no carry is
+ * ever lost off the top. */
 pub Array<int> muladd(Array<int> challenge, Array<int> secret_scalar, Array<int> nonce) {  // RFC 8032: r
     Array<int> prod = carry_pass32(mul_wide_raw(challenge, secret_scalar));
     Array<int> total = [0; 32];

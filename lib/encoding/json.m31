@@ -1,54 +1,54 @@
-// JSON, RFC 8259: parse text into a `Value`, and stringify a `Value` back.
-//
-// `parse` is strict. It accepts exactly the grammar of RFC 8259 -- no
-// comments, no trailing commas, no single quotes, no leading zeros, no `NaN`
-// -- and a document that is not JSON is `Err(Error.Syntax)`. `Error` is
-// payload-free (docs/errors-decision.md §4), so it says only that parsing
-// failed; a caller that wants to say where reports it at the call site.
-//
-// Numbers: a literal containing `.`, `e` or `E` is a `Float`; anything else
-// is an `Int`. A float literal too large for a double is an infinity, as in
-// CPython's `json`; an integer literal outside the 64-bit range is refused,
-// because there is no bigger integer to put it in and quietly turning it into
-// a float would lose digits nobody asked to lose.
-//
-// Strings: every escape RFC 8259 defines, `\uXXXX` included, with a UTF-16
-// surrogate pair combined into the one character it spells and an unpaired
-// surrogate refused; every code point an escape can spell is decoded. Control
-// characters must be escaped. RFC 8259 requires the text to be UTF-8, and
-// nothing here checks it: the text is a `str`, which is valid UTF-8 by
-// construction (reference §3). A document that arrives as octets is decoded
-// with `bytes.utf8()` -- or `io.read` -- before it gets here.
-//
-// `stringify` writes the compact form -- no incidental whitespace at all --
-// unless `indent` is positive, which gives one value per line, indented that
-// many spaces per level, with `": "` after a key. Pretty-printing is a detail
-// of the one operation, not a second one. Only what RFC 8259 requires is
-// escaped: `"` and `\`, the short forms `\n \r \t \b \f`, and `\u00xx` for
-// the rest of the C0 controls. Everything else, non-ASCII included, is written
-// through: the output is UTF-8 and `ensure_ascii` is a second spelling of the
-// same document. A float that is a whole number keeps a `.0`, so that it reads
-// back as a `Float` and not an `Int`.
-//
-// Depth: `parse` accepts 10 000 levels of nesting and refuses the next. A
-// document off a socket chooses its own shape, and one byte of `[` buys a
-// heap container; the cap bounds that amplification. Neither direction
-// recurses -- each walks an explicit stack, as Oro's codec does -- so depth
-// costs heap, never C stack. `stringify` has the same bound, which is also
-// what stops it on a `Value` that contains itself.
-//
+/* JSON, RFC 8259: parse text into a `Value`, and stringify a `Value` back.
+ *
+ * `parse` is strict. It accepts exactly the grammar of RFC 8259 -- no
+ * comments, no trailing commas, no single quotes, no leading zeros, no `NaN`
+ * -- and a document that is not JSON is `Err(Error.Syntax)`. `Error` is
+ * payload-free (docs/errors-decision.md §4), so it says only that parsing
+ * failed; a caller that wants to say where reports it at the call site.
+ *
+ * Numbers: a literal containing `.`, `e` or `E` is a `Float`; anything else
+ * is an `Int`. A float literal too large for a double is an infinity, as in
+ * CPython's `json`; an integer literal outside the 64-bit range is refused,
+ * because there is no bigger integer to put it in and quietly turning it into
+ * a float would lose digits nobody asked to lose.
+ *
+ * Strings: every escape RFC 8259 defines, `\uXXXX` included, with a UTF-16
+ * surrogate pair combined into the one character it spells and an unpaired
+ * surrogate refused; every code point an escape can spell is decoded. Control
+ * characters must be escaped. RFC 8259 requires the text to be UTF-8, and
+ * nothing here checks it: the text is a `str`, which is valid UTF-8 by
+ * construction (reference §3). A document that arrives as octets is decoded
+ * with `bytes.utf8()` -- or `io.read` -- before it gets here.
+ *
+ * `stringify` writes the compact form -- no incidental whitespace at all --
+ * unless `indent` is positive, which gives one value per line, indented that
+ * many spaces per level, with `": "` after a key. Pretty-printing is a detail
+ * of the one operation, not a second one. Only what RFC 8259 requires is
+ * escaped: `"` and `\`, the short forms `\n \r \t \b \f`, and `\u00xx` for
+ * the rest of the C0 controls. Everything else, non-ASCII included, is written
+ * through: the output is UTF-8 and `ensure_ascii` is a second spelling of the
+ * same document. A float that is a whole number keeps a `.0`, so that it reads
+ * back as a `Float` and not an `Int`.
+ *
+ * Depth: `parse` accepts 10 000 levels of nesting and refuses the next. A
+ * document off a socket chooses its own shape, and one byte of `[` buys a
+ * heap container; the cap bounds that amplification. Neither direction
+ * recurses -- each walks an explicit stack, as Oro's codec does -- so depth
+ * costs heap, never C stack. `stringify` has the same bound, which is also
+ * what stops it on a `Value` that contains itself.
+ * */
 // --- what differs from Oro's json -------------------------------------------
-//
-// - The value is a typed enum, not a dynamic dict/list/int. An object is a
-//   `Map<str, Value>`, whose order is the hash table's, so `stringify` writes
-//   keys SORTED (bytewise, which for UTF-8 is code point order) to make its
-//   output a function of the value. A repeated key in a document keeps the
-//   last value, as Oro and CPython do.
-// - Positions count bytes, not characters: every offset in the language is a
-//   byte offset, and one always lands on a character boundary here.
-// - `stringify` returns a `Result`, because NaN, an infinity and a too-deep
-//   value have no JSON spelling. Oro raised.
-// - Integers past 64 bits are an error rather than a bignum (see above).
+/*
+ * - The value is a typed enum, not a dynamic dict/list/int. An object is a
+ *   `Map<str, Value>`, whose order is the hash table's, so `stringify` writes
+ *   keys SORTED (bytewise, which for UTF-8 is code point order) to make its
+ *   output a function of the value. A repeated key in a document keeps the
+ *   last value, as Oro and CPython do.
+ * - Positions count bytes, not characters: every offset in the language is a
+ *   byte offset, and one always lands on a character boundary here.
+ * - `stringify` returns a `Result`, because NaN, an infinity and a too-deep
+ *   value have no JSON spelling. Oro raised.
+ * - Integers past 64 bits are an error rather than a bignum (see above). */
 
 /// A JSON value.
 pub enum Value {
@@ -61,22 +61,22 @@ pub enum Value {
     Object(Map<str, Value>);
 }
 
-/// Why `parse` or `stringify` failed. Payload-free by design
-/// (docs/errors-decision.md §4): the position or value that made `parse` or
-/// `stringify` fail is context the caller already has when it reports, not
-/// something this value carries.
+/** Why `parse` or `stringify` failed. Payload-free by design
+ * (docs/errors-decision.md §4): the position or value that made `parse` or
+ * `stringify` fail is context the caller already has when it reports, not
+ * something this value carries. */
 pub enum Error {
     /// The text is not JSON.
     Syntax;
     /// `stringify` met a NaN or an infinity, which JSON has no spelling for.
     NotFinite;
-    /// `stringify` went deeper than 10 000 levels -- a value that contains
-    /// itself, or near enough.
+    /** `stringify` went deeper than 10 000 levels -- a value that contains
+     * itself, or near enough. */
     TooDeep;
 }
 
-/// A sentence saying what went wrong. A method named `to_str`, so
-/// `print(e)` prints it.
+/** A sentence saying what went wrong. A method named `to_str`, so
+ * `print(e)` prints it. */
 pub str Error.to_str() {
     match (this) {
         case Syntax: {
@@ -97,8 +97,8 @@ type Parser {
     int position = 0;
 }
 
-// A container the parser is in the middle of: its items or members so far,
-// and for an object the key whose value is being read.
+/* A container the parser is in the middle of: its items or members so far,
+ * and for an object the key whose value is being read. */
 type Frame {
     bool is_object;
     List<Value> items = [];
@@ -106,9 +106,9 @@ type Frame {
     str key = "";
 }
 
-// One step `write` still has to take: write `value` at `level` (`at` is -1),
-// or write entry `at` of a container of `size` entries, where `at == size`
-// closes it.
+/* One step `write` still has to take: write `value` at `level` (`at` is -1),
+ * or write entry `at` of a container of `size` entries, where `at == size`
+ * closes it. */
 type Job {
     Value value;
     int level;
@@ -120,10 +120,10 @@ type Job {
     List<str> keys = [];
 }
 
-/// The value `text` spells.
-///
-///     json.parse("{\"a\": [1, 2.5, true, null]}")
-///         -> Ok(Object({"a": Array([Int(1), Float(2.5), Bool(true), Null])}))
+/** The value `text` spells.
+ *
+ *     json.parse("{\"a\": [1, 2.5, true, null]}")
+ *         -> Ok(Object({"a": Array([Int(1), Float(2.5), Bool(true), Null])})) */
 pub Result<Value, Error> parse(str text) {
     Parser parser = Parser(text);
     skip_ws(parser);
@@ -135,31 +135,31 @@ pub Result<Value, Error> parse(str text) {
     return Result<Value, Error>.Ok(document);
 }
 
-/// `document` as JSON text: compact, or one value per line with `indent` spaces per
-/// level when `indent` is positive.
-///
-///     json.stringify(v)              -> Ok("{\"a\":1,\"b\":[true,null]}")
-///     json.stringify(v, indent: 2)   -> Ok("{\n  \"a\": 1,\n  ...")
+/** `document` as JSON text: compact, or one value per line with `indent` spaces per
+ * level when `indent` is positive.
+ *
+ *     json.stringify(v)              -> Ok("{\"a\":1,\"b\":[true,null]}")
+ *     json.stringify(v, indent: 2)   -> Ok("{\n  \"a\": 1,\n  ...") */
 pub Result<str, Error> stringify(Value document, int indent = 0) {
     List<str> out = [];
     write(out, document, indent)?;
     return Result<str, Error>.Ok(out.join(""));
 }
 
-// The deepest nesting either direction goes. Three orders of magnitude above
-// anything a real document reaches, and the same order as CPython's.
+/* The deepest nesting either direction goes. Three orders of magnitude above
+ * anything a real document reaches, and the same order as CPython's. */
 int max_depth() {
     return 10000;
 }
 
 // --- decoding ----------------------------------------------------------------
-// One complete value, with `p.at` on or before its first byte.
-//
-// Iterative, not recursive: a container being built is pushed onto `stack`,
-// so nesting costs heap and never the C stack. Recursion was tried first and
-// overflowed an 8 MiB stack at 10 000 levels in an unoptimised build -- a
-// document chooses its own depth, so the parser must not let it choose how
-// much stack it uses.
+/* One complete value, with `p.at` on or before its first byte.
+ *
+ * Iterative, not recursive: a container being built is pushed onto `stack`,
+ * so nesting costs heap and never the C stack. Recursion was tried first and
+ * overflowed an 8 MiB stack at 10 000 levels in an unoptimised build -- a
+ * document chooses its own depth, so the parser must not let it choose how
+ * much stack it uses. */
 Result<Value, Error> value(Parser parser) {
     str text = parser.text;
     int text_length = text.size();
@@ -198,8 +198,8 @@ Result<Value, Error> value(Parser parser) {
                 parser.position = parser.position + 1;
                 item = Value.Array([]);
             } else {
-                // Only a container with something in it is a level: an
-                // empty one is finished where it opens.
+                /* Only a container with something in it is a level: an
+                 * empty one is finished where it opens. */
                 if (stack.size() >= max_depth()) {
                     return fail("maximum nesting depth (" + max_depth().to_str() + ") exceeded", open);
                 }
@@ -218,8 +218,8 @@ Result<Value, Error> value(Parser parser) {
         } else if (!has_word(parser, "null")) {
             return Result<Value, Error>.Err(unexpected(parser));
         }
-        // A value is finished: hand it to the container underneath, and keep
-        // handing containers up for as long as they close here.
+        /* A value is finished: hand it to the container underneath, and keep
+         * handing containers up for as long as they close here. */
         bool is_closing = true;
         while (is_closing) {
             if (stack.size() == 0) {
@@ -266,15 +266,15 @@ Result<str, Error> string(Parser parser) {
     parser.position = parser.position + 1;
     List<str> parts = [];
     while (true) {
-        // Copy the longest run that needs no decoding in one go -- the whole
-        // string, for nearly every key and value.
+        /* Copy the longest run that needs no decoding in one go -- the whole
+         * string, for nearly every key and value. */
         int from = parser.position;
         while (parser.position < text_length) {
             int octet = text.byte_at(parser.position);
-            // Every byte that stops the run is ASCII, and UTF-8 never uses
-            // an ASCII byte inside a character, so the run ends on a
-            // character boundary and the substr below cannot cut one. The
-            // text needs no UTF-8 check: it is a `str`, so it is valid.
+            /* Every byte that stops the run is ASCII, and UTF-8 never uses
+             * an ASCII byte inside a character, so the run ends on a
+             * character boundary and the substr below cannot cut one. The
+             * text needs no UTF-8 check: it is a `str`, so it is valid. */
             if (octet == '"' || octet == '\\' || octet < ' ') {
                 break;
             }
@@ -309,9 +309,9 @@ Result<str, Error> escape(Parser parser) {
     int escape_char = text.byte_at(parser.position);
     if (escape_char == 'u') {
         int code_point = unicode_escape(parser)?;
-        // Never a surrogate and never past U+10FFFF -- `unicode_escape` has
-        // refused the one and cannot build the other -- so from_chars, which
-        // traps on both, never does here.
+        /* Never a surrogate and never past U+10FFFF -- `unicode_escape` has
+         * refused the one and cannot build the other -- so from_chars, which
+         * traps on both, never does here. */
         return Result<str, Error>.Ok(str.from_chars([code_point]));
     }
     parser.position = parser.position + 1;
@@ -343,8 +343,8 @@ Result<str, Error> escape(Parser parser) {
     return Result<str, Error>.Err(Error.Syntax);
 }
 
-// The code point of a `\uXXXX`, or of a surrogate pair of them, with `p.at`
-// on the `u`.
+/* The code point of a `\uXXXX`, or of a surrogate pair of them, with `p.at`
+ * on the `u`. */
 Result<int, Error> unicode_escape(Parser parser) {
     str text = parser.text;
     int code_point = hex4(parser)?;
@@ -369,9 +369,9 @@ Result<int, Error> unicode_escape(Parser parser) {
     return Result<int, Error>.Ok(code_point);
 }
 
-// The four hex digits after a `u`, with `p.at` on the `u`. Four CHARACTERS
-// are taken, as Oro does, so a message quotes what was written even when it
-// is not ASCII.
+/* The four hex digits after a `u`, with `p.at` on the `u`. Four CHARACTERS
+ * are taken, as Oro does, so a message quotes what was written even when it
+ * is not ASCII. */
 Result<int, Error> hex4(Parser parser) {
     str text = parser.text;
     int text_length = text.size();
@@ -395,9 +395,9 @@ Result<int, Error> hex4(Parser parser) {
     return Result<int, Error>.Ok(code_point);
 }
 
-// A number literal, with `p.at` on its first byte. The grammar is RFC 8259's
-// exactly: an optional minus, then 0 or a digit run not starting with 0, then
-// an optional fraction, then an optional exponent.
+/* A number literal, with `p.at` on its first byte. The grammar is RFC 8259's
+ * exactly: an optional minus, then 0 or a digit run not starting with 0, then
+ * an optional fraction, then an optional exponent. */
 Result<Value, Error> number(Parser parser) {
     str text = parser.text;
     int text_length = text.size();
@@ -443,8 +443,8 @@ Result<Value, Error> number(Parser parser) {
                 return Result<Value, Error>.Ok(Value.Float(float_value));
             }
             case None: {
-                // The literal is valid, so the only way it fails to parse is
-                // being too large for a double: an infinity, as in CPython.
+                /* The literal is valid, so the only way it fails to parse is
+                 * being too large for a double: an infinity, as in CPython. */
                 float zero = 0.0;
                 if (text.byte_at(start) == '-') {
                     return Result<Value, Error>.Ok(Value.Float(-1.0 / zero));
@@ -469,11 +469,11 @@ void skip_digits(Parser parser) {
     }
 }
 
-// Whether `expected` is at `p.at`, stepping over it if so.
-//
-// Compared byte by byte rather than with substr: `end` is a byte count from
-// `p.at`, and in a document like `tru😀` it falls inside a character, where
-// substr traps. A mismatch there is a syntax error, not a bug.
+/* Whether `expected` is at `p.at`, stepping over it if so.
+ *
+ * Compared byte by byte rather than with substr: `end` is a byte count from
+ * `p.at`, and in a document like `tru😀` it falls inside a character, where
+ * substr traps. A mismatch there is a syntax error, not a bug. */
 bool has_word(Parser parser, str expected) {
     int end = parser.position + expected.size();
     if (end > parser.text.size()) {
@@ -513,12 +513,12 @@ Result<Value, Error> fail(str what, int error_offset) {
 }
 
 // --- encoding ----------------------------------------------------------------
-// Append `document` to `out`.
-//
-// Iterative for the same reason `value` is: every step still to take is a
-// `Job` on an explicit stack, so a deep value costs heap and not C stack, and
-// a value that contains itself runs into the depth bound instead of off the
-// end of the stack.
+/* Append `document` to `out`.
+ *
+ * Iterative for the same reason `value` is: every step still to take is a
+ * `Job` on an explicit stack, so a deep value costs heap and not C stack, and
+ * a value that contains itself runs into the depth bound instead of off the
+ * end of the stack. */
 Result<int, Error> write(List<str> out, Value document, int indent) {
     List<Job> jobs = [Job(document, 0)];
     while (jobs.size() > 0) {
@@ -608,8 +608,8 @@ Result<int, Error> write_one(List<str> out, List<Job> jobs, Value node, int leve
     return Result<int, Error>.Ok(0);
 }
 
-// In pretty output, a line break and the indent for `level`; nothing in
-// compact output.
+/* In pretty output, a line break and the indent for `level`; nothing in
+ * compact output. */
 void newline(List<str> out, int level, int indent) {
     if (indent > 0) {
         out.push("\n");
@@ -625,9 +625,9 @@ void quote(List<str> out, str text) {
     int byte_index = 0;
     while (byte_index < text_length) {
         int octet = text.byte_at(byte_index);
-        // Non-ASCII is written through, a byte at a time: `text` is a `str`, so
-        // it is valid UTF-8 already, and the bytes that need escaping are
-        // all ASCII, so `run` and `byte_index` only ever stop on a boundary.
+        /* Non-ASCII is written through, a byte at a time: `text` is a `str`, so
+         * it is valid UTF-8 already, and the bytes that need escaping are
+         * all ASCII, so `run` and `byte_index` only ever stop on a boundary. */
         if (octet >= ' ' && octet != '"' && octet != '\\') {
             byte_index = byte_index + 1;
             continue;
@@ -660,8 +660,8 @@ void quote(List<str> out, str text) {
 }
 
 // --- bytes -------------------------------------------------------------------
-// How many bytes the character at `byte_index` takes, by its lead byte alone, never
-// running past the end. For quoting text in a message, not for validating.
+/* How many bytes the character at `byte_index` takes, by its lead byte alone, never
+ * running past the end. For quoting text in a message, not for validating. */
 int char_length(str text, int byte_index) {
     int lead_byte = text.byte_at(byte_index);
     int byte_count = 1;

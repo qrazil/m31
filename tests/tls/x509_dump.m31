@@ -1,14 +1,14 @@
-// Prints every certificate in a PEM file as `key value` lines, in the exact
-// format `x509_oracle.py dump` prints from Python's `cryptography` package:
-// `x509_test.sh` diffs the two outputs, so a field that parses differently
-// is a failing diff, not a judgement call.
-//
-//   x509_dump <file.pem> [anchors]
-//
-// With `anchors` each certificate goes through `x509.parse_trust_anchor`
-// (needed for a root bundle). A certificate that does not parse prints one
-// `PARSE_ERROR` line naming the error and the loop carries on, so one bad
-// certificate cannot hide the rest.
+/* Prints every certificate in a PEM file as `key value` lines, in the exact
+ * format `x509_oracle.py dump` prints from Python's `cryptography` package:
+ * `x509_test.sh` diffs the two outputs, so a field that parses differently
+ * is a failing diff, not a judgement call.
+ *
+ *   x509_dump <file.pem> [anchors]
+ *
+ * With `anchors` each certificate goes through `x509.parse_trust_anchor`
+ * (needed for a root bundle). A certificate that does not parse prints one
+ * `PARSE_ERROR` line naming the error and the loop carries on, so one bad
+ * certificate cannot hide the rest. */
 import io;
 import os;
 import crypto.sha256;

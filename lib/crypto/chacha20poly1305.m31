@@ -1,104 +1,104 @@
-// ChaCha20, Poly1305, and the AEAD_CHACHA20_POLY1305 construction that
-// composes them -- RFC 8439 (which obsoletes RFC 7539 without changing the
-// bits). One module, not three, because RFC 8439 itself is: the two
-// primitives exist in this codebase for exactly one reason each other needs,
-// the one-time Poly1305 key comes out of the ChaCha20 block function, and a
-// caller of an AEAD cipher never wants the pieces separately (`docs/http.m31`
-// and `json.m31` are this codebase's own precedent for one module covering a
-// standard that is naturally one thing).
-//
-// It exists for `docs/ssh-decision.md` Phase 1: `chacha20-poly1305@openssh.com`
-// is the one cipher suite that library will ever negotiate, and RFC 8439's
-// AEAD construction is exactly what that OpenSSH cipher runs per packet.
-// Standalone and not wired into anything yet -- see that decision doc.
-//
-// API
+/* ChaCha20, Poly1305, and the AEAD_CHACHA20_POLY1305 construction that
+ * composes them -- RFC 8439 (which obsoletes RFC 7539 without changing the
+ * bits). One module, not three, because RFC 8439 itself is: the two
+ * primitives exist in this codebase for exactly one reason each other needs,
+ * the one-time Poly1305 key comes out of the ChaCha20 block function, and a
+ * caller of an AEAD cipher never wants the pieces separately (`docs/http.m31`
+ * and `json.m31` are this codebase's own precedent for one module covering a
+ * standard that is naturally one thing).
+ *
+ * It exists for `docs/ssh-decision.md` Phase 1: `chacha20-poly1305@openssh.com`
+ * is the one cipher suite that library will ever negotiate, and RFC 8439's
+ * AEAD construction is exactly what that OpenSSH cipher runs per packet.
+ * Standalone and not wired into anything yet -- see that decision doc.
+ *
+ * API */
 // ---
-//   chacha20poly1305.block(key, counter, nonce)       -> bytes, 64 octets
-//   chacha20poly1305.openssh_block(key, counter, nonce) -> bytes, 64 octets
-//   chacha20poly1305.encrypt(key, counter, nonce, pt) -> bytes, len(pt)
-//   chacha20poly1305.key_gen(key, nonce)              -> bytes, 32 octets
-//   chacha20poly1305.mac(key, msg)                    -> bytes, 16 octets
-//   chacha20poly1305.seal(key, nonce, plaintext, aad) -> bytes, ciphertext || tag
-//   chacha20poly1305.open(key, nonce, sealed, aad)     -> Result<bytes, Error>
-//
+/*   chacha20poly1305.block(key, counter, nonce)       -> bytes, 64 octets
+ *   chacha20poly1305.openssh_block(key, counter, nonce) -> bytes, 64 octets
+ *   chacha20poly1305.encrypt(key, counter, nonce, pt) -> bytes, len(pt)
+ *   chacha20poly1305.key_gen(key, nonce)              -> bytes, 32 octets
+ *   chacha20poly1305.mac(key, msg)                    -> bytes, 16 octets
+ *   chacha20poly1305.seal(key, nonce, plaintext, aad) -> bytes, ciphertext || tag
+ *   chacha20poly1305.open(key, nonce, sealed, aad)     -> Result<bytes, Error>
+ * */
 // --- `openssh_block`: a second word layout, for `docs/ssh-decision.md` Phase 2 --
-//
-// `block` is RFC 8439's IETF layout: a 32-bit counter in word 12, a 96-bit
-// nonce in words 13-15. `chacha20-poly1305@openssh.com`
-// (`/usr/share/doc/openssh/PROTOCOL.chacha20poly1305`) is built on the
-// older, original Bernstein layout instead: a 64-bit counter split across
-// words 12-13, and an 8-byte nonce (there, the SSH packet sequence number)
-// in words 14-15. These are not interchangeable and one is not a special
-// case of the other -- word 13 means "high 32 bits of the counter" in one
-// and "part of the nonce" in the other, so padding the 8-byte OpenSSH nonce
-// out to 12 bytes and calling `block` would compile, run, and produce a
-// keystream that is wrong but plausible-looking. `openssh_block` exists so
-// that mistake has nowhere to happen: it is `block`'s same permutation,
-// with only the last four words' assignment changed to match.
-// `key` is always 32 octets and `nonce` always 12 -- the one modern IETF
-// variant, which is what `chacha20-poly1305@openssh.com` and every other
-// current use of this pair means by "ChaCha20". A wrong length is a bug in
-// the caller, not the world, so it **traps** (reference §6.6) rather than
-// returning a `Result` -- the same choice `Array`'s fixed length and
-// `bytes.push`'s range make. What a `Result` *is* for here: `open`'s tag
-// check, because a forged or corrupted ciphertext is exactly the world a
-// network parser has to expect, the same reasoning `base64.decode` gives for
-// its own `Error`.
-//
+/*
+ * `block` is RFC 8439's IETF layout: a 32-bit counter in word 12, a 96-bit
+ * nonce in words 13-15. `chacha20-poly1305@openssh.com`
+ * (`/usr/share/doc/openssh/PROTOCOL.chacha20poly1305`) is built on the
+ * older, original Bernstein layout instead: a 64-bit counter split across
+ * words 12-13, and an 8-byte nonce (there, the SSH packet sequence number)
+ * in words 14-15. These are not interchangeable and one is not a special
+ * case of the other -- word 13 means "high 32 bits of the counter" in one
+ * and "part of the nonce" in the other, so padding the 8-byte OpenSSH nonce
+ * out to 12 bytes and calling `block` would compile, run, and produce a
+ * keystream that is wrong but plausible-looking. `openssh_block` exists so
+ * that mistake has nowhere to happen: it is `block`'s same permutation,
+ * with only the last four words' assignment changed to match.
+ * `key` is always 32 octets and `nonce` always 12 -- the one modern IETF
+ * variant, which is what `chacha20-poly1305@openssh.com` and every other
+ * current use of this pair means by "ChaCha20". A wrong length is a bug in
+ * the caller, not the world, so it **traps** (reference §6.6) rather than
+ * returning a `Result` -- the same choice `Array`'s fixed length and
+ * `bytes.push`'s range make. What a `Result` *is* for here: `open`'s tag
+ * check, because a forged or corrupted ciphertext is exactly the world a
+ * network parser has to expect, the same reasoning `base64.decode` gives for
+ * its own `Error`.
+ * */
 // --- 32-bit arithmetic on a 64-bit int -------------------------------------
-//
-// ChaCha20 words are kept non-negative and below 2^32, exactly as
-// `apps/git/sha1.m31` and `lib/crypto/sha256.m31` keep theirs, for the same
-// reasons: `>>` is then already a logical shift, `+` on a handful of such
-// words never approaches the 64-bit trap threshold, and `& 0xFFFF_FFFF`
-// spells "modulo 2^32" at the one place each addition or rotate needs it.
-//
+/*
+ * ChaCha20 words are kept non-negative and below 2^32, exactly as
+ * `apps/git/sha1.m31` and `lib/crypto/sha256.m31` keep theirs, for the same
+ * reasons: `>>` is then already a logical shift, `+` on a handful of such
+ * words never approaches the 64-bit trap threshold, and `& 0xFFFF_FFFF`
+ * spells "modulo 2^32" at the one place each addition or rotate needs it.
+ * */
 // --- Poly1305: radix 2^26, not a bignum library ----------------------------
-//
-// RFC 8439 §3 warns against a generic big-number library for this: dynamic
-// allocation, and a variable-time codepath, in the one place where the
-//'variable' is the reader's own authentication key. This is Andrew Moon's
-// public-domain `poly1305-donna` 32-bit construction (§2.5's accumulator held
-// as five 26-bit limbs rather than one 130-bit number), the reference nearly
-// every constant-time, allocation-free Poly1305 in production is some
-// translation of, chosen for exactly the property RFC 8439 asks for: fixed,
-// input-independent work, no allocation, and -- because every intermediate
-// product is a 26-bit limb times at most a 29-bit one, summed five at a time
-// -- nothing within a factor of 60 of this language's 2^63 overflow trap
-// even at the most adversarial input (verified in the differential fuzz
-// harness, `tests/ssh/t_chacha20poly1305.m31`, which is also checked against
-// RFC 8439 Appendix A.3's eleven vectors built specifically to stress the
-// reduction: a zero `r`, a carry out of the top limb, an accumulator landing
-// on exactly 2^130-5, and the two "5*H+L" 131-bit-intermediate cases).
-//
-// Poly1305 is one-shot rather than a streaming `Hasher` like `sha256`'s: RFC
-// 8439's own key generation and the AEAD construction both need the whole
-// padded buffer built before a tag can be computed, so there is no caller
-// this codebase has that would use a streaming update.
-//
+/*
+ * RFC 8439 §3 warns against a generic big-number library for this: dynamic
+ * allocation, and a variable-time codepath, in the one place where the
+ *'variable' is the reader's own authentication key. This is Andrew Moon's
+ * public-domain `poly1305-donna` 32-bit construction (§2.5's accumulator held
+ * as five 26-bit limbs rather than one 130-bit number), the reference nearly
+ * every constant-time, allocation-free Poly1305 in production is some
+ * translation of, chosen for exactly the property RFC 8439 asks for: fixed,
+ * input-independent work, no allocation, and -- because every intermediate
+ * product is a 26-bit limb times at most a 29-bit one, summed five at a time
+ * -- nothing within a factor of 60 of this language's 2^63 overflow trap
+ * even at the most adversarial input (verified in the differential fuzz
+ * harness, `tests/ssh/t_chacha20poly1305.m31`, which is also checked against
+ * RFC 8439 Appendix A.3's eleven vectors built specifically to stress the
+ * reduction: a zero `r`, a carry out of the top limb, an accumulator landing
+ * on exactly 2^130-5, and the two "5*H+L" 131-bit-intermediate cases).
+ *
+ * Poly1305 is one-shot rather than a streaming `Hasher` like `sha256`'s: RFC
+ * 8439's own key generation and the AEAD construction both need the whole
+ * padded buffer built before a tag can be computed, so there is no caller
+ * this codebase has that would use a streaming update.
+ * */
 // --- constant time where it has to be --------------------------------------
-//
-// `open`'s tag comparison is `consttime.is_equal` (`lib/crypto/consttime.m31`), not
-// `==`: `bytes`'s `==` (reference §3.10) makes no promise about its timing, and
-// a MAC check whose time leaks *where* the first mismatched byte was is a
-// forgery oracle -- the exact class of bug RFC 8439 §3 is warning about one
-// paragraph over from the big-number one.
+/*
+ * `open`'s tag comparison is `consttime.is_equal` (`lib/crypto/consttime.m31`), not
+ * `==`: `bytes`'s `==` (reference §3.10) makes no promise about its timing, and
+ * a MAC check whose time leaks *where* the first mismatched byte was is a
+ * forgery oracle -- the exact class of bug RFC 8439 §3 is warning about one
+ * paragraph over from the big-number one. */
 
 import crypto.accel;
 import crypto.consttime;
 
-// The hardware kernels (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
-// runtime/crypto_*.S, called with spans the compiler range-checks. A kernel runs
-// only if the CPU has the instructions and `M31_CRYPTO_ACCEL` has not switched
-// it off (`accel.features()` says which bits are set: CHACHA, POLY); otherwise
-// the m31 code below does the work. Both give the same bytes -- tests/cryptodiff
-// runs the suite with and without.
-//
-// ChaCha20: `length` octets of `input` at `offset` XORed with the keystream for
-// `key` (32 octets) and `counter_and_nonce` (16 octets: state words 12 to 15,
-// the block counter first), into `output` at `offset`. Only word 12 counts up
-// across blocks.
+/* The hardware kernels (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
+ * runtime/crypto_*.S, called with spans the compiler range-checks. A kernel runs
+ * only if the CPU has the instructions and `M31_CRYPTO_ACCEL` has not switched
+ * it off (`accel.features()` says which bits are set: CHACHA, POLY); otherwise
+ * the m31 code below does the work. Both give the same bytes -- tests/cryptodiff
+ * runs the suite with and without.
+ *
+ * ChaCha20: `length` octets of `input` at `offset` XORed with the keystream for
+ * `key` (32 octets) and `counter_and_nonce` (16 octets: state words 12 to 15,
+ * the block counter first), into `output` at `offset`. Only word 12 counts up
+ * across blocks. */
 prim "c" nonblocking void __k_chacha20(
     in bytes key[0 .. 32],
     in bytes counter_and_nonce[0 .. 16],
@@ -106,70 +106,70 @@ prim "c" nonblocking void __k_chacha20(
     out bytes output[offset .. offset + length],
     int length,
     range int offset);
-// Poly1305 over `count` whole 16-octet blocks of `data` at `offset`. `state` is
-// 40 octets: the accumulator h (three little-endian 64-bit words) then the
-// clamped r (two). `high_bit` is 1 for a full block, 0 for a padded last one.
+/* Poly1305 over `count` whole 16-octet blocks of `data` at `offset`. `state` is
+ * 40 octets: the accumulator h (three little-endian 64-bit words) then the
+ * clamped r (two). `high_bit` is 1 for a full block, 0 for a padded last one. */
 prim "c" nonblocking void __k_poly1305_blocks(
     inout bytes state[0 .. 40],
     in bytes data[offset .. offset + 16 * count],
     int count,
     int high_bit in 0 | 1,
     range int offset);
-// The tag: `state` as above, `pad` the one-time key's last 16 octets, into
-// `tag` (16 octets).
+/* The tag: `state` as above, `pad` the one-time key's last 16 octets, into
+ * `tag` (16 octets). */
 prim "c" nonblocking void __k_poly1305_finish(
     in bytes state[0 .. 40],
     in bytes pad[0 .. 16],
     out bytes tag[0 .. 16]);
 
 // --- speed notes (docs/CRYPTO-PERF.md) ----------------------------------------
-//
-// The emitted C pays for three things per operation: a call to the noinline
-// `rt_stack_check` at every function entry, a bounds check on every element
-// access, and an overflow check on every `+`, `-` and `*`. So the hot paths
-// here are shaped for the C compiler rather than for the RFC's pseudocode:
-//
-//   - the ChaCha20 permutation is ONE function holding all sixteen words in
-//     locals (no per-quarter-round call, no `Array` traffic inside the rounds);
-//   - words are masked to 32 bits at the top of every double round, which is
-//     what lets the C compiler see that `x >> 16` needs no sign fill and that
-//     `a + b` cannot overflow, so the checks fold away;
-//   - the keystream is XORed straight into a pre-sized output buffer, one
-//     whole 64-octet block at a time, not pushed octet by octet through a
-//     temporary `bytes`;
-//   - Poly1305 runs over the caller's buffer in place (no padded copy of
-//     AAD || ciphertext || lengths), keeping its five limbs in locals across
-//     all blocks of a segment.
-//
-// The Poly1305 limb products use `wrapping_mul`/`wrapping_add`: the bound in
-// the Poly1305 section below shows they never reach 2^63, so the values are
-// identical and the per-operation overflow checks (about 40% of the time) go.
-//
-// None of this adds a secret-dependent branch or index: every loop bound is a
-// public length, there is no table, and the only operations on key-derived
-// words are `+`, `^`, shifts, `&`, `|` and `*`, as before.
+/*
+ * The emitted C pays for three things per operation: a call to the noinline
+ * `rt_stack_check` at every function entry, a bounds check on every element
+ * access, and an overflow check on every `+`, `-` and `*`. So the hot paths
+ * here are shaped for the C compiler rather than for the RFC's pseudocode:
+ *
+ *   - the ChaCha20 permutation is ONE function holding all sixteen words in
+ *     locals (no per-quarter-round call, no `Array` traffic inside the rounds);
+ *   - words are masked to 32 bits at the top of every double round, which is
+ *     what lets the C compiler see that `x >> 16` needs no sign fill and that
+ *     `a + b` cannot overflow, so the checks fold away;
+ *   - the keystream is XORed straight into a pre-sized output buffer, one
+ *     whole 64-octet block at a time, not pushed octet by octet through a
+ *     temporary `bytes`;
+ *   - Poly1305 runs over the caller's buffer in place (no padded copy of
+ *     AAD || ciphertext || lengths), keeping its five limbs in locals across
+ *     all blocks of a segment.
+ *
+ * The Poly1305 limb products use `wrapping_mul`/`wrapping_add`: the bound in
+ * the Poly1305 section below shows they never reach 2^63, so the values are
+ * identical and the per-operation overflow checks (about 40% of the time) go.
+ *
+ * None of this adds a secret-dependent branch or index: every loop bound is a
+ * public length, there is no table, and the only operations on key-derived
+ * words are `+`, `^`, shifts, `&`, `|` and `*`, as before. */
 
 // --- ChaCha20 ---------------------------------------------------------------
 
 // "expand 32-byte k", as four little-endian 32-bit words -- RFC 8439 §2.3.
 const Array<int> CHACHA_CONST = [0x6170_7865, 0x3320_646E, 0x7962_2D32, 0x6B20_6574];
 
-// Four octets of `data` starting at `offset`, little-endian -- the order every
-// ChaCha20 and Poly1305 word in this file is read in. Never masked with
-// `& 0xFFFF_FFFF`: each term is already narrower than where the next one
-// starts (a byte, shifted by at most 24), so the OR can never carry into a
-// bit the next term also sets.
+/* Four octets of `data` starting at `offset`, little-endian -- the order every
+ * ChaCha20 and Poly1305 word in this file is read in. Never masked with
+ * `& 0xFFFF_FFFF`: each term is already narrower than where the next one
+ * starts (a byte, shifted by at most 24), so the OR can never carry into a
+ * bit the next term also sets. */
 int word_le(bytes data, int offset) {
     return data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24);
 }
 
-// The twenty-round permutation and the final "add the original input words"
-// step, RFC 8439 §2.3, shared by both word layouts: `state` holds the sixteen
-// input words (each below 2^32); the sixteen output words go to `out`.
-// All sixteen words live in locals; each of the ten loop iterations is one
-// double round (four column quarter rounds, then four diagonal ones), written
-// out flat so there is no call and no array access between the loads and the
-// stores. RFC 8439 §2.1's quarter round, with a, b, c, d the four indices.
+/* The twenty-round permutation and the final "add the original input words"
+ * step, RFC 8439 §2.3, shared by both word layouts: `state` holds the sixteen
+ * input words (each below 2^32); the sixteen output words go to `out`.
+ * All sixteen words live in locals; each of the ten loop iterations is one
+ * double round (four column quarter rounds, then four diagonal ones), written
+ * out flat so there is no call and no array access between the loads and the
+ * stores. RFC 8439 §2.1's quarter round, with a, b, c, d the four indices. */
 void chacha20_rounds(Array<int> state, Array<int> out) {
     int x_0 = state[0];
     int x_1 = state[1];
@@ -188,10 +188,10 @@ void chacha20_rounds(Array<int> state, Array<int> out) {
     int x14 = state[14];
     int x15 = state[15];
     for (int round in 0 .. 10) {
-        // The words are below 2^32 here (the loop-carried values were masked
-        // at the end of the last iteration; the first iteration's come from
-        // 32-bit words). Saying so again costs one AND each and is what lets
-        // the C compiler drop the sign fill from every `>>` below.
+        /* The words are below 2^32 here (the loop-carried values were masked
+         * at the end of the last iteration; the first iteration's come from
+         * 32-bit words). Saying so again costs one AND each and is what lets
+         * the C compiler drop the sign fill from every `>>` below. */
         x_0 = x_0 & 0xFFFF_FFFF;
         x_1 = x_1 & 0xFFFF_FFFF;
         x_2 = x_2 & 0xFFFF_FFFF;
@@ -342,8 +342,8 @@ Array<int> chacha20_init(bytes key, bytes nonce, int nonce_length) {
     return state;
 }
 
-// The IETF layout's state for `key` and the 12-octet `nonce`; word 12 (the
-// counter) is the caller's.
+/* The IETF layout's state for `key` and the 12-octet `nonce`; word 12 (the
+ * counter) is the caller's. */
 Array<int> ietf_state(bytes key, bytes nonce) {
     Array<int> state = chacha20_init(key, nonce, 12);
     state[13] = word_le(nonce, 0);
@@ -352,8 +352,8 @@ Array<int> ietf_state(bytes key, bytes nonce) {
     return state;
 }
 
-// The original layout's state for `key` and the 8-octet `nonce`; words 12 and
-// 13 (the 64-bit counter) are the caller's.
+/* The original layout's state for `key` and the 8-octet `nonce`; words 12 and
+ * 13 (the 64-bit counter) are the caller's. */
 Array<int> openssh_state(bytes key, bytes nonce) {
     Array<int> state = chacha20_init(key, nonce, 8);
     state[14] = word_le(nonce, 0);
@@ -376,15 +376,15 @@ bytes block_bytes(Array<int> state) {
     return out;
 }
 
-// `data[0 .. count)` XORed with the keystream of `state`, starting at block
-// `counter`, into `out[0 .. count)` (`out` is at least `count` long and may be
-// `data` itself). `wide` is 1 for the original layout, whose 64-bit counter
-// spans words 12-13, and 0 for the IETF one, whose word 13 is nonce. Whole
-// blocks are XORed word by word; only the last partial block goes octet by
-// octet.
+/* `data[0 .. count)` XORed with the keystream of `state`, starting at block
+ * `counter`, into `out[0 .. count)` (`out` is at least `count` long and may be
+ * `data` itself). `wide` is 1 for the original layout, whose 64-bit counter
+ * spans words 12-13, and 0 for the IETF one, whose word 13 is nonce. Whole
+ * blocks are XORed word by word; only the last partial block goes octet by
+ * octet. */
 void chacha20_xor(Array<int> state, int counter, int wide, bytes data, int count, bytes out) {
-    // The kernel counts word 12 only, so a 64-bit counter that would carry into
-    // word 13 inside this call takes the portable path.
+    /* The kernel counts word 12 only, so a 64-bit counter that would carry into
+     * word 13 inside this call takes the portable path. */
     if (count > 0 && (accel.features() & accel.CHACHA) != 0 && (wide == 0 || (counter & 0xFFFF_FFFF) + blocks_for(count) <= 0x1_0000_0000)) {
         bytes key = [0; 32];
         bytes counter_nonce = [0; 16];
@@ -448,13 +448,13 @@ int blocks_for(int byte_count) {
     return (byte_count + 63) / 64;
 }
 
-/// The ChaCha20 block function, RFC 8439 §2.3: one 64-octet keystream block
-/// for `key` (32 octets), `counter` (0 to 2^32-1) and `nonce` (12 octets).
-/// `key` or `nonce` at any other length, or `counter` outside its range, is a
-/// bug in the caller and **traps**, per this module's header. This is the
-/// IETF word layout: `counter` alone in word 12, `nonce` across words
-/// 13-15 -- see `openssh_block` for the other, incompatible layout
-/// `chacha20-poly1305@openssh.com` needs instead.
+/** The ChaCha20 block function, RFC 8439 §2.3: one 64-octet keystream block
+ * for `key` (32 octets), `counter` (0 to 2^32-1) and `nonce` (12 octets).
+ * `key` or `nonce` at any other length, or `counter` outside its range, is a
+ * bug in the caller and **traps**, per this module's header. This is the
+ * IETF word layout: `counter` alone in word 12, `nonce` across words
+ * 13-15 -- see `openssh_block` for the other, incompatible layout
+ * `chacha20-poly1305@openssh.com` needs instead. */
 pub bytes block(bytes key, int counter, bytes nonce) {
     if (counter < 0 || counter > 0xFFFF_FFFF) {
         trap("chacha20: counter must fit in 32 bits");
@@ -464,14 +464,14 @@ pub bytes block(bytes key, int counter, bytes nonce) {
     return block_bytes(state);
 }
 
-/// The ChaCha20 block function, original (pre-IETF) layout: one 64-octet
-/// keystream block for `key` (32 octets), a 64-bit `counter` and an 8-octet
-/// `nonce`. `counter` is split little-endian across words 12 (low) and 13
-/// (high); `nonce` fills words 14-15, little-endian -- see this module's
-/// header for why this is a different, not merely differently-sized,
-/// construction than `block`'s IETF layout, and why `chacha20-poly1305@
-/// openssh.com` (`docs/ssh-decision.md` Phase 2) needs this one instead.
-/// `key` or `nonce` at any other length, or a negative `counter`, traps.
+/** The ChaCha20 block function, original (pre-IETF) layout: one 64-octet
+ * keystream block for `key` (32 octets), a 64-bit `counter` and an 8-octet
+ * `nonce`. `counter` is split little-endian across words 12 (low) and 13
+ * (high); `nonce` fills words 14-15, little-endian -- see this module's
+ * header for why this is a different, not merely differently-sized,
+ * construction than `block`'s IETF layout, and why `chacha20-poly1305@
+ * openssh.com` (`docs/ssh-decision.md` Phase 2) needs this one instead.
+ * `key` or `nonce` at any other length, or a negative `counter`, traps. */
 pub bytes openssh_block(bytes key, int counter, bytes nonce) {
     if (counter < 0) {
         trap("chacha20: counter must not be negative");
@@ -482,11 +482,11 @@ pub bytes openssh_block(bytes key, int counter, bytes nonce) {
     return block_bytes(state);
 }
 
-/// ChaCha20 encryption, RFC 8439 §2.4: `data` XORed with the keystream that
-/// `key`, `nonce` and the block counter starting at `counter` produce.
-/// Symmetric -- the same call decrypts, since XOR is its own inverse and the
-/// keystream does not depend on `data`. Traps like `block` if the counter
-/// would pass 2^32 - 1.
+/** ChaCha20 encryption, RFC 8439 §2.4: `data` XORed with the keystream that
+ * `key`, `nonce` and the block counter starting at `counter` produce.
+ * Symmetric -- the same call decrypts, since XOR is its own inverse and the
+ * keystream does not depend on `data`. Traps like `block` if the counter
+ * would pass 2^32 - 1. */
 pub bytes encrypt(bytes key, int counter, bytes nonce, bytes data) {
     if (counter < 0 || counter + blocks_for(data.size()) - 1 > 0xFFFF_FFFF) {
         trap("chacha20: counter must fit in 32 bits");
@@ -497,10 +497,10 @@ pub bytes encrypt(bytes key, int counter, bytes nonce, bytes data) {
     return out;
 }
 
-/// The same XOR in the original layout (`openssh_block`'s): `data` with the
-/// keystream for `key`, the 8-octet `nonce` and the 64-bit block counter
-/// starting at `counter`. What `chacha20-poly1305@openssh.com` encrypts a
-/// packet body (counter 1) with, without a call per 64 octets.
+/** The same XOR in the original layout (`openssh_block`'s): `data` with the
+ * keystream for `key`, the 8-octet `nonce` and the 64-bit block counter
+ * starting at `counter`. What `chacha20-poly1305@openssh.com` encrypts a
+ * packet body (counter 1) with, without a call per 64 octets. */
 pub bytes openssh_encrypt(bytes key, int counter, bytes nonce, bytes data) {
     if (counter < 0) {
         trap("chacha20: counter must not be negative");
@@ -513,23 +513,23 @@ pub bytes openssh_encrypt(bytes key, int counter, bytes nonce, bytes data) {
 
 // --- Poly1305 ----------------------------------------------------------------
 
-// The accumulator and key, as one array so a segment's blocks can run in one
-// call with everything in locals. Layout: 0-4 the accumulator `h` (five
-// 26-bit limbs), 5-9 the clamped `r` (five limbs), 10-13 `5 * r[1..4]`, 14-17
-// the pad `s` (four 32-bit words).
-//
-// Radix 2^26, not a bignum library -- andrew moon's poly1305-donna 32-bit
-// construction (§2.5's accumulator as five 26-bit limbs rather than one
-// 130-bit number): fixed, input-independent work and no allocation, which is
-// what RFC 8439 §3 asks for. Every product below is a limb below 2^28 times
-// one below 2^29, summed five at a time: under 2^60, far from the 2^63
-// overflow trap even for adversarial input (tests/ssh/t_chacha20poly1305.m31
-// checks RFC 8439 Appendix A.3's eleven vectors built to stress the reduction).
+/* The accumulator and key, as one array so a segment's blocks can run in one
+ * call with everything in locals. Layout: 0-4 the accumulator `h` (five
+ * 26-bit limbs), 5-9 the clamped `r` (five limbs), 10-13 `5 * r[1..4]`, 14-17
+ * the pad `s` (four 32-bit words).
+ *
+ * Radix 2^26, not a bignum library -- andrew moon's poly1305-donna 32-bit
+ * construction (§2.5's accumulator as five 26-bit limbs rather than one
+ * 130-bit number): fixed, input-independent work and no allocation, which is
+ * what RFC 8439 §3 asks for. Every product below is a limb below 2^28 times
+ * one below 2^29, summed five at a time: under 2^60, far from the 2^63
+ * overflow trap even for adversarial input (tests/ssh/t_chacha20poly1305.m31
+ * checks RFC 8439 Appendix A.3's eleven vectors built to stress the reduction). */
 
-// The state for the one-time key whose eight little-endian words are `k0` to
-// `k7`: `r` in the first four, clamped and split into limbs in one step (each
-// limb a shifted, masked read of the 128-bit number; the mask is also RFC 8439
-// §2.5.1's clamp for the bits it keeps), `s` in the last four.
+/* The state for the one-time key whose eight little-endian words are `k0` to
+ * `k7`: `r` in the first four, clamped and split into limbs in one step (each
+ * limb a shifted, masked read of the 128-bit number; the mask is also RFC 8439
+ * §2.5.1's clamp for the bits it keeps), `s` in the last four. */
 Array<int> poly_limbs(int k_0, int k_1, int k_2, int k_3, int k_4, int k_5, int k_6, int k_7) {
     Array<int> poly = [0; 18];
     int r_1 = (k_0 >> 26 | k_1 << 6) & 0x03FF_FF03;
@@ -552,9 +552,9 @@ Array<int> poly_limbs(int k_0, int k_1, int k_2, int k_3, int k_4, int k_5, int 
     return poly;
 }
 
-// A running Poly1305: the five-limb state above for the portable code, or the
-// kernel's 40-octet state (h as three 64-bit words, r as two) and the 16-octet
-// pad when a kernel will do the blocks. `is_hardware` says which.
+/* A running Poly1305: the five-limb state above for the portable code, or the
+ * kernel's 40-octet state (h as three 64-bit words, r as two) and the 16-octet
+ * pad when a kernel will do the blocks. `is_hardware` says which. */
 type Poly {
     Array<int> limbs;
     bytes packed;
@@ -572,8 +572,8 @@ void put64(bytes out, int position, int value) {
 // The `Poly` for the one-time key whose eight little-endian words are `k0` to `k7`.
 Poly poly_start(int k_0, int k_1, int k_2, int k_3, int k_4, int k_5, int k_6, int k_7) {
     if ((accel.features() & accel.POLY) != 0) {
-        // r clamped (RFC 8439 §2.5.1) as two 64-bit words: the same masks as the
-        // limb version, applied to the 32-bit words.
+        /* r clamped (RFC 8439 §2.5.1) as two 64-bit words: the same masks as the
+         * limb version, applied to the 32-bit words. */
         bytes packed = [0; 40];
         put64(packed, 24, (k_0 & 0x0FFF_FFFF) | ((k_1 & 0x0FFF_FFFC) << 32));
         put64(packed, 32, (k_2 & 0x0FFF_FFFC) | ((k_3 & 0x0FFF_FFFC) << 32));
@@ -585,13 +585,13 @@ Poly poly_start(int k_0, int k_1, int k_2, int k_3, int k_4, int k_5, int k_6, i
     return Poly(poly_limbs(k_0, k_1, k_2, k_3, k_4, k_5, k_6, k_7), [0; 1], [0; 1], false);
 }
 
-// `block_count` whole 16-octet blocks of `data` from `start`, folded into the
-// accumulator in `p` and reduced back into (nearly) five 26-bit limbs. `hibit`
-// is `1 << 24` for a full block (the implicit 2^128 that RFC 8439 §2.5.1's
-// pseudocode adds before every block) and `0` for the last, short block of a
-// bare `mac`, where the trailing `0x01` the caller already wrote stands for
-// it. The accumulator is left slightly above five 26-bit limbs when the final
-// carry itself overflows a limb, which `poly_finish`'s own full carry accounts for.
+/* `block_count` whole 16-octet blocks of `data` from `start`, folded into the
+ * accumulator in `p` and reduced back into (nearly) five 26-bit limbs. `hibit`
+ * is `1 << 24` for a full block (the implicit 2^128 that RFC 8439 §2.5.1's
+ * pseudocode adds before every block) and `0` for the last, short block of a
+ * bare `mac`, where the trailing `0x01` the caller already wrote stands for
+ * it. The accumulator is left slightly above five 26-bit limbs when the final
+ * carry itself overflows a limb, which `poly_finish`'s own full carry accounts for. */
 void poly_blocks_limbs(Array<int> poly, bytes data, int start, int block_count, int hibit) {
     int h_0 = poly[0];
     int h_1 = poly[1];
@@ -613,23 +613,23 @@ void poly_blocks_limbs(Array<int> poly, bytes data, int start, int block_count, 
         int word_1 = data[offset + 4] | (data[offset + 5] << 8) | (data[offset + 6] << 16) | (data[offset + 7] << 24);
         int word_2 = data[offset + 8] | (data[offset + 9] << 8) | (data[offset + 10] << 16) | (data[offset + 11] << 24);
         int word_3 = data[offset + 12] | (data[offset + 13] << 8) | (data[offset + 14] << 16) | (data[offset + 15] << 24);
-        // The block as five overlapping 26-bit windows of the 128-bit
-        // little-endian number it is.
+        /* The block as five overlapping 26-bit windows of the 128-bit
+         * little-endian number it is. */
         h_0 = h_0 + (word_0 & 0x03FF_FFFF);
         h_1 = h_1 + ((word_0 >> 26 | word_1 << 6) & 0x03FF_FFFF);
         h_2 = h_2 + ((word_1 >> 20 | word_2 << 12) & 0x03FF_FFFF);
         h_3 = h_3 + ((word_2 >> 14 | word_3 << 18) & 0x03FF_FFFF);
         h_4 = h_4 + (word_3 >> 8 | hibit);
-        // h *= r, mod 2^130 - 5, a limb at a time: d[i] collects every
-        // partial product that lands in limb i, the wraparound from limb 5 and
-        // up folded back in by using s[k] = 5 * r[k] (2^130 = 5 mod poly).
+        /* h *= r, mod 2^130 - 5, a limb at a time: d[i] collects every
+         * partial product that lands in limb i, the wraparound from limb 5 and
+         * up folded back in by using s[k] = 5 * r[k] (2^130 = 5 mod poly). */
         int d_0 = h_0.wrapping_mul(r_0).wrapping_add(h_1.wrapping_mul(s_4)).wrapping_add(h_2.wrapping_mul(s_3)).wrapping_add(h_3.wrapping_mul(s_2)).wrapping_add(h_4.wrapping_mul(s_1));
         int d_1 = h_0.wrapping_mul(r_1).wrapping_add(h_1.wrapping_mul(r_0)).wrapping_add(h_2.wrapping_mul(s_4)).wrapping_add(h_3.wrapping_mul(s_3)).wrapping_add(h_4.wrapping_mul(s_2));
         int d_2 = h_0.wrapping_mul(r_2).wrapping_add(h_1.wrapping_mul(r_1)).wrapping_add(h_2.wrapping_mul(r_0)).wrapping_add(h_3.wrapping_mul(s_4)).wrapping_add(h_4.wrapping_mul(s_3));
         int d_3 = h_0.wrapping_mul(r_3).wrapping_add(h_1.wrapping_mul(r_2)).wrapping_add(h_2.wrapping_mul(r_1)).wrapping_add(h_3.wrapping_mul(r_0)).wrapping_add(h_4.wrapping_mul(s_4));
         int d_4 = h_0.wrapping_mul(r_4).wrapping_add(h_1.wrapping_mul(r_3)).wrapping_add(h_2.wrapping_mul(r_2)).wrapping_add(h_3.wrapping_mul(r_1)).wrapping_add(h_4.wrapping_mul(r_0));
-        // Carry radix-2^26, left to right, the last carry folded back into
-        // limb 0 times 5 (again 2^130 = 5 mod poly).
+        /* Carry radix-2^26, left to right, the last carry folded back into
+         * limb 0 times 5 (again 2^130 = 5 mod poly). */
         int carry = d_0 >> 26;
         h_0 = d_0 & 0x03FF_FFFF;
         d_1 = d_1 + carry;
@@ -672,11 +672,11 @@ void poly_blocks(Poly poly, bytes data, int start, int block_count, int hibit) {
     }
 }
 
-// `data[start .. end)` folded in: whole blocks straight from `data`, a last
-// partial block copied into a zeroed 16-octet buffer. `terminated` is 1 for a
-// bare `mac` (RFC 8439 §2.5.1: a `0x01` octet after the message, no implicit
-// high bit) and 0 for the AEAD's segments (§2.8: zero padding to 16, then
-// every block, the padded one included, carries the high bit).
+/* `data[start .. end)` folded in: whole blocks straight from `data`, a last
+ * partial block copied into a zeroed 16-octet buffer. `terminated` is 1 for a
+ * bare `mac` (RFC 8439 §2.5.1: a `0x01` octet after the message, no implicit
+ * high bit) and 0 for the AEAD's segments (§2.8: zero padding to 16, then
+ * every block, the padded one included, carries the high bit). */
 void poly_feed(Poly poly, bytes data, int start, int end, int terminated) {
     int whole = (end - start) / 16;
     poly_blocks(poly, data, start, whole, 1 << 24);
@@ -695,8 +695,8 @@ void poly_feed(Poly poly, bytes data, int start, int end, int terminated) {
     }
 }
 
-// The 16-octet tag: the full carry `poly_blocks` leaves undone, the final
-// reduction mod 2^130 - 5, then (h + s) mod 2^128.
+/* The 16-octet tag: the full carry `poly_blocks` leaves undone, the final
+ * reduction mod 2^130 - 5, then (h + s) mod 2^128. */
 bytes poly_finish(Poly poly) {
     if (poly.is_hardware) {
         bytes tag = [0; 16];
@@ -724,10 +724,10 @@ bytes poly_finish(Poly poly) {
     carry = h_0 >> 26;
     h_0 = h_0 & 0x03FF_FFFF;
     h_1 = h_1 + carry;
-    // `h` is below 2*limb_words but may still be at or past limb_words (RFC 8439's own "P" =
-    // 2^130-5): compute h - limb_words alongside h, and keep whichever of the two is
-    // actually less than limb_words. `g4`'s top bit (bit 31 of its 32-bit range) is 1
-    // exactly when `h - p` borrowed, i.e. exactly when h was already below limb_words.
+    /* `h` is below 2*limb_words but may still be at or past limb_words (RFC 8439's own "P" =
+     * 2^130-5): compute h - limb_words alongside h, and keep whichever of the two is
+     * actually less than limb_words. `g4`'s top bit (bit 31 of its 32-bit range) is 1
+     * exactly when `h - p` borrowed, i.e. exactly when h was already below limb_words. */
     int g_0 = h_0 + 5;  // RFC 8439 §2.5.1: h - P
     carry = g_0 >> 26;
     g_0 = g_0 & 0x03FF_FFFF;
@@ -741,10 +741,10 @@ bytes poly_finish(Poly poly) {
     carry = g_3 >> 26;
     g_3 = g_3 & 0x03FF_FFFF;
     int g_4 = h_4 + carry - (1 << 26) & 0xFFFF_FFFF;  // RFC 8439 §2.5.1: h - P
-    // `bit - 1` is all-zero bits when `bit` is 1 and all-one bits when `bit`
-    // is 0 (two's complement -1), which turns the single bit into the two
-    // masks below -- an arithmetic recreation of the branch so both paths
-    // take the same time regardless of which one the result needs.
+    /* `bit - 1` is all-zero bits when `bit` is 1 and all-one bits when `bit`
+     * is 0 (two's complement -1), which turns the single bit into the two
+     * masks below -- an arithmetic recreation of the branch so both paths
+     * take the same time regardless of which one the result needs. */
     int mask = (g_4 >> 31 & 1) - 1 & 0xFFFF_FFFF;
     int notmask = ~mask & 0xFFFF_FFFF;
     h_0 = h_0 & notmask | g_0 & mask;
@@ -752,9 +752,9 @@ bytes poly_finish(Poly poly) {
     h_2 = h_2 & notmask | g_2 & mask;
     h_3 = h_3 & notmask | g_3 & mask;
     h_4 = h_4 & notmask | g_4 & mask;
-    // Five 26-bit limbs back to four 32-bit words, then tag = (h + s) mod
-    // 2^128: a 128-bit little-endian add, each carry taken from the previous
-    // word's overflow past 32 bits.
+    /* Five 26-bit limbs back to four 32-bit words, then tag = (h + s) mod
+     * 2^128: a 128-bit little-endian add, each carry taken from the previous
+     * word's overflow past 32 bits. */
     int tag_0 = (h_0 | h_1 << 26) & 0xFFFF_FFFF;
     int tag_1 = (h_1 >> 6 | h_2 << 20) & 0xFFFF_FFFF;
     int tag_2 = (h_2 >> 12 | h_3 << 14) & 0xFFFF_FFFF;
@@ -785,11 +785,11 @@ bytes poly_finish(Poly poly) {
     return out;
 }
 
-/// The Poly1305 tag, RFC 8439 §2.5: 16 octets, for a 32-octet one-time `key`
-/// (`r` in its first 16 octets, `s` in its last, clamped and applied exactly
-/// as §2.5.1 specifies) and an arbitrary-length `message`. An **empty**
-/// message gets no block at all -- RFC 8439 §2.5.1's loop runs `ceil(0 / 16)`
-/// times, so the tag is `s` alone.
+/** The Poly1305 tag, RFC 8439 §2.5: 16 octets, for a 32-octet one-time `key`
+ * (`r` in its first 16 octets, `s` in its last, clamped and applied exactly
+ * as §2.5.1 specifies) and an arbitrary-length `message`. An **empty**
+ * message gets no block at all -- RFC 8439 §2.5.1's loop runs `ceil(0 / 16)`
+ * times, so the tag is `s` alone. */
 pub bytes mac(bytes key, bytes message) {
     if (key.size() != 32) {
         trap("poly1305: key must be 32 bytes");
@@ -801,20 +801,20 @@ pub bytes mac(bytes key, bytes message) {
 
 // --- the AEAD construction ---------------------------------------------------
 
-/// The one-time Poly1305 key, RFC 8439 §2.6: the first 32 octets of the
-/// ChaCha20 keystream for `key` and `nonce` at counter 0.
+/** The one-time Poly1305 key, RFC 8439 §2.6: the first 32 octets of the
+ * ChaCha20 keystream for `key` and `nonce` at counter 0. */
 pub bytes key_gen(bytes key, bytes nonce) {
     return block(key, 0, nonce).substr(0, 32);
 }
 
-/// Why `open` refused to decrypt. Payload-free (docs/errors-decision.md §4):
-/// there is nothing to add to either reason that the caller does not already
-/// have from `sealed` and `aad`.
+/** Why `open` refused to decrypt. Payload-free (docs/errors-decision.md §4):
+ * there is nothing to add to either reason that the caller does not already
+ * have from `sealed` and `aad`. */
 pub enum Error {
     /// `sealed` is shorter than a tag, so there is nothing to check.
     Short;
-    /// The computed tag does not match the one `sealed` carried: `sealed`,
-    /// `aad`, `key` or `nonce` is not what it was sealed with.
+    /** The computed tag does not match the one `sealed` carried: `sealed`,
+     * `aad`, `key` or `nonce` is not what it was sealed with. */
     Tag;
 }
 
@@ -829,10 +829,10 @@ pub str Error.to_str() {
     }
 }
 
-// The Poly1305 state for the AEAD over `aad` and `ciphertext[0 .. ciphertext_length)`:
-// one-time key from block 0 of `state`, then RFC 8439 §2.8's `mac_data` fed
-// segment by segment (`aad`, padded to 16; the ciphertext, padded to 16; the
-// two lengths, 8 octets each) instead of being copied into one buffer first.
+/* The Poly1305 state for the AEAD over `aad` and `ciphertext[0 .. ciphertext_length)`:
+ * one-time key from block 0 of `state`, then RFC 8439 §2.8's `mac_data` fed
+ * segment by segment (`aad`, padded to 16; the ciphertext, padded to 16; the
+ * two lengths, 8 octets each) instead of being copied into one buffer first. */
 Poly aead_state(Array<int> state, bytes aad, bytes ciphertext, int ciphertext_length) {
     Array<int> words = [0; 16];
     state[12] = 0;
@@ -850,11 +850,11 @@ Poly aead_state(Array<int> state, bytes aad, bytes ciphertext, int ciphertext_le
     return poly;
 }
 
-/// Encrypt and authenticate: RFC 8439 §2.8, `AEAD_CHACHA20_POLY1305`'s
-/// encryption direction. `key` (32 octets) and `nonce` (12 octets) at any
-/// other length **trap**, per this module's header; `aad` may be empty and
-/// any length otherwise. The result is `plaintext`'s length plus 16 --
-/// ciphertext, then the tag.
+/** Encrypt and authenticate: RFC 8439 §2.8, `AEAD_CHACHA20_POLY1305`'s
+ * encryption direction. `key` (32 octets) and `nonce` (12 octets) at any
+ * other length **trap**, per this module's header; `aad` may be empty and
+ * any length otherwise. The result is `plaintext`'s length plus 16 --
+ * ciphertext, then the tag. */
 pub bytes seal(bytes key, bytes nonce, bytes plaintext, bytes aad) {
     int length = plaintext.size();
     if (blocks_for(length) > 0xFFFF_FFFF - 1) {
@@ -871,11 +871,11 @@ pub bytes seal(bytes key, bytes nonce, bytes plaintext, bytes aad) {
     return out;
 }
 
-/// Verify and decrypt: RFC 8439 §2.8's other direction. `Err(Error.Short)` if
-/// `sealed` is not even long enough to hold a tag; `Err(Error.Tag)` if the
-/// tag does not match -- in which case nothing about `sealed` should be
-/// trusted, `aad` included, and this returns before decrypting anything.
-/// `key` and `nonce` follow `seal`'s rule about length.
+/** Verify and decrypt: RFC 8439 §2.8's other direction. `Err(Error.Short)` if
+ * `sealed` is not even long enough to hold a tag; `Err(Error.Tag)` if the
+ * tag does not match -- in which case nothing about `sealed` should be
+ * trusted, `aad` included, and this returns before decrypting anything.
+ * `key` and `nonce` follow `seal`'s rule about length. */
 pub Result<bytes, Error> open(bytes key, bytes nonce, bytes sealed, bytes aad) {
     if (sealed.size() < 16) {
         return Result<bytes, Error>.Err(Error.Short);

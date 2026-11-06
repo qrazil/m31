@@ -1,10 +1,10 @@
-// SHA-256 against Python's `hashlib`. Every digest this prints on stdout is
-// printed again by `oracle_sha256.py`, and `test.sh` diffs the two, so there
-// is no expectation written down here that could drift from the standard --
-// the standard is the other program. Structured exactly like
-// `apps/git/t_sha1.m31`, which this is the SHA-256 twin of.
-//
-//   ./build.sh tests/ssh/t_sha256.m31 -o t_sha256 && ./t_sha256
+/* SHA-256 against Python's `hashlib`. Every digest this prints on stdout is
+ * printed again by `oracle_sha256.py`, and `test.sh` diffs the two, so there
+ * is no expectation written down here that could drift from the standard --
+ * the standard is the other program. Structured exactly like
+ * `apps/git/t_sha1.m31`, which this is the SHA-256 twin of.
+ *
+ *   ./build.sh tests/ssh/t_sha256.m31 -o t_sha256 && ./t_sha256 */
 
 import crypto.sha256;
 
@@ -16,10 +16,10 @@ print("448 " + sha256.hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopn
 print("896 " + sha256.hex("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu".to_bytes()));
 
 // --- every length from 0 to 260 ----------------------------------------------
-//
-// A deterministic pattern rather than random octets, so this case needs no
-// fixture: the Python twin generates the same bytes from the same rule.
-// 260 is four 64-octet blocks plus change, past `sha1.m31`'s own 200.
+/*
+ * A deterministic pattern rather than random octets, so this case needs no
+ * fixture: the Python twin generates the same bytes from the same rule.
+ * 260 is four 64-octet blocks plus change, past `sha1.m31`'s own 200. */
 
 bytes pattern = [];
 int length = 0;
@@ -30,10 +30,10 @@ while (length <= 260) {
 }
 
 // --- the million-a test, whole and in pieces ---------------------------------
-//
-// The pieces matter more than the whole: `update` buffers a partial block and
-// runs whole blocks straight out of the caller's buffer, so a chunk size that
-// is not a multiple of 64 exercises a path the one-shot call never reaches.
+/*
+ * The pieces matter more than the whole: `update` buffers a partial block and
+ * runs whole blocks straight out of the caller's buffer, so a chunk size that
+ * is not a multiple of 64 exercises a path the one-shot call never reaches. */
 
 bytes million = [97; 1_000_000];
 print("million " + sha256.hex(million));

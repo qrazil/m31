@@ -1,25 +1,25 @@
-// Code points: UTF-8 decoding and encoding, written in the language.
-//
-// The compiler lowers `s.chars()` and `str.from_chars(xs)` to the two
-// functions here, the way it lowers float text to lib/__floatfmt.m31. No
-// program can import this module or collide with it: its name begins with
-// `__`. It is loaded only when some file mentions `chars` or `from_chars`.
-//
-// Both are bit manipulation over bytes the language already reaches --
-// `byte_at`, `bytes.push`, `utf8()` -- so neither needs the runtime. See
-// docs/text-decision.md for why a code point is an `int`.
-//
-// Constants are decimal because the language has no hex literal yet:
-//   128 = 0x80      192 = 0xC0      224 = 0xE0      240 = 0xF0
-//   2048 = 0x800    65536 = 0x10000 1114111 = 0x10FFFF
-//   55296..57343 = 0xD800..0xDFFF, the surrogates
+/* Code points: UTF-8 decoding and encoding, written in the language.
+ *
+ * The compiler lowers `s.chars()` and `str.from_chars(xs)` to the two
+ * functions here, the way it lowers float text to lib/__floatfmt.m31. No
+ * program can import this module or collide with it: its name begins with
+ * `__`. It is loaded only when some file mentions `chars` or `from_chars`.
+ *
+ * Both are bit manipulation over bytes the language already reaches --
+ * `byte_at`, `bytes.push`, `utf8()` -- so neither needs the runtime. See
+ * docs/text-decision.md for why a code point is an `int`.
+ *
+ * Constants are decimal because the language has no hex literal yet:
+ *   128 = 0x80      192 = 0xC0      224 = 0xE0      240 = 0xF0
+ *   2048 = 0x800    65536 = 0x10000 1114111 = 0x10FFFF
+ *   55296..57343 = 0xD800..0xDFFF, the surrogates */
 
-/// The Unicode scalar values of `text`, in order.
-///
-/// `text` is valid UTF-8 -- every way to make a `str` guarantees it -- so this
-/// decodes without checking: the lead byte says how many continuation bytes
-/// follow, and they are there. A decoder that also validated would be
-/// testing an invariant the type already holds.
+/** The Unicode scalar values of `text`, in order.
+ *
+ * `text` is valid UTF-8 -- every way to make a `str` guarantees it -- so this
+ * decodes without checking: the lead byte says how many continuation bytes
+ * follow, and they are there. A decoder that also validated would be
+ * testing an invariant the type already holds. */
 List<int> chars(str text) {
     List<int> out = [];
     int byte_count = text.size();
@@ -44,13 +44,13 @@ List<int> chars(str text) {
     return out;
 }
 
-/// The text whose scalar values are `cps`, encoded as UTF-8.
-///
-/// A value that is not a Unicode scalar value -- negative, a surrogate, or
-/// past U+10FFFF -- traps, as storing 256 in a `bytes` does (reference
-/// §3.10): it has no UTF-8 form, so there is no string to return, and a
-/// code point is the program's own value, like an index. A program holding
-/// numbers from outside -- a `\u` escape in JSON -- checks them first.
+/** The text whose scalar values are `cps`, encoded as UTF-8.
+ *
+ * A value that is not a Unicode scalar value -- negative, a surrogate, or
+ * past U+10FFFF -- traps, as storing 256 in a `bytes` does (reference
+ * §3.10): it has no UTF-8 form, so there is no string to return, and a
+ * code point is the program's own value, like an index. A program holding
+ * numbers from outside -- a `\u` escape in JSON -- checks them first. */
 str from_chars(List<int> cps) {
     bytes encoded = [];
     for (int code_point in cps) {
@@ -73,10 +73,10 @@ str from_chars(List<int> cps) {
             encoded.push(128 | code_point & 63);
         }
     }
-    // Every value was checked above and encoded in its shortest form, so
-    // this cannot be None. Going through utf8() anyway keeps it the single
-    // door into `str`, rather than adding a second one that trusts its
-    // caller.
+    /* Every value was checked above and encoded in its shortest form, so
+     * this cannot be None. Going through utf8() anyway keeps it the single
+     * door into `str`, rather than adding a second one that trusts its
+     * caller. */
     match (encoded.utf8()) {
         case Some(str text): {
             return text;
@@ -87,8 +87,8 @@ str from_chars(List<int> cps) {
     }
 }
 
-// A code point the way Unicode writes one: U+ and at least four uppercase
-// hex digits, or the decimal number for a negative one, which has no U+ form.
+/* A code point the way Unicode writes one: U+ and at least four uppercase
+ * hex digits, or the decimal number for a negative one, which has no U+ form. */
 str show(int code_point) {
     if (code_point < 0) {
         return code_point.to_str();

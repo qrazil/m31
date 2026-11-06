@@ -1,76 +1,76 @@
-// ECDSA SIGNING over NIST P-256 (FIPS 186-5, SEC 1 v2) with deterministic
-// nonces (RFC 6979): what a TLS 1.3 server needs to answer its
-// CertificateVerify when its certificate holds a P-256 key.
-//
-// API
+/* ECDSA SIGNING over NIST P-256 (FIPS 186-5, SEC 1 v2) with deterministic
+ * nonces (RFC 6979): what a TLS 1.3 server needs to answer its
+ * CertificateVerify when its certificate holds a P-256 key.
+ *
+ * API */
 // ---
-//   Result<bytes, ecdsasign.Error> pub = ecdsasign.public_key(secret);
-//         // secret: the 32-octet big-endian private scalar d, 1 <= d < n.
-//         // pub: 0x04 || X || Y, 65 octets.
-//   Result<bytes, ecdsasign.Error> sig = ecdsasign.sign(secret, digest);
-//         // digest: the 32-octet SHA-256 of the message, already computed.
-//         // sig: DER SEQUENCE { INTEGER r, INTEGER s }, what TLS puts on the wire.
-//   Result<bytes, ecdsasign.Error> raw = ecdsasign.sign_raw(secret, digest);   // r || s, 64 octets
-//
-// Verification is `ecdsa.m31`'s; the two agree (`ecdsa.is_valid_der_signature` accepts
-// what `sign` returns), and this module never imports it.
-//
+/*   Result<bytes, ecdsasign.Error> pub = ecdsasign.public_key(secret);
+ *         // secret: the 32-octet big-endian private scalar d, 1 <= d < n.
+ *         // pub: 0x04 || X || Y, 65 octets.
+ *   Result<bytes, ecdsasign.Error> sig = ecdsasign.sign(secret, digest);
+ *         // digest: the 32-octet SHA-256 of the message, already computed.
+ *         // sig: DER SEQUENCE { INTEGER r, INTEGER s }, what TLS puts on the wire.
+ *   Result<bytes, ecdsasign.Error> raw = ecdsasign.sign_raw(secret, digest);   // r || s, 64 octets
+ *
+ * Verification is `ecdsa.m31`'s; the two agree (`ecdsa.is_valid_der_signature` accepts
+ * what `sign` returns), and this module never imports it.
+ * */
 // --- what is constant time here, and what is not -----------------------------
-//
-// Read this before relying on the module. The claims are about THE SOURCE;
-// nobody has measured the machine code (see the last paragraph).
-//
-//   CONSTANT-TIME-STYLE (no branch, no memory index, no loop count depends
-//   on a secret value):
-//     - the scalar multiplications `d*G` and `k*G` (`scalar_multiply`): a
-//       fixed 256 iterations of "double, add, then SELECT with a mask", over
-//       the COMPLETE projective addition law of Renes, Costello and Batina
-//       (2015, Algorithm 4, for a = -3). Complete means it has no exceptional
-//       input -- P + P, P + (-P) and P + infinity go through the same
-//       arithmetic as any pair -- so "always add, keep the sum or not by
-//       mask" is well defined and nothing branches on which case it is.
-//     - every field operation on a secret (`multiply`, `add`, `subtract`):
-//       fixed loop counts over 11 limbs, and the final "subtract the modulus
-//       if needed" is a mask-select on the borrow, never an `if`.
-//     - the modular inverse of the nonce `k` and the multiplication
-//       `k^-1 * (e + r*d)`: Fermat exponentiation, whose exponent (n - 2) is
-//       a public constant, so branching on its bits leaks nothing.
-//     - nonce generation: HMAC-SHA-256 over secret octets. This inherits
-//       `hmac.m31`/`sha256.m31`, which use only additions, rotates and
-//       bitwise operators on 32-bit words and never branch on data.
-//
-//   NOT constant time, deliberately, because the value is public by then:
-//     - the affine conversion's final steps and the DER encoding of `r` and
-//       `s`, which are sent to the peer;
-//     - the RFC 6979 rejection loop (draw again if the candidate is 0, >= n,
-//       or gives r = 0 or s = 0): it leaks that a draw was rejected, an event
-//       of probability about 2^-32, and nothing about the accepted nonce;
-//     - the setup of the two field contexts, which reads public constants
-//       through `bignum.m31` (which is NOT constant time and is never fed a
-//       secret here).
-//
-//   One language fact this file is written around: the runtime's `>>` is
-//   `a < 0 ? ~(~a >> n) : a >> n`, a branch on the sign of `a`. This file
-//   never shifts a value that can be negative: borrows are computed from a
-//   difference biased by +2^24 first, so every `>>` here has a non-negative
-//   operand and takes the same side whatever the secret is. Overflow-checked
-//   `+ - *` branch on the overflow flag, but every intermediate here is far
-//   below 2^63 (limbs under 2^24, products under 2^48, sums under 2^50), so
-//   that branch is never taken for ANY input.
-//
-//   What is NOT verified: that the C compiler, at every version and -O level,
-//   keeps the masked selects branch-free and does not turn a table of
-//   mask arithmetic back into a data-dependent branch. This is the known-hard
-//   part of constant-time C. The source is written to give it nothing to
-//   undo; the machine code was not audited, and no timing measurement across
-//   secret inputs was made. Treat the module as hardened against timing
-//   attacks in design, not as certified.
-//
+/*
+ * Read this before relying on the module. The claims are about THE SOURCE;
+ * nobody has measured the machine code (see the last paragraph).
+ *
+ *   CONSTANT-TIME-STYLE (no branch, no memory index, no loop count depends
+ *   on a secret value):
+ *     - the scalar multiplications `d*G` and `k*G` (`scalar_multiply`): a
+ *       fixed 256 iterations of "double, add, then SELECT with a mask", over
+ *       the COMPLETE projective addition law of Renes, Costello and Batina
+ *       (2015, Algorithm 4, for a = -3). Complete means it has no exceptional
+ *       input -- P + P, P + (-P) and P + infinity go through the same
+ *       arithmetic as any pair -- so "always add, keep the sum or not by
+ *       mask" is well defined and nothing branches on which case it is.
+ *     - every field operation on a secret (`multiply`, `add`, `subtract`):
+ *       fixed loop counts over 11 limbs, and the final "subtract the modulus
+ *       if needed" is a mask-select on the borrow, never an `if`.
+ *     - the modular inverse of the nonce `k` and the multiplication
+ *       `k^-1 * (e + r*d)`: Fermat exponentiation, whose exponent (n - 2) is
+ *       a public constant, so branching on its bits leaks nothing.
+ *     - nonce generation: HMAC-SHA-256 over secret octets. This inherits
+ *       `hmac.m31`/`sha256.m31`, which use only additions, rotates and
+ *       bitwise operators on 32-bit words and never branch on data.
+ *
+ *   NOT constant time, deliberately, because the value is public by then:
+ *     - the affine conversion's final steps and the DER encoding of `r` and
+ *       `s`, which are sent to the peer;
+ *     - the RFC 6979 rejection loop (draw again if the candidate is 0, >= n,
+ *       or gives r = 0 or s = 0): it leaks that a draw was rejected, an event
+ *       of probability about 2^-32, and nothing about the accepted nonce;
+ *     - the setup of the two field contexts, which reads public constants
+ *       through `bignum.m31` (which is NOT constant time and is never fed a
+ *       secret here).
+ *
+ *   One language fact this file is written around: the runtime's `>>` is
+ *   `a < 0 ? ~(~a >> n) : a >> n`, a branch on the sign of `a`. This file
+ *   never shifts a value that can be negative: borrows are computed from a
+ *   difference biased by +2^24 first, so every `>>` here has a non-negative
+ *   operand and takes the same side whatever the secret is. Overflow-checked
+ *   `+ - *` branch on the overflow flag, but every intermediate here is far
+ *   below 2^63 (limbs under 2^24, products under 2^48, sums under 2^50), so
+ *   that branch is never taken for ANY input.
+ *
+ *   What is NOT verified: that the C compiler, at every version and -O level,
+ *   keeps the masked selects branch-free and does not turn a table of
+ *   mask arithmetic back into a data-dependent branch. This is the known-hard
+ *   part of constant-time C. The source is written to give it nothing to
+ *   undo; the machine code was not audited, and no timing measurement across
+ *   secret inputs was made. Treat the module as hardened against timing
+ *   attacks in design, not as certified.
+ * */
 // --- representation -------------------------------------------------------------
-//
-// 24-bit limbs, 11 of them (264 bits for a 256-bit modulus), little-endian,
-// the same layout `bignum.m31` documents; Montgomery form with R = 2^264 for
-// the field GF(p) and, separately, for the group order n.
+/*
+ * 24-bit limbs, 11 of them (264 bits for a 256-bit modulus), little-endian,
+ * the same layout `bignum.m31` documents; Montgomery form with R = 2^264 for
+ * the field GF(p) and, separately, for the group order n. */
 
 import crypto.bignum;
 import encoding.hexcodec;
@@ -87,11 +87,11 @@ const str COEFFICIENT_B_HEX = "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63
 const str GENERATOR_X_HEX = "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296";
 const str GENERATOR_Y_HEX = "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
 
-/// Why a signing request was refused. Payload-free, and none of them says
-/// anything about the key's value.
+/** Why a signing request was refused. Payload-free, and none of them says
+ * anything about the key's value. */
 pub enum Error {
-    /// The private scalar is not 32 octets, or is 0, or is not below the
-    /// group order.
+    /** The private scalar is not 32 octets, or is 0, or is not below the
+     * group order. */
     BadSecretKey;
     /// The digest is not 32 octets.
     BadDigest;
@@ -110,8 +110,8 @@ pub str Error.to_str() {
 
 // --- limb arithmetic: one prime modulus, Montgomery form ----------------------
 
-// A modulus and what Montgomery multiplication needs of it. Built once from
-// public constants.
+/* A modulus and what Montgomery multiplication needs of it. Built once from
+ * public constants. */
 type Field {
     Array<int> modulus;
     int negative_inverse;
@@ -145,8 +145,8 @@ Array<int> Field.subtract(Array<int> left, Array<int> right) {
     return out;
 }
 
-// CIOS Montgomery multiplication, `left * right * R^-1 mod modulus`, for
-// inputs below the modulus. Every `>>` operand is a sum of non-negative terms.
+/* CIOS Montgomery multiplication, `left * right * R^-1 mod modulus`, for
+ * inputs below the modulus. Every `>>` operand is a sum of non-negative terms. */
 Array<int> Field.multiply(Array<int> left, Array<int> right) {
     Array<int> work = [0; WIDTH + 2];
     for (int row in 0 .. WIDTH) {
@@ -184,9 +184,9 @@ Array<int> Field.from_montgomery(Array<int> value) {
     return multiply(value, bignum.from_small(WIDTH, 1));
 }
 
-// `value^(modulus - 2)` by square-and-multiply over the bits of that public
-// exponent: the branch is on the exponent, never on `value`. Zero maps to
-// zero.
+/* `value^(modulus - 2)` by square-and-multiply over the bits of that public
+ * exponent: the branch is on the exponent, never on `value`. Zero maps to
+ * zero. */
 Array<int> Field.invert(Array<int> value) {
     Array<int> result = clone(one);
     int position = 255;
@@ -201,15 +201,15 @@ Array<int> Field.invert(Array<int> value) {
     return result;
 }
 
-// `left - right` over 11 limbs, and whether it borrowed out of the top (1) or
-// not (0).
+/* `left - right` over 11 limbs, and whether it borrowed out of the top (1) or
+ * not (0). */
 type Difference {
     Array<int> limbs;
     int borrow;
 }
 
-// `-value^-1 mod 2^24` for an odd limb: Newton's iteration, as `bignum.m31`
-// does. Public input only (the modulus).
+/* `-value^-1 mod 2^24` for an odd limb: Newton's iteration, as `bignum.m31`
+ * does. Public input only (the modulus). */
 int negative_inverse_of(int low_limb) {
     int inverse = low_limb;
     for (int round in 0 .. 5) {
@@ -228,9 +228,9 @@ Field make_field(str modulus_hex) {
     return Field(clone(context.value), negative_inverse_of(context.value[0]), one, radix_squared, exponent);
 }
 
-// Octets (big-endian, at most 33 of them -- always 32 here) into 11 limbs.
-// A pure rearrangement: 24 is a multiple of 8, so no octet straddles two
-// limbs, and the loop counts are fixed.
+/* Octets (big-endian, at most 33 of them -- always 32 here) into 11 limbs.
+ * A pure rearrangement: 24 is a multiple of 8, so no octet straddles two
+ * limbs, and the loop counts are fixed. */
 Array<int> limbs_of(bytes octets) {
     Array<int> limbs = [0; WIDTH];
     int count = octets.size();
@@ -256,9 +256,9 @@ bytes octets_of(Array<int> limbs) {
     return out;
 }
 
-// `left` where `condition` is 1, `right` where it is 0. `condition` must be
-// exactly 0 or 1. The mask is 0 or -1 (`0 - 0`, `0 - 1` cannot overflow), and
-// the selection is bitwise arithmetic on whole limbs.
+/* `left` where `condition` is 1, `right` where it is 0. `condition` must be
+ * exactly 0 or 1. The mask is 0 or -1 (`0 - 0`, `0 - 1` cannot overflow), and
+ * the selection is bitwise arithmetic on whole limbs. */
 Array<int> select(int condition, Array<int> left, Array<int> right) {
     int mask = 0 - condition;
     int inverse_mask = mask ^ -1;
@@ -269,10 +269,10 @@ Array<int> select(int condition, Array<int> left, Array<int> right) {
     return out;
 }
 
-// The borrow comes from a difference biased by +2^24 so it is positive and
-// the shift below never meets a negative operand: `left - right - borrow` is
-// at least -2^24, so `biased` is in [0, 2^25), and its bit 24 is 1 exactly
-// when the true difference was not negative.
+/* The borrow comes from a difference biased by +2^24 so it is positive and
+ * the shift below never meets a negative operand: `left - right - borrow` is
+ * at least -2^24, so `biased` is in [0, 2^25), and its bit 24 is 1 exactly
+ * when the true difference was not negative. */
 Difference subtract_with_borrow(Array<int> left, Array<int> right) {
     Array<int> out = [0; WIDTH];
     int borrow = 0;
@@ -290,8 +290,8 @@ int is_zero_limbs(Array<int> limbs) {
     for (int index in 0 .. WIDTH) {
         accumulated = accumulated | limbs[index];
     }
-    // accumulated is in [0, 2^24): subtracting 1 goes negative only for 0, and
-    // the biased shift reads that sign without a branch.
+    /* accumulated is in [0, 2^24): subtracting 1 goes negative only for 0, and
+     * the biased shift reads that sign without a branch. */
     return 1 - ((accumulated + LIMB_RADIX - 1) >> LIMB_BITS);
 }
 
@@ -302,9 +302,9 @@ int below(Array<int> value, Array<int> modulus) {
 
 // --- the curve: complete projective arithmetic ---------------------------------
 
-// A point in homogeneous projective coordinates (X : Y : Z), each a
-// Montgomery-form element of GF(p): affine (X/Z, Y/Z). The point at infinity is
-// (0 : 1 : 0). Private: nothing outside builds or reads one.
+/* A point in homogeneous projective coordinates (X : Y : Z), each a
+ * Montgomery-form element of GF(p): affine (X/Z, Y/Z). The point at infinity is
+ * (0 : 1 : 0). Private: nothing outside builds or reads one. */
 type Point {
     Array<int> x_coordinate;
     Array<int> y_coordinate;
@@ -319,9 +319,9 @@ type Curve {
     Point generator;
 }
 
-// Renes, Costello, Batina, "Complete addition formulas for prime order
-// elliptic curves" (2015), Algorithm 4: P + Q for a = -3, valid for every pair
-// of points on the curve, doubling and infinity included.
+/* Renes, Costello, Batina, "Complete addition formulas for prime order
+ * elliptic curves" (2015), Algorithm 4: P + Q for a = -3, valid for every pair
+ * of points on the curve, doubling and infinity included. */
 Point Curve.add_points(Point left, Point right) {
     Array<int> x_product = field.multiply(left.x_coordinate, right.x_coordinate);
     Array<int> y_product = field.multiply(left.y_coordinate, right.y_coordinate);
@@ -368,8 +368,8 @@ Point Curve.scalar_multiply(bytes scalar, Point base) {
     return running;
 }
 
-// The affine x and y of a point that is not infinity, as plain values. Z is
-// inverted by Fermat (fixed public exponent).
+/* The affine x and y of a point that is not infinity, as plain values. Z is
+ * inverted by Fermat (fixed public exponent). */
 Array<Array<int>> Curve.affine(Point point) {
     Array<int> z_inverse = field.invert(point.z_coordinate);
     Array<int> x_plain = field.from_montgomery(field.multiply(point.x_coordinate, z_inverse));
@@ -396,8 +396,8 @@ Point select_point(int condition, Point left, Point right) {
     return Point(select(condition, left.x_coordinate, right.x_coordinate), select(condition, left.y_coordinate, right.y_coordinate), select(condition, left.z_coordinate, right.z_coordinate));
 }
 
-// Bit `position` (0 = least significant) of a 32-octet big-endian scalar.
-// Octets are never negative, so the shift is on a non-negative operand.
+/* Bit `position` (0 = least significant) of a 32-octet big-endian scalar.
+ * Octets are never negative, so the shift is on a non-negative operand. */
 int scalar_bit(bytes scalar, int position) {
     return scalar[SIZE - 1 - position / 8] >> (position % 8) & 1;
 }
@@ -413,8 +413,8 @@ int valid_scalar(Curve curve, bytes octets) {
     return below(limbs, curve.order.modulus) & (1 - is_zero_limbs(limbs));
 }
 
-/// The uncompressed public point `0x04 || X || Y` for the private scalar
-/// `secret`.
+/** The uncompressed public point `0x04 || X || Y` for the private scalar
+ * `secret`. */
 pub Result<bytes, Error> public_key(bytes secret) {
     Curve curve = build_curve();
     if (valid_scalar(curve, secret) == 0) {
@@ -442,8 +442,8 @@ bytes concat3(bytes first, bytes second, bytes third) {
     return out;
 }
 
-// One `r, s` pair for the nonce `nonce`, or none if r or s came out zero.
-// `signature_scalars` returns [r, s] as 32-octet strings, or an empty list.
+/* One `r, s` pair for the nonce `nonce`, or none if r or s came out zero.
+ * `signature_scalars` returns [r, s] as 32-octet strings, or an empty list. */
 List<bytes> signature_scalars(Curve curve, bytes secret, Array<int> digest_scalar, bytes nonce) {
     Point point = curve.scalar_multiply(nonce, curve.generator);
     Array<Array<int>> affine = curve.affine(point);
@@ -464,9 +464,9 @@ List<bytes> signature_scalars(Curve curve, bytes secret, Array<int> digest_scala
     return out;
 }
 
-// RFC 6979 §3.2 with SHA-256 and a 256-bit order (qlen = hlen = 256), so
-// `bits2octets(h1)` is `h1 mod n` and each nonce candidate is one HMAC block.
-// Returns `r || s`.
+/* RFC 6979 §3.2 with SHA-256 and a 256-bit order (qlen = hlen = 256), so
+ * `bits2octets(h1)` is `h1 mod n` and each nonce candidate is one HMAC block.
+ * Returns `r || s`. */
 bytes sign_with_drbg(Curve curve, bytes secret, bytes digest) {
     Array<int> digest_scalar = reduced_digest(curve, digest);
     bytes digest_octets = octets_of(digest_scalar);
@@ -492,8 +492,8 @@ bytes sign_with_drbg(Curve curve, bytes secret, bytes digest) {
     }
 }
 
-/// The signature of `digest` under `secret`, as 64 octets `r || s`. The nonce
-/// is RFC 6979's, so the same inputs always give the same signature.
+/** The signature of `digest` under `secret`, as 64 octets `r || s`. The nonce
+ * is RFC 6979's, so the same inputs always give the same signature. */
 pub Result<bytes, Error> sign_raw(bytes secret, bytes digest) {
     Curve curve = build_curve();
     if (valid_scalar(curve, secret) == 0) {
@@ -505,8 +505,8 @@ pub Result<bytes, Error> sign_raw(bytes secret, bytes digest) {
     return Result<bytes, Error>.Ok(sign_with_drbg(curve, secret, digest));
 }
 
-// A non-negative INTEGER in DER, from 32 big-endian octets (public: it is
-// part of the signature).
+/* A non-negative INTEGER in DER, from 32 big-endian octets (public: it is
+ * part of the signature). */
 bytes der_integer(bytes magnitude) {
     int start = 0;
     while (start < magnitude.size() - 1 && magnitude[start] == 0) {

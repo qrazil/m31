@@ -1,15 +1,15 @@
-// The TLS client under stapled OCSP responses, driven from `test_ocsp.sh`.
-//
-//   t_ocsp_client <port> <ca.pem> <offsets> <plain|required> <connections> [host]
-//
-// Connects `connections` times to 127.0.0.1:<port> in turn, sharing one
-// session cache, trusting the roots in <ca.pem>; `required` is
-// `tls.require_stapled` over that trust. <offsets> is a comma-separated list
-// of seconds to add to the real clock, one per connection (the last one
-// repeats): the client's idea of `now` for that connection.
-// For each prints
-//   conn <n> ok resumed=<bool> stapled=<bool> status=<first line of the reply>
-//   conn <n> error=<Error.to_str()> alert=<alert the server sent, or -1>
+/* The TLS client under stapled OCSP responses, driven from `test_ocsp.sh`.
+ *
+ *   t_ocsp_client <port> <ca.pem> <offsets> <plain|required> <connections> [host]
+ *
+ * Connects `connections` times to 127.0.0.1:<port> in turn, sharing one
+ * session cache, trusting the roots in <ca.pem>; `required` is
+ * `tls.require_stapled` over that trust. <offsets> is a comma-separated list
+ * of seconds to add to the real clock, one per connection (the last one
+ * repeats): the client's idea of `now` for that connection.
+ * For each prints
+ *   conn <n> ok resumed=<bool> stapled=<bool> status=<first line of the reply>
+ *   conn <n> error=<Error.to_str()> alert=<alert the server sent, or -1> */
 
 import date;
 import io;

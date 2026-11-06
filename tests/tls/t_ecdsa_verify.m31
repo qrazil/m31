@@ -1,15 +1,15 @@
-// ECDSA verification (`lib/crypto/ecdsa.m31`) against the cases `ecdsa_oracle.py`
-// generates with the `cryptography` package. Reads the vector file named on
-// the command line and prints one `name verdict` line per case; `test_ecdsa.sh`
-// diffs that against the oracle's own expected list, so no expectation is
-// written down in this program.
-//
-//   python3 tests/tls/ecdsa_oracle.py vectors.txt expected.txt
-//   ./build.sh tests/tls/t_ecdsa_verify.m31 -o t_ecdsa_verify && ./t_ecdsa_verify vectors.txt
-//
-// Timing goes to stderr: the average of the whole check over the accepted
-// signatures of each curve (a rejection can stop early, so it is left out),
-// DER and raw alike, plus the one-off curve setup.
+/* ECDSA verification (`lib/crypto/ecdsa.m31`) against the cases `ecdsa_oracle.py`
+ * generates with the `cryptography` package. Reads the vector file named on
+ * the command line and prints one `name verdict` line per case; `test_ecdsa.sh`
+ * diffs that against the oracle's own expected list, so no expectation is
+ * written down in this program.
+ *
+ *   python3 tests/tls/ecdsa_oracle.py vectors.txt expected.txt
+ *   ./build.sh tests/tls/t_ecdsa_verify.m31 -o t_ecdsa_verify && ./t_ecdsa_verify vectors.txt
+ *
+ * Timing goes to stderr: the average of the whole check over the accepted
+ * signatures of each curve (a rejection can stop early, so it is left out),
+ * DER and raw alike, plus the one-off curve setup. */
 
 import crypto.ecdsa;
 import encoding.hexcodec;

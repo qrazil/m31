@@ -1,8 +1,8 @@
-// Epoch close outside a test build, for runtime/tests/heapwatch_test.sh:
-// twenty requests, one in four of which leaves a pair of nodes holding each
-// other. Each such close is reported to the suspect log and the ledger's
-// table of epochs, and with trace on for Node and List, who holds them --
-// the cycle -- goes to the trace file. The program carries on and exits.
+/* Epoch close outside a test build, for runtime/tests/heapwatch_test.sh:
+ * twenty requests, one in four of which leaves a pair of nodes holding each
+ * other. Each such close is reported to the suspect log and the ledger's
+ * table of epochs, and with trace on for Node and List, who holds them --
+ * the cycle -- goes to the trace file. The program carries on and exits. */
 import heapwatch;
 
 type Node {

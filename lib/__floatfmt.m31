@@ -1,23 +1,23 @@
-// A float as text and text as a float, written entirely in this language.
-//
-// This is what `print` of a float, `f.to_str()`, `str(f)` and
-// `s.parse_float()` call. The compiler loads it into any program that could
-// reach one of those, and no program can name it: the module's name begins
-// with `__`, which no source may write. See docs/stdlib-seam.md §6.
-//
-// Nothing here may format or parse a float itself -- it would be calling
-// itself -- and the compiler refuses to lower one inside this module.
-//
-// Formatting is Schubfach (Raffaello Giulietti, 2020): the shortest decimal
-// that reads back as the same float, from three 128-bit products and no
-// loop. Parsing is Eisel-Lemire (Daniel Lemire, 2021): one or two 128-bit
-// products settle every input of up to 19 significant digits, and a longer
-// input that they cannot settle is decided exactly, by comparing it against
-// the halfway point between two floats with big integers.
-//
-// There is no unsigned type, so the 64-bit unsigned arithmetic both need is
-// spelt on `int` with the bit operators and the wrapping methods: equal bits,
-// with the logical shift and the unsigned comparison written out below.
+/* A float as text and text as a float, written entirely in this language.
+ *
+ * This is what `print` of a float, `f.to_str()`, `str(f)` and
+ * `s.parse_float()` call. The compiler loads it into any program that could
+ * reach one of those, and no program can name it: the module's name begins
+ * with `__`, which no source may write. See docs/stdlib-seam.md §6.
+ *
+ * Nothing here may format or parse a float itself -- it would be calling
+ * itself -- and the compiler refuses to lower one inside this module.
+ *
+ * Formatting is Schubfach (Raffaello Giulietti, 2020): the shortest decimal
+ * that reads back as the same float, from three 128-bit products and no
+ * loop. Parsing is Eisel-Lemire (Daniel Lemire, 2021): one or two 128-bit
+ * products settle every input of up to 19 significant digits, and a longer
+ * input that they cannot settle is decided exactly, by comparing it against
+ * the halfway point between two floats with big integers.
+ *
+ * There is no unsigned type, so the 64-bit unsigned arithmetic both need is
+ * spelt on `int` with the bit operators and the wrapping methods: equal bits,
+ * with the logical shift and the unsigned comparison written out below. */
 
 /// A decimal `digits * 10^exp`, with no trailing zeros in `digits`.
 type Decimal {
@@ -25,15 +25,15 @@ type Decimal {
     int exp;
 }
 
-/// The text of a float -- the one place a float becomes text, so `print` and
-/// `to_str` cannot disagree.
-///
-/// The format is the one the C runtime printed before this existed, byte for
-/// byte, and the corpus depends on every byte of it. It is C's `%.{p}g` with
-/// the smallest precision `p` that reads back as the same float, except that
-/// a whole number below 10^17 is written out in full rather than as `%g`'s
-/// `2.5e+03`: `3`, `2500`, `0.1`, `1e+17`, `1.5e-05`, `5e-324`, `-0`, `inf`,
-/// `nan`.
+/** The text of a float -- the one place a float becomes text, so `print` and
+ * `to_str` cannot disagree.
+ *
+ * The format is the one the C runtime printed before this existed, byte for
+ * byte, and the corpus depends on every byte of it. It is C's `%.{p}g` with
+ * the smallest precision `p` that reads back as the same float, except that
+ * a whole number below 10^17 is written out in full rather than as `%g`'s
+ * `2.5e+03`: `3`, `2500`, `0.1`, `1e+17`, `1.5e-05`, `5e-324`, `-0`, `inf`,
+ * `nan`. */
 pub str format(float x) {
     int bits = x.to_bits();
     str sign = "";
@@ -55,11 +55,11 @@ pub str format(float x) {
     int digit_length = digit_count(decimal.digits);
     // The power of ten of the leading digit: 2 for 250, -3 for 0.00125.
     int point = decimal.exp + digit_length - 1;
-    // `%g` switches to an exponent once the exponent reaches the precision,
-    // so the shortest 2500 is 2.5e+03. For a whole number a reader would
-    // write out in full, the digits are the number itself -- every float from
-    // 2^53 up is whole, and below that a shortest form ending before the
-    // point names a whole number exactly -- so `int` states it exactly.
+    /* `%g` switches to an exponent once the exponent reaches the precision,
+     * so the shortest 2500 is 2.5e+03. For a whole number a reader would
+     * write out in full, the digits are the number itself -- every float from
+     * 2^53 up is whole, and below that a shortest form ending before the
+     * point names a whole number exactly -- so `int` states it exactly. */
     if (point >= digit_length && float.from_bits(bits) < 100000000000000000.0) {
         return int(x).to_str();
     }
@@ -91,15 +91,15 @@ pub str format(float x) {
     return sign + "0." + "0".repeat(-point - 1) + digit_text;
 }
 
-/// The float a decimal names, correctly rounded, or None if `text` is not one.
-///
-/// Accepted: an optional sign, then digits with an optional `.` and fraction
-/// (at least one digit in all), then an optional exponent `e` or `E` with an
-/// optional sign and at least one digit -- or exactly `inf` or `nan` after
-/// the sign, the words `format` writes for the floats with no digits. No
-/// surrounding space, no hex, no `infinity`, the same as `parse_int`. A value
-/// too large for a float is None; one too small rounds to a subnormal or a
-/// zero, which is its correctly rounded value.
+/** The float a decimal names, correctly rounded, or None if `text` is not one.
+ *
+ * Accepted: an optional sign, then digits with an optional `.` and fraction
+ * (at least one digit in all), then an optional exponent `e` or `E` with an
+ * optional sign and at least one digit -- or exactly `inf` or `nan` after
+ * the sign, the words `format` writes for the floats with no digits. No
+ * surrounding space, no hex, no `infinity`, the same as `parse_int`. A value
+ * too large for a float is None; one too small rounds to a subnormal or a
+ * zero, which is its correctly rounded value. */
 pub Option<float> parse(str text) {
     int text_length = text.size();
     int index = 0;
@@ -150,9 +150,9 @@ pub Option<float> parse(str text) {
         }
         int written = 0;
         while (index < text_length && is_digit(text.byte_at(index))) {
-            // An exponent this large already means infinity or zero for any
-            // input that fits in memory, so it stops growing rather than
-            // overflowing.
+            /* An exponent this large already means infinity or zero for any
+             * input that fits in memory, so it stops growing rather than
+             * overflowing. */
             if (exp < 1000000000000000) {
                 exp = exp * 10 + text.byte_at(index) - 48;
             }
@@ -169,10 +169,10 @@ pub Option<float> parse(str text) {
     if (index != text_length) {
         return Option<float>.None;
     }
-    // The significant digits run from the first nonzero digit to the last.
-    // Leading zeros change nothing, and each trailing zero dropped moves the
-    // exponent up by one, so `digits * 10^e10` is the exact value with
-    // `digits` free of zeros at either end.
+    /* The significant digits run from the first nonzero digit to the last.
+     * Leading zeros change nothing, and each trailing zero dropped moves the
+     * exponent up by one, so `digits * 10^e10` is the exact value with
+     * `digits` free of zeros at either end. */
     int first = start;
     while (first < end && (text.byte_at(first) == '0' || text.byte_at(first) == '.')) {
         first = first + 1;
@@ -203,8 +203,8 @@ bool is_digit(int octet) {
     return octet >= '0' && octet <= '9';
 }
 
-// The bits of +infinity. Every positive float's bits are below it, and every
-// NaN's are above.
+/* The bits of +infinity. Every positive float's bits are below it, and every
+ * NaN's are above. */
 int inf_bits() {
     return 0x7FF0_0000_0000_0000;
 }
@@ -237,26 +237,26 @@ int pow10_int(int exponent) {
 }
 
 // ---------------------------------------------------------------------------
-// 64-bit unsigned arithmetic on `int`.
-// `x >> n` with zeros shifted in rather than copies of the sign bit, for n in
-// 1..63.
+/* 64-bit unsigned arithmetic on `int`.
+ * `x >> n` with zeros shifted in rather than copies of the sign bit, for n in
+ * 1..63. */
 int lsr(int x, int shift) {
     return x >> shift & ~(-1 << 64 - shift);
 }
 
-// `a < b` with both read as unsigned. Flipping the sign bit maps the
-// unsigned order onto the signed one.
+/* `a < b` with both read as unsigned. Flipping the sign bit maps the
+ * unsigned order onto the signed one. */
 bool is_unsigned_less(int left, int right) {
     return left ^ 1 << 63 < right ^ 1 << 63;
 }
 
-// The high 64 bits of the 128-bit product of `left` and `right`, both unsigned.
-// The low 64 bits are `a.wrapping_mul(b)`.
-//
-// Schoolbook multiplication on 32-bit halves. Each partial product fits in 64
-// unsigned bits, so `wrapping_mul` gives it exactly; the middle column sums
-// three values below 2^32 and cannot overflow; and the high word is below
-// 2^64 as a whole, so its wrapping additions never actually wrap.
+/* The high 64 bits of the 128-bit product of `left` and `right`, both unsigned.
+ * The low 64 bits are `a.wrapping_mul(b)`.
+ *
+ * Schoolbook multiplication on 32-bit halves. Each partial product fits in 64
+ * unsigned bits, so `wrapping_mul` gives it exactly; the middle column sums
+ * three values below 2^32 and cannot overflow; and the high word is below
+ * 2^64 as a whole, so its wrapping additions never actually wrap. */
 int umulhi(int left, int right) {
     int left_low = left & mask32();
     int left_high = lsr(left, 32);
@@ -270,10 +270,10 @@ int umulhi(int left, int right) {
     return p11.wrapping_add(lsr(p01, 32)).wrapping_add(lsr(p10, 32)).wrapping_add(lsr(mid, 32));
 }
 
-// The top 64 bits of the 192-bit product g * cp, where g = ghi * 2^64 + glo,
-// rounded to odd: the lowest bit is set if anything below it was not zero.
-// That one sticky bit is what lets Schubfach compare the scaled value with
-// the interval ends exactly, never mistaking a near miss for equality.
+/* The top 64 bits of the 192-bit product g * cp, where g = ghi * 2^64 + glo,
+ * rounded to odd: the lowest bit is set if anything below it was not zero.
+ * That one sticky bit is what lets Schubfach compare the scaled value with
+ * the interval ends exactly, never mistaking a near miss for equality. */
 int round_to_odd(int ghi, int glo, int multiplier) {
     int x_hi = umulhi(glo, multiplier);
     int y_lo = ghi.wrapping_mul(multiplier);
@@ -289,9 +289,9 @@ int round_to_odd(int ghi, int glo, int multiplier) {
     return sum_high;
 }
 
-// floor(log2(10^e)), floor(log10(2^e)) and floor(log10(3/4 * 2^e)), by fixed
-// point multiplication. Exact over the whole range any float needs, which was
-// checked against exact rational arithmetic for every e used.
+/* floor(log2(10^e)), floor(log10(2^e)) and floor(log10(3/4 * 2^e)), by fixed
+ * point multiplication. Exact over the whole range any float needs, which was
+ * checked against exact rational arithmetic for every e used. */
 int floor_log2_pow10(int exponent) {
     return exponent * 1741647 >> 19;
 }
@@ -305,9 +305,9 @@ int floor_log10_three_quarters_pow2(int exponent) {
 }
 
 // ---------------------------------------------------------------------------
-// Formatting: Schubfach.
-// The Decimal for the positive finite float with these bits, in the digits
-// `format` prints.
+/* Formatting: Schubfach.
+ * The Decimal for the positive finite float with these bits, in the digits
+ * `format` prints. */
 Decimal shortest(int bits) {
     int ieee_exp = bits >> 52;
     int frac = bits & hidden_bit() - 1;
@@ -316,14 +316,14 @@ Decimal shortest(int bits) {
     if (ieee_exp != 0) {
         significand = frac | hidden_bit();
         binary_exponent = ieee_exp - 1075;
-        // A whole number below 2^53 is its own shortest form: the floats
-        // either side are at least 1/2 away, so nothing shorter reads back.
+        /* A whole number below 2^53 is its own shortest form: the floats
+         * either side are at least 1/2 away, so nothing shorter reads back. */
         if (binary_exponent <= 0 && binary_exponent > -53 && significand & (1 << -binary_exponent) - 1 == 0) {
             return strip(significand >> -binary_exponent, 0);
         }
     }
-    // At a power of two the float below is half as far away as the float
-    // above, so the rounding interval is lopsided.
+    /* At a power of two the float below is half as far away as the float
+     * above, so the rounding interval is lopsided. */
     bool is_lopsided = frac == 0 && ieee_exp > 1;
     int scale = floor_log10_pow2(binary_exponent);
     if (is_lopsided) {
@@ -336,16 +336,16 @@ Decimal shortest(int bits) {
     return decimal;
 }
 
-// The shortest decimal in the rounding interval of c * 2^q, and of those the
-// closest, as digits at the scale 10^k.
-//
-// Everything is scaled by 10^-k so the interval spans a few units, and by 4
-// so its ends are whole: the float is `center`, the ends `cbl` and `cbr`. The
-// scaled values come from one table entry, g = 10^-k to 128 bits rounded up,
-// and are rounded to odd, which keeps every comparison below exact. Then:
-// if exactly one multiple of ten is inside the interval, it is the answer
-// with a digit fewer; otherwise the answer is whichever of s and s + 1 is
-// inside, or the closer of the two when both are.
+/* The shortest decimal in the rounding interval of c * 2^q, and of those the
+ * closest, as digits at the scale 10^k.
+ *
+ * Everything is scaled by 10^-k so the interval spans a few units, and by 4
+ * so its ends are whole: the float is `center`, the ends `cbl` and `cbr`. The
+ * scaled values come from one table entry, g = 10^-k to 128 bits rounded up,
+ * and are rounded to odd, which keeps every comparison below exact. Then:
+ * if exactly one multiple of ten is inside the interval, it is the answer
+ * with a digit fewer; otherwise the answer is whichever of s and s + 1 is
+ * inside, or the closer of the two when both are. */
 int schubfach(int significand, int binary_exponent, bool is_lopsided, int scale) {
     int shift = binary_exponent + floor_log2_pow10(-scale) + 1;
     int ghi = pow10_hi(-scale);
@@ -359,8 +359,8 @@ int schubfach(int significand, int binary_exponent, bool is_lopsided, int scale)
     int vbl = round_to_odd(ghi, glo, cbl << shift);
     int center_scaled = round_to_odd(ghi, glo, center << shift);
     int vbr = round_to_odd(ghi, glo, cbr << shift);
-    // An end of the interval belongs to it when the float's significand is
-    // even, because that is where round-half-to-even sends a tie.
+    /* An end of the interval belongs to it when the float's significand is
+     * even, because that is where round-half-to-even sends a tie. */
     int lower = vbl;
     int upper = vbr;
     if ((significand & 1) == 1) {
@@ -404,21 +404,21 @@ Decimal strip(int digits, int exp) {
     return Decimal(trimmed_digits, trimmed_exponent);
 }
 
-// The digits C's `%.{p}g` gives at the smallest precision that reads back,
-// for a power of two -- the one place that is not the shortest form.
-//
-// `%.{p}g` rounds to p digits and stops at the first p that reads back.
-// Where the rounding interval is symmetric, the closest p-digit decimal is
-// inside it whenever any p-digit decimal is, so that is exactly Schubfach's
-// answer. At a power of two it is lopsided, and the closest decimal of the
-// shortest length can fall just outside the narrow side while a farther one
-// fits in the wide side: 2^1194 is 5.986310706507379e+51 shortest, but C
-// prints 5.9863107065073784e+51. There are 46 such floats, and the corpus
-// has always printed C's answer.
-//
-// So the float is scaled to 18 digits, carrying the same sticky bit as
-// Schubfach, and rounded to p digits for each p from the shortest length up
-// until the rounded value is inside the interval.
+/* The digits C's `%.{p}g` gives at the smallest precision that reads back,
+ * for a power of two -- the one place that is not the shortest form.
+ *
+ * `%.{p}g` rounds to p digits and stops at the first p that reads back.
+ * Where the rounding interval is symmetric, the closest p-digit decimal is
+ * inside it whenever any p-digit decimal is, so that is exactly Schubfach's
+ * answer. At a power of two it is lopsided, and the closest decimal of the
+ * shortest length can fall just outside the narrow side while a farther one
+ * fits in the wide side: 2^1194 is 5.986310706507379e+51 shortest, but C
+ * prints 5.9863107065073784e+51. There are 46 such floats, and the corpus
+ * has always printed C's answer.
+ *
+ * So the float is scaled to 18 digits, carrying the same sticky bit as
+ * Schubfach, and rounded to p digits for each p from the shortest length up
+ * until the rounded value is inside the interval. */
 Decimal printf_digits(int binary_exponent, Decimal decimal) {
     int digit_length = digit_count(decimal.digits);
     int scale = decimal.exp + digit_length - 1 - 17;
@@ -428,9 +428,9 @@ Decimal printf_digits(int binary_exponent, Decimal decimal) {
     int ghi = pow10_hi(-scale);
     int glo = pow10_lo(-scale).wrapping_add(1);
     int center_scaled = round_to_odd(ghi, glo, center << shift);
-    // The shortest form can round up to a power of ten -- 1e23 for a float
-    // just below it -- which puts the float one digit short of 18. One step
-    // further down fixes it.
+    /* The shortest form can round up to a power of ten -- 1e23 for a float
+     * just below it -- which puts the float one digit short of 18. One step
+     * further down fixes it. */
     if (center_scaled < 400000000000000000) {
         scale = scale - 1;
         shift = binary_exponent + floor_log2_pow10(-scale) + 1;
@@ -446,15 +446,15 @@ Decimal printf_digits(int binary_exponent, Decimal decimal) {
         int unit = 4 * pow10_int(dropped);
         int rounded = center_scaled / unit;
         int rem = center_scaled - rounded * unit;
-        // `rem` equal to half is a true tie only when vb is even, i.e.
-        // exact; an odd vb carries the sticky bit and is never equal to an
-        // even value. Ties go to even, as C's printf rounds them.
+        /* `rem` equal to half is a true tie only when vb is even, i.e.
+         * exact; an odd vb carries the sticky bit and is never equal to an
+         * even value. Ties go to even, as C's printf rounds them. */
         if (rem > unit / 2 || rem == unit / 2 && (rounded & 1) == 1) {
             rounded = rounded + 1;
         }
-        // The significand is even, so both ends of the interval belong to
-        // it, and a multiple of 4 is compared exactly against an odd vl or
-        // vr for the same reason as above.
+        /* The significand is even, so both ends of the interval belong to
+         * it, and a multiple of 4 is compared exactly against an odd vl or
+         * vr for the same reason as above. */
         if (lower_scaled <= rounded * unit && rounded * unit <= upper_scaled) {
             return strip(rounded, scale + dropped);
         }
@@ -465,10 +465,10 @@ Decimal printf_digits(int binary_exponent, Decimal decimal) {
 }
 
 // ---------------------------------------------------------------------------
-// Parsing: Eisel-Lemire, then an exact comparison when that cannot decide.
-// The bits of the positive float nearest `digits * 10^e10`, where `digits`
-// is the `significant_digits` significant digits of `text` from `first` to `last` (skipping a
-// `.`), with no zero at either end.
+/* Parsing: Eisel-Lemire, then an exact comparison when that cannot decide.
+ * The bits of the positive float nearest `digits * 10^e10`, where `digits`
+ * is the `significant_digits` significant digits of `text` from `first` to `last` (skipping a
+ * `.`), with no zero at either end. */
 int decimal_bits(str text, int first, int last, int significant_digits, int e10) {
     // The first 19 digits always fit in 64 unsigned bits.
     int decimal_mantissa = 0;
@@ -489,8 +489,8 @@ int decimal_bits(str text, int first, int last, int significant_digits, int e10)
         }
         return exact_bits(text, first, last, significant_digits, e10, -got - 1);
     }
-    // Truncated to 19 digits, the value lies between w and w + 1 at this
-    // scale. When both round to the same float, so does everything between.
+    /* Truncated to 19 digits, the value lies between w and w + 1 at this
+     * scale. When both round to the same float, so does everything between. */
     int truncated_exponent = e10 + significant_digits - 19;
     int below = eisel_lemire(decimal_mantissa, truncated_exponent);
     int above = eisel_lemire(decimal_mantissa.wrapping_add(1), truncated_exponent);
@@ -503,13 +503,13 @@ int decimal_bits(str text, int first, int last, int significant_digits, int e10)
     return exact_bits(text, first, last, significant_digits, e10, below);
 }
 
-// The float nearest w * 10^q for an unsigned w, from a 128-bit product with a
-// table entry for 10^q. Either the bits, or -(bits) - 1 when the truncated
-// product cannot say which of two floats is nearer and `bits` is only a
-// guess; Mushtak and Lemire proved that never happens for a whole w below
-// 2^64, and it is checked anyway because checking costs nothing.
-//
-// This is fast_float's `compute_float`, line for line.
+/* The float nearest w * 10^q for an unsigned w, from a 128-bit product with a
+ * table entry for 10^q. Either the bits, or -(bits) - 1 when the truncated
+ * product cannot say which of two floats is nearer and `bits` is only a
+ * guess; Mushtak and Lemire proved that never happens for a whole w below
+ * 2^64, and it is checked anyway because checking costs nothing.
+ *
+ * This is fast_float's `compute_float`, line for line. */
 int eisel_lemire(int decimal_mantissa, int decimal_exponent) {
     if (decimal_mantissa == 0 || decimal_exponent < -342) {
         return 0;
@@ -519,8 +519,8 @@ int eisel_lemire(int decimal_mantissa, int decimal_exponent) {
     }
     int leading_zero_count = leading_zeros(decimal_mantissa);
     int normalized = decimal_mantissa << leading_zero_count;
-    // fast_float's table rounds 10^q up for -27 <= q < 0, where the
-    // reciprocal is exact to 128 bits, and down everywhere else.
+    /* fast_float's table rounds 10^q up for -27 <= q < 0, where the
+     * reciprocal is exact to 128 bits, and down everywhere else. */
     int thi = pow10_hi(decimal_exponent);
     int tlo = pow10_lo(decimal_exponent);
     if (decimal_exponent < 0 && decimal_exponent >= -27) {
@@ -529,9 +529,9 @@ int eisel_lemire(int decimal_mantissa, int decimal_exponent) {
     int product_high = umulhi(normalized, thi);
     int product_low = normalized.wrapping_mul(thi);
     bool is_unsure = false;
-    // Only when the bits below the 55 that matter are all ones could the
-    // rest of the product carry into them, and only then is the second
-    // half of the table entry needed.
+    /* Only when the bits below the 55 that matter are all ones could the
+     * rest of the product carry into them, and only then is the second
+     * half of the table entry needed. */
     if ((product_high & 511) == 511) {
         int lo2 = umulhi(normalized, tlo);
         product_low = product_low.wrapping_add(lo2);
@@ -559,9 +559,9 @@ int eisel_lemire(int decimal_mantissa, int decimal_exponent) {
             bits = hidden_bit() | mant & hidden_bit() - 1;
         }
     } else {
-        // An exact tie can only come from a small power of ten, and then the
-        // low product is zero and the dropped bits are exactly one half:
-        // round it to even instead of up.
+        /* An exact tie can only come from a small power of ten, and then the
+         * low product is zero and the dropped bits are exactly one half:
+         * round it to even instead of up. */
         if (is_unsigned_less(product_low, 2) && decimal_exponent >= -4 && decimal_exponent <= 23 && (mant & 3) == 1) {
             if (mant << upper + 9 == product_high) {
                 mant = mant & ~1;
@@ -617,14 +617,14 @@ int leading_zeros(int x) {
     return zero_count;
 }
 
-// The correctly rounded bits, starting from a guess at most a float or two
-// away: move while the value is past the halfway point on either side.
-//
-// Only the first 800 significant digits are kept, with a final 1 standing
-// in for the rest when there are more. That changes no comparison: a
-// halfway point between two floats has at most 767 significant digits, so
-// none lies strictly between the kept digits and the full value, and the 1
-// keeps the full value's side when the kept digits equal one exactly.
+/* The correctly rounded bits, starting from a guess at most a float or two
+ * away: move while the value is past the halfway point on either side.
+ *
+ * Only the first 800 significant digits are kept, with a final 1 standing
+ * in for the rest when there are more. That changes no comparison: a
+ * halfway point between two floats has at most 767 significant digits, so
+ * none lies strictly between the kept digits and the full value, and the 1
+ * keeps the full value's side when the kept digits equal one exactly. */
 int exact_bits(str text, int first, int last, int significant_digits, int e10, int guess) {
     List<int> big = [];
     int chunk = 0;
@@ -675,12 +675,12 @@ int exact_bits(str text, int first, int last, int significant_digits, int e10, i
     return candidate_bits;
 }
 
-// The sign of big * 10^e10 minus the point halfway between the float with
-// bits `bits` and the next one up.
-//
-// The halfway point is (2m + 1) * 2^(e2 - 1) for the float m * 2^e2, so both
-// sides are whole numbers times powers of 2 and 5: move the power of 5 to
-// whichever side makes it a multiplication, then line up the powers of 2.
+/* The sign of big * 10^e10 minus the point halfway between the float with
+ * bits `bits` and the next one up.
+ *
+ * The halfway point is (2m + 1) * 2^(e2 - 1) for the float m * 2^e2, so both
+ * sides are whole numbers times powers of 2 and 5: move the power of 5 to
+ * whichever side makes it a multiplication, then line up the powers of 2. */
 int compare_half(List<int> big, int e10, int bits) {
     int ieee_exp = bits >> 52;
     int significand = bits & hidden_bit() - 1;
@@ -707,9 +707,9 @@ int compare_half(List<int> big, int e10, int bits) {
     return compare_big(lhs, rhs);
 }
 
-// Big integers: a List of 32-bit limbs, least significant first.
-// a = a * m + add, for m and add below 2^31: a limb times m plus the carry
-// stays below 2^63.
+/* Big integers: a List of 32-bit limbs, least significant first.
+ * a = a * m + add, for m and add below 2^31: a limb times m plus the carry
+ * stays below 2^63. */
 void mul_add(List<int> limbs, int multiplier, int add) {
     int carry = add;
     for (int i in 0 .. limbs.size()) {
@@ -793,44 +793,44 @@ int compare_big(List<int> left, List<int> right) {
 }
 
 // ---------------------------------------------------------------------------
-// Powers of ten to 128 bits.
-//
-// POW10_HI[e + 342] * 2^64 + POW10_LO[e + 342], both read as unsigned, is
-// floor(10^e * 2^s) with s chosen to put it in [2^127, 2^128), for e from
-// -342 to 341 -- the union of what Schubfach needs to format any float and
-// what Eisel-Lemire needs to parse any decimal. Schubfach wants 10^e rounded
-// up, so it adds one; so does Eisel-Lemire for -27 <= e < 0, which makes the
-// table exactly fast_float's. No low word is all ones, so the +1 never
-// carries.
-//
-// Two constant arrays of 64-bit words. A word with its top bit set is written
-// as the negative int with the same bits, because there is no unsigned type
-// and a literal has no sign of its own; every high word has its top bit set,
-// since the value is at least 2^127, and 10^0's high word is exactly 2^63,
-// which only `-9223372036854775807 - 1` can spell. A constant is static data
-// in the emitted C, so a lookup is one bounds-checked load.
-//
-// (Before module constants existed this table was text: 32 hex digits an
-// entry, eight entries to a string literal, found by a binary search over the
-// literals and decoded a digit at a time on every lookup.)
-//
-// Generated, not written, by this Python, which also checks the no-carry
-// claim:
-//
-//     def F(e):
-//         if e >= 0:
-//             v = 10 ** e
-//             n = v.bit_length()
-//             return v >> (n - 128) if n > 128 else v << (128 - n)
-//         d = 10 ** -e
-//         s = 127 + d.bit_length()
-//         while (1 << s) // d >= 1 << 128: s -= 1
-//         while (1 << s) // d < 1 << 127: s += 1
-//         return (1 << s) // d
-//
-//     assert all(F(e) & (2**64 - 1) != 2**64 - 1 for e in range(-342, 342))
-//
-// with each word written as its two's-complement int, four to a line.
+/* Powers of ten to 128 bits.
+ *
+ * POW10_HI[e + 342] * 2^64 + POW10_LO[e + 342], both read as unsigned, is
+ * floor(10^e * 2^s) with s chosen to put it in [2^127, 2^128), for e from
+ * -342 to 341 -- the union of what Schubfach needs to format any float and
+ * what Eisel-Lemire needs to parse any decimal. Schubfach wants 10^e rounded
+ * up, so it adds one; so does Eisel-Lemire for -27 <= e < 0, which makes the
+ * table exactly fast_float's. No low word is all ones, so the +1 never
+ * carries.
+ *
+ * Two constant arrays of 64-bit words. A word with its top bit set is written
+ * as the negative int with the same bits, because there is no unsigned type
+ * and a literal has no sign of its own; every high word has its top bit set,
+ * since the value is at least 2^127, and 10^0's high word is exactly 2^63,
+ * which only `-9223372036854775807 - 1` can spell. A constant is static data
+ * in the emitted C, so a lookup is one bounds-checked load.
+ *
+ * (Before module constants existed this table was text: 32 hex digits an
+ * entry, eight entries to a string literal, found by a binary search over the
+ * literals and decoded a digit at a time on every lookup.)
+ *
+ * Generated, not written, by this Python, which also checks the no-carry
+ * claim:
+ *
+ *     def F(e):
+ *         if e >= 0:
+ *             v = 10 ** e
+ *             n = v.bit_length()
+ *             return v >> (n - 128) if n > 128 else v << (128 - n)
+ *         d = 10 ** -e
+ *         s = 127 + d.bit_length()
+ *         while (1 << s) // d >= 1 << 128: s -= 1
+ *         while (1 << s) // d < 1 << 127: s += 1
+ *         return (1 << s) // d
+ *
+ *     assert all(F(e) & (2**64 - 1) != 2**64 - 1 for e in range(-342, 342))
+ *
+ * with each word written as its two's-complement int, four to a line. */
 int pow10_hi(int exponent) {
     return POW10_HI[exponent + 342];
 }

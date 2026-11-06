@@ -1,51 +1,51 @@
-// A private signing key for a TLS server, read from PEM or DER: the half of a
-// certificate that proves its owner is the one holding it.
-//
-// API
+/* A private signing key for a TLS server, read from PEM or DER: the half of a
+ * certificate that proves its owner is the one holding it.
+ *
+ * API */
 // ---
-//   Result<SigningKey, Error> key = signingkey.parse_pem(text);
-//   Result<SigningKey, Error> key = signingkey.parse_der(octets);
-//   key.kind()               -> Kind.Ed25519 | Kind.EcdsaP256
-//   key.signature_scheme()   -> 0x0807 (ed25519) | 0x0403 (ecdsa_secp256r1_sha256)
-//   key.public_key           -> 32 octets (Ed25519) | 65 octets 04||X||Y (P-256)
-//   Result<bytes, Error> signature = key.sign(message);
-//         // Ed25519: the 64-octet signature of the message itself (the scheme
-//         // hashes inside). P-256: SHA-256 of the message, signed, as DER.
-//
-// Accepted encodings (PEM, one key block; other blocks such as certificates or
-// `EC PARAMETERS` are skipped):
+/*   Result<SigningKey, Error> key = signingkey.parse_pem(text);
+ *   Result<SigningKey, Error> key = signingkey.parse_der(octets);
+ *   key.kind()               -> Kind.Ed25519 | Kind.EcdsaP256
+ *   key.signature_scheme()   -> 0x0807 (ed25519) | 0x0403 (ecdsa_secp256r1_sha256)
+ *   key.public_key           -> 32 octets (Ed25519) | 65 octets 04||X||Y (P-256)
+ *   Result<bytes, Error> signature = key.sign(message);
+ *         // Ed25519: the 64-octet signature of the message itself (the scheme
+ *         // hashes inside). P-256: SHA-256 of the message, signed, as DER.
+ *
+ * Accepted encodings (PEM, one key block; other blocks such as certificates or
+ * `EC PARAMETERS` are skipped): */
 //   -----BEGIN PRIVATE KEY-----       PKCS#8 holding Ed25519 or P-256
 //   -----BEGIN EC PRIVATE KEY-----    SEC1 ECPrivateKey for P-256 (the named
-//                                     curve must be present in the block)
-// Accepted encodings (DER, the one key, as the body of those PEM blocks):
-//   PKCS#8 PrivateKeyInfo             Ed25519 or P-256
-//   SEC1 ECPrivateKey                 P-256, with the curve present
-// `parse_der` tells the encodings apart by their shape, since DER has no
-// label: SEQUENCE { INTEGER 1, OCTET STRING, ... } is SEC1, SEQUENCE
-// { INTEGER, SEQUENCE, OCTET STRING, ... } is PKCS#8, SEQUENCE { SEQUENCE,
-// OCTET STRING } is an EncryptedPrivateKeyInfo (`Encrypted`) and SEQUENCE
-// { INTEGER 0, INTEGER, ... nine or more integers } is an RSAPrivateKey
-// (`Unsupported`); anything else is `BadKey`. A passphrase-protected SEC1 key
-// has no DER marker of its own (the PEM header says it) and reads as `BadKey`.
-//
-// Refused, each with its own error: `ENCRYPTED PRIVATE KEY` and SEC1/PEM
-// blocks with a `Proc-Type: 4,ENCRYPTED` header (`Encrypted` -- decrypt the
-// file first, this module takes no passphrase), `RSA PRIVATE KEY` and RSA in
-// PKCS#8 (`Unsupported` -- there is no RSA signing in this library), and any
-// other curve.
-//
+/*                                     curve must be present in the block)
+ * Accepted encodings (DER, the one key, as the body of those PEM blocks):
+ *   PKCS#8 PrivateKeyInfo             Ed25519 or P-256
+ *   SEC1 ECPrivateKey                 P-256, with the curve present
+ * `parse_der` tells the encodings apart by their shape, since DER has no
+ * label: SEQUENCE { INTEGER 1, OCTET STRING, ... } is SEC1, SEQUENCE
+ * { INTEGER, SEQUENCE, OCTET STRING, ... } is PKCS#8, SEQUENCE { SEQUENCE,
+ * OCTET STRING } is an EncryptedPrivateKeyInfo (`Encrypted`) and SEQUENCE
+ * { INTEGER 0, INTEGER, ... nine or more integers } is an RSAPrivateKey
+ * (`Unsupported`); anything else is `BadKey`. A passphrase-protected SEC1 key
+ * has no DER marker of its own (the PEM header says it) and reads as `BadKey`.
+ *
+ * Refused, each with its own error: `ENCRYPTED PRIVATE KEY` and SEC1/PEM
+ * blocks with a `Proc-Type: 4,ENCRYPTED` header (`Encrypted` -- decrypt the
+ * file first, this module takes no passphrase), `RSA PRIVATE KEY` and RSA in
+ * PKCS#8 (`Unsupported` -- there is no RSA signing in this library), and any
+ * other curve.
+ * */
 // --- what is protected, and what is not --------------------------------------
-//
-// * Errors never carry or echo key material: `Error` is a payload-free enum
-//   and no message names a byte of the input.
-// * The secret is a private field. `SigningKey.to_str()` prints only the kind.
-//   The only way to use the secret is `sign`.
-// * The secret is NOT wiped from memory when the key goes away: the runtime
-//   gives no way to zero a freed buffer, so a core dump or swapped page of
-//   this process may hold it. Run key-holding servers with core dumps off.
-// * Timing: see the header of `ecdsasign.m31` (P-256) and `ed25519.m31`
-//   (Ed25519). PEM and DER parsing here run once at start-up on the key file
-//   and are not constant time; they handle the secret only to copy it.
+/*
+ * * Errors never carry or echo key material: `Error` is a payload-free enum
+ *   and no message names a byte of the input.
+ * * The secret is a private field. `SigningKey.to_str()` prints only the kind.
+ *   The only way to use the secret is `sign`.
+ * * The secret is NOT wiped from memory when the key goes away: the runtime
+ *   gives no way to zero a freed buffer, so a core dump or swapped page of
+ *   this process may hold it. Run key-holding servers with core dumps off.
+ * * Timing: see the header of `ecdsasign.m31` (P-256) and `ed25519.m31`
+ *   (Ed25519). PEM and DER parsing here run once at start-up on the key file
+ *   and are not constant time; they handle the secret only to copy it. */
 
 import encoding.base64;
 import encoding.der;
@@ -79,8 +79,8 @@ pub enum Error {
     BadKey;
     /// The key is passphrase-protected.
     Encrypted;
-    /// A well-formed key of a kind this library does not sign with (RSA,
-    /// another curve).
+    /** A well-formed key of a kind this library does not sign with (RSA,
+     * another curve). */
     Unsupported;
     /// The signing primitive refused the request.
     SigningFailed;
@@ -148,8 +148,8 @@ pub Result<bytes, Error> SigningKey.sign(bytes message) {
 
 // --- PEM ---------------------------------------------------------------------
 
-// What `find_block` hands back: the label and the decoded body of the first
-// private-key block, or the reason there is none.
+/* What `find_block` hands back: the label and the decoded body of the first
+ * private-key block, or the reason there is none. */
 type Block {
     str label;
     bytes body;
@@ -270,8 +270,8 @@ Result<SigningKey, Error> p256_key(bytes raw_secret, bytes declared_public) {
     }
 }
 
-// An RFC 5915 ECPrivateKey. `known_curve` is the curve the PKCS#8 wrapper
-// declared, or "" for a bare SEC1 block, which must then carry its own.
+/* An RFC 5915 ECPrivateKey. `known_curve` is the curve the PKCS#8 wrapper
+ * declared, or "" for a bare SEC1 block, which must then carry its own. */
 Result<SigningKey, Error> read_sec1(bytes data, str known_curve) {
     match (sequence_of(data)) {
         case None: {
@@ -389,8 +389,8 @@ Result<SigningKey, Error> read_pkcs8(bytes data) {
     }
 }
 
-/// The one private key in `data`, DER: PKCS#8 or SEC1, told apart by shape
-/// (see the header). Errors are those of `parse_pem`, and carry no key bytes.
+/** The one private key in `data`, DER: PKCS#8 or SEC1, told apart by shape
+ * (see the header). Errors are those of `parse_pem`, and carry no key bytes. */
 pub Result<SigningKey, Error> parse_der(bytes data) {
     match (sequence_of(data)) {
         case None: {

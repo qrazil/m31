@@ -1,64 +1,64 @@
-// ECDSA signature VERIFICATION over NIST P-256 and P-384 (FIPS 186-5,
-// SEC 1 v2): the check a TLS 1.3 client makes on a server's CertificateVerify
-// and on every X.509 signature in the chain it is shown.
-//
-// API
+/* ECDSA signature VERIFICATION over NIST P-256 and P-384 (FIPS 186-5,
+ * SEC 1 v2): the check a TLS 1.3 client makes on a server's CertificateVerify
+ * and on every X.509 signature in the chain it is shown.
+ *
+ * API */
 // ---
-//   Curve curve = ecdsa.p256();                            // or ecdsa.p384(); build once, reuse
-//   match (ecdsa.parse_public_key(curve, point_bytes)) {   // 0x04 || X || Y
-//       case None: { /* malformed, off the curve, or not a valid point */ }
-//       case Some(ecdsa.PublicKey key): {
-//           bool good = ecdsa.is_valid_der_signature(curve, key, digest, signature);   // SEQUENCE { r, s }
-//           bool also = ecdsa.is_valid_raw_signature(curve, key, digest, signature);   // r || s
-//       }
-//   }
-//
-// `digest` is the message hash as bytes, already computed: this module hashes
-// nothing, so P-256 callers pass a SHA-256 digest and P-384 callers a SHA-384
-// one (a digest longer than the curve's size is truncated to its leftmost
-// bytes and a shorter one is zero-extended, as FIPS 186-5 says).
-//
-// Every verify function answers only yes or no. A signature that does not
-// verify, one with `r` or `s` outside `[1, n-1]`, one whose DER is not
-// strictly valid and one of the wrong length are all the same `false`: a
-// caller has no use for a reason, and a reason is what a probing peer wants.
-//
+/*   Curve curve = ecdsa.p256();                            // or ecdsa.p384(); build once, reuse
+ *   match (ecdsa.parse_public_key(curve, point_bytes)) {   // 0x04 || X || Y
+ *       case None: { }  // malformed, off the curve, or not a valid point
+ *       case Some(ecdsa.PublicKey key): {
+ *           bool good = ecdsa.is_valid_der_signature(curve, key, digest, signature);   // SEQUENCE { r, s }
+ *           bool also = ecdsa.is_valid_raw_signature(curve, key, digest, signature);   // r || s
+ *       }
+ *   }
+ *
+ * `digest` is the message hash as bytes, already computed: this module hashes
+ * nothing, so P-256 callers pass a SHA-256 digest and P-384 callers a SHA-384
+ * one (a digest longer than the curve's size is truncated to its leftmost
+ * bytes and a shorter one is zero-extended, as FIPS 186-5 says).
+ *
+ * Every verify function answers only yes or no. A signature that does not
+ * verify, one with `r` or `s` outside `[1, n-1]`, one whose DER is not
+ * strictly valid and one of the wrong length are all the same `false`: a
+ * caller has no use for a reason, and a reason is what a probing peer wants.
+ * */
 // --- public data only; not constant time ---------------------------------------
-//
-// Verification handles a public key, a digest and a signature, all public, so
-// nothing here is written to run in constant time -- the point arithmetic
-// branches on the exceptional cases (adding a point to itself, to its
-// negation, to infinity) and `bignum.m31` branches on the values it holds.
-// DO NOT use these functions to sign or to derive a long-lived key: both would
-// put a secret scalar through code that leaks it by timing. See `bignum.m31`.
-// The one exception is the ECDH section below (`ephemeral_public`,
-// `shared_secret`), which handles a secret scalar and is for the ephemeral
-// key of a single TLS 1.2 handshake only: the ladder leaks the scalar's bit
-// length by timing, which for a key generated afresh, used once and thrown
-// away is not worth an attack.
-//
+/*
+ * Verification handles a public key, a digest and a signature, all public, so
+ * nothing here is written to run in constant time -- the point arithmetic
+ * branches on the exceptional cases (adding a point to itself, to its
+ * negation, to infinity) and `bignum.m31` branches on the values it holds.
+ * DO NOT use these functions to sign or to derive a long-lived key: both would
+ * put a secret scalar through code that leaks it by timing. See `bignum.m31`.
+ * The one exception is the ECDH section below (`ephemeral_public`,
+ * `shared_secret`), which handles a secret scalar and is for the ephemeral
+ * key of a single TLS 1.2 handshake only: the ladder leaks the scalar's bit
+ * length by timing, which for a key generated afresh, used once and thrown
+ * away is not worth an attack.
+ * */
 // --- what is validated ------------------------------------------------------------
-//
-//   - the public point: exactly `0x04 || X || Y` of the curve's size, X and Y
-//     below the field prime, and `Y^2 = X^3 - 3X + b`. The uncompressed form
-//     cannot encode infinity, and both curves have cofactor 1, so a point on
-//     the curve is in the group of order n and no separate subgroup check is
-//     needed. Compressed forms and `0x00` (infinity) are refused.
-//   - the signature: `r` and `s` both in `[1, n-1]`. DER is parsed strictly
-//     (no BER): definite short-form lengths only, minimal INTEGERs (no
-//     superfluous leading `0x00`, no negative values), nothing after the
-//     SEQUENCE. Raw is exactly `2 * size` bytes.
-//
+/*
+ *   - the public point: exactly `0x04 || X || Y` of the curve's size, X and Y
+ *     below the field prime, and `Y^2 = X^3 - 3X + b`. The uncompressed form
+ *     cannot encode infinity, and both curves have cofactor 1, so a point on
+ *     the curve is in the group of order n and no separate subgroup check is
+ *     needed. Compressed forms and `0x00` (infinity) are refused.
+ *   - the signature: `r` and `s` both in `[1, n-1]`. DER is parsed strictly
+ *     (no BER): definite short-form lengths only, minimal INTEGERs (no
+ *     superfluous leading `0x00`, no negative values), nothing after the
+ *     SEQUENCE. Raw is exactly `2 * size` bytes.
+ * */
 // --- the algorithm ---------------------------------------------------------------
-//
-// With `e` the digest as a number below n: `w = s^-1 mod n`, `u1 = e*w`,
-// `u2 = r*w`, `R = u1*G + u2*Q`, and the signature is good iff `R` is not
-// infinity and `R.x mod n = r`. The two scalar multiplications are one
-// interleaved double-and-add (Shamir's trick) over the table
-// `[infinity, G, Q, G+Q]`, in Jacobian coordinates (`dbl-2001-b` for a = -3,
-// `add-2007-bl`). `R.x` is compared WITHOUT inverting `Z`: `x = X/Z^2`, so the
-// test is `X == r * Z^2` -- and also `X == (r + n) * Z^2` when `r + n < p`,
-// the (about 2^-128) case where the x coordinate wrapped past n.
+/*
+ * With `e` the digest as a number below n: `w = s^-1 mod n`, `u1 = e*w`,
+ * `u2 = r*w`, `R = u1*G + u2*Q`, and the signature is good iff `R` is not
+ * infinity and `R.x mod n = r`. The two scalar multiplications are one
+ * interleaved double-and-add (Shamir's trick) over the table
+ * `[infinity, G, Q, G+Q]`, in Jacobian coordinates (`dbl-2001-b` for a = -3,
+ * `add-2007-bl`). `R.x` is compared WITHOUT inverting `Z`: `x = X/Z^2`, so the
+ * test is `X == r * Z^2` -- and also `X == (r + n) * Z^2` when `r + n < p`,
+ * the (about 2^-128) case where the x coordinate wrapped past n. */
 
 import crypto.bignum;
 import encoding.hexcodec;
@@ -74,16 +74,16 @@ const str P384_B = "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013
 const str P384_GX = "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7";
 const str P384_GY = "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f";
 
-// A point in Jacobian coordinates, every coordinate a Montgomery-form field
-// element: affine `(X/Z^2, Y/Z^3)`. `Z = 0` is the point at infinity.
+/* A point in Jacobian coordinates, every coordinate a Montgomery-form field
+ * element: affine `(X/Z^2, Y/Z^3)`. `Z = 0` is the point at infinity. */
 type Point {
     Array<int> x_coordinate;
     Array<int> y_coordinate;
     Array<int> z_coordinate;
 }
 
-/// A curve's parameters and the two Montgomery contexts (field and group
-/// order) its arithmetic runs in. Build one with `p256()` or `p384()`.
+/** A curve's parameters and the two Montgomery contexts (field and group
+ * order) its arithmetic runs in. Build one with `p256()` or `p384()`. */
 pub type Curve {
     pub int size;
     bignum.Modulus field;
@@ -93,8 +93,8 @@ pub type Curve {
     Array<int> prime_gap;
 }
 
-/// A validated public point, kept in Montgomery form. `parse_public_key` is
-/// the only way to get one, so holding one means the point is on the curve.
+/** A validated public point, kept in Montgomery form. `parse_public_key` is
+ * the only way to get one, so holding one means the point is on the curve. */
 pub type PublicKey {
     Array<int> x_coordinate;
     Array<int> y_coordinate;
@@ -172,8 +172,8 @@ Point double_point(bignum.Modulus field, Point point) {
     return Point(x_out, y_out, z_out);
 }
 
-// `left + right` (`add-2007-bl`), with the exceptional cases -- either side
-// infinity, equal points, opposite points -- handled by explicit branches.
+/* `left + right` (`add-2007-bl`), with the exceptional cases -- either side
+ * infinity, equal points, opposite points -- handled by explicit branches. */
 Point add_points(bignum.Modulus field, Point left, Point right) {
     if (bignum.is_zero(left.z_coordinate)) {
         return right;
@@ -237,9 +237,9 @@ Point combine(Curve curve, PublicKey key, Array<int> first_scalar, Array<int> se
 
 // --- public key -------------------------------------------------------------------
 
-/// The public key `encoded` holds, or `None`. `encoded` must be exactly
-/// `0x04 || X || Y` with each coordinate `curve.size` big-endian bytes, both
-/// below the field prime, and the point must satisfy the curve equation.
+/** The public key `encoded` holds, or `None`. `encoded` must be exactly
+ * `0x04 || X || Y` with each coordinate `curve.size` big-endian bytes, both
+ * below the field prime, and the point must satisfy the curve equation. */
 pub Option<PublicKey> parse_public_key(Curve curve, bytes encoded) {
     int size = curve.size;
     if (encoded.size() != 1 + 2 * size || encoded[0] != 4) {
@@ -275,11 +275,11 @@ Option<Array<int>> scalar_in_range(Curve curve, bytes raw) {
     return Option<Array<int>>.Some(value);
 }
 
-// The content of one DER INTEGER (`data[start .. start+length]`), checked as
-// strict DER requires of a non-negative value, then as a scalar: the high bit
-// of the first byte is clear, and a leading 0x00 appears only when the next
-// byte's high bit is set. A value wider than the curve is rejected before
-// `from_bytes` could be asked to hold it.
+/* The content of one DER INTEGER (`data[start .. start+length]`), checked as
+ * strict DER requires of a non-negative value, then as a scalar: the high bit
+ * of the first byte is clear, and a leading 0x00 appears only when the next
+ * byte's high bit is set. A value wider than the curve is rejected before
+ * `from_bytes` could be asked to hold it. */
 Option<Array<int>> der_scalar(Curve curve, bytes data, int start, int length) {
     int first = data[start];
     if (first >= 0x80) {
@@ -298,10 +298,10 @@ Option<Array<int>> der_scalar(Curve curve, bytes data, int start, int length) {
     return scalar_in_range(curve, data.substr(start + skip, start + length));
 }
 
-// `SEQUENCE { INTEGER r, INTEGER s }`, strict DER and nothing else. Lengths
-// are the definite short form only: the largest valid body is
-// `2 * (2 + 49)` bytes, under 128, so a long-form length is never needed and
-// is, being non-minimal, never accepted.
+/* `SEQUENCE { INTEGER r, INTEGER s }`, strict DER and nothing else. Lengths
+ * are the definite short form only: the largest valid body is
+ * `2 * (2 + 49)` bytes, under 128, so a long-form length is never needed and
+ * is, being non-minimal, never accepted. */
 Option<Signature> parse_der(Curve curve, bytes data) {
     int total = data.size();
     if (total < 8 || total > 0x81 || data[0] != 0x30 || data[1] != total - 2) {
@@ -386,8 +386,8 @@ bool is_signature_valid(Curve curve, PublicKey key, bytes digest, Signature sign
     return false;
 }
 
-/// Whether `signature` -- DER `SEQUENCE { INTEGER r, INTEGER s }` -- is a
-/// valid ECDSA signature by `key` over the message whose hash is `digest`.
+/** Whether `signature` -- DER `SEQUENCE { INTEGER r, INTEGER s }` -- is a
+ * valid ECDSA signature by `key` over the message whose hash is `digest`. */
 pub bool is_valid_der_signature(Curve curve, PublicKey key, bytes digest, bytes signature) {
     match (parse_der(curve, signature)) {
         case None: {
@@ -412,32 +412,32 @@ pub bool is_valid_raw_signature(Curve curve, PublicKey key, bytes digest, bytes 
 }
 
 // --- ECDH (RFC 8422 / SEC 1 §3.3.1) -------------------------------------------------
-//
-// The one place this module touches a SECRET: TLS 1.2's ECDHE needs the
-// client's ephemeral scalar times a point. It is here, and not in a module of
-// its own, because it is the same curve arithmetic.
-//
-//   bytes secret = ...;                                   // curve.size random octets
-//   if (ecdsa.is_secret_scalar(curve, secret)) { ... }    // in [1, n-1]
-//   bytes mine = ecdsa.ephemeral_public(curve, secret);   // 0x04 || X || Y
-//   bytes shared = ecdsa.shared_secret(curve, peer, secret);   // X, curve.size octets
-//
-// **This is NOT constant time.** `bignum.m31` branches on the values it holds
-// and `add_points` on the exceptional cases, and a scalar multiplication here
-// leaks through timing exactly as the header of this file says a signature
-// would. What it does do is shape the leak: a Montgomery ladder (one double and
-// one add per scalar bit, whatever the bit; the two registers chosen by an
-// arithmetic mask, not a branch) instead of double-and-add, so the sequence of
-// operations does not depend on the secret except for its bit length (the
-// ladder starts at the top set bit). The remaining leak is the data-dependent
-// timing of the field arithmetic itself.
-//
-// That is acceptable only because the scalar is EPHEMERAL: one fresh scalar
-// per handshake, never reused, never stored, so an attacker gets one noisy
-// trace of a key that protects one connection -- not the thousands of traces
-// of one long-term key that timing attacks need. It would NOT be acceptable
-// for a static key, for ECDSA signing, or for any scalar used twice. A caller
-// with a static key needs a constant-time field, as `field25519.m31` is.
+/*
+ * The one place this module touches a SECRET: TLS 1.2's ECDHE needs the
+ * client's ephemeral scalar times a point. It is here, and not in a module of
+ * its own, because it is the same curve arithmetic.
+ *
+ *   bytes secret = ...;                                   // curve.size random octets
+ *   if (ecdsa.is_secret_scalar(curve, secret)) { ... }    // in [1, n-1]
+ *   bytes mine = ecdsa.ephemeral_public(curve, secret);   // 0x04 || X || Y
+ *   bytes shared = ecdsa.shared_secret(curve, peer, secret);   // X, curve.size octets
+ *
+ * **This is NOT constant time.** `bignum.m31` branches on the values it holds
+ * and `add_points` on the exceptional cases, and a scalar multiplication here
+ * leaks through timing exactly as the header of this file says a signature
+ * would. What it does do is shape the leak: a Montgomery ladder (one double and
+ * one add per scalar bit, whatever the bit; the two registers chosen by an
+ * arithmetic mask, not a branch) instead of double-and-add, so the sequence of
+ * operations does not depend on the secret except for its bit length (the
+ * ladder starts at the top set bit). The remaining leak is the data-dependent
+ * timing of the field arithmetic itself.
+ *
+ * That is acceptable only because the scalar is EPHEMERAL: one fresh scalar
+ * per handshake, never reused, never stored, so an attacker gets one noisy
+ * trace of a key that protects one connection -- not the thousands of traces
+ * of one long-term key that timing attacks need. It would NOT be acceptable
+ * for a static key, for ECDSA signing, or for any scalar used twice. A caller
+ * with a static key needs a constant-time field, as `field25519.m31` is. */
 
 // `first` if `flag` is 1, else `second`, limb by limb with an arithmetic mask.
 Array<int> select_limbs(int flag, Array<int> first, Array<int> second) {
@@ -453,9 +453,9 @@ Point select_point(int flag, Point first, Point second) {
     return Point(select_limbs(flag, first.x_coordinate, second.x_coordinate), select_limbs(flag, first.y_coordinate, second.y_coordinate), select_limbs(flag, first.z_coordinate, second.z_coordinate));
 }
 
-// `scalar * base` for a scalar in `[1, n-1]`: the Montgomery ladder, with
-// `low = k*P` and `high = (k+1)*P` between steps, so `high - low = P` always
-// and `add_points` never meets two equal operands.
+/* `scalar * base` for a scalar in `[1, n-1]`: the Montgomery ladder, with
+ * `low = k*P` and `high = (k+1)*P` between steps, so `high - low = P` always
+ * and `add_points` never meets two equal operands. */
 Point ladder(Curve curve, Point base, Array<int> scalar) {
     bignum.Modulus field = curve.field;
     Point low = base;
@@ -491,9 +491,9 @@ bytes encode_point(Curve curve, Point point) {
     return out;
 }
 
-/// Whether `secret` is `curve.size` octets, big-endian, with a value in
-/// `[1, n-1]`: a usable ECDH scalar. A caller draws random octets and retries
-/// on `false` (about one draw in 2^32 for P-256).
+/** Whether `secret` is `curve.size` octets, big-endian, with a value in
+ * `[1, n-1]`: a usable ECDH scalar. A caller draws random octets and retries
+ * on `false` (about one draw in 2^32 for P-256). */
 pub bool is_secret_scalar(Curve curve, bytes secret) {
     if (secret.size() != curve.size) {
         return false;
@@ -508,8 +508,8 @@ pub bool is_secret_scalar(Curve curve, bytes secret) {
     }
 }
 
-/// `secret * G` as `0x04 || X || Y`. A `secret` that `is_secret_scalar`
-/// refuses **traps**: it is the caller's bug, never a peer's doing.
+/** `secret * G` as `0x04 || X || Y`. A `secret` that `is_secret_scalar`
+ * refuses **traps**: it is the caller's bug, never a peer's doing. */
 pub bytes ephemeral_public(Curve curve, bytes secret) {
     match (scalar_in_range(curve, secret)) {
         case None: {
@@ -521,10 +521,10 @@ pub bytes ephemeral_public(Curve curve, bytes secret) {
     }
 }
 
-/// The ECDH shared secret: the X coordinate of `secret * peer`, `curve.size`
-/// big-endian octets. `peer` came from `parse_public_key`, so it is on the
-/// curve, and as both curves have cofactor 1 the product is never infinity
-/// for a scalar below n. A `secret` that `is_secret_scalar` refuses traps.
+/** The ECDH shared secret: the X coordinate of `secret * peer`, `curve.size`
+ * big-endian octets. `peer` came from `parse_public_key`, so it is on the
+ * curve, and as both curves have cofactor 1 the product is never infinity
+ * for a scalar below n. A `secret` that `is_secret_scalar` refuses traps. */
 pub bytes shared_secret(Curve curve, PublicKey peer, bytes secret) {
     match (scalar_in_range(curve, secret)) {
         case None: {

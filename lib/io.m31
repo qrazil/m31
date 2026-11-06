@@ -1,68 +1,68 @@
-// Files, standard input, standard output and standard error.
-//
-// API
+/* Files, standard input, standard output and standard error.
+ *
+ * API */
 // ---
-//   io.read(path)              -> Result<str, Error>    the whole file, as UTF-8 text
-//   io.read_bytes(path)        -> Result<bytes, Error>  the whole file, exactly
-//   io.write(path, s)          -> Result<int, Error>    replace the contents with text
-//   io.write_bytes(path, b)    -> Result<int, Error>    replace the contents with octets
-//   io.append(path, s)         -> Result<int, Error>    add text at the end
-//   io.eprint(s)               -> void                  a line to standard error
-//
-//   io.open(path, mode:, perm:)  -> Result<File, Error>
-//   io.stdin(), io.stdout(), io.stderr()  -> File       descriptors 0, 1 and 2
-//   f.read(n)                  -> Result<bytes, Error>  1..n bytes; empty only at the end
-//   f.read_all()               -> Result<bytes, Error>  everything to the end
-//   f.read_until(delim, limit) -> Result<bytes, Error>  through `delim`, at most `limit`
-//   f.write(b)                 -> Result<int, Error>    all of `b`
-//   f.write_some(b)            -> Result<int, Error>    one attempt; what the kernel took
-//   f.seek(n)                  -> Result<int, Error>    to `n` from the start; the position
-//   f.seek_by(d)               -> Result<int, Error>    `d` from where `read` continues
-//   f.seek_from_end(n)         -> Result<int, Error>    to `n` from the end (0 or below)
-//   f.tell()                   -> Result<int, Error>    where `read` continues
-//   f.close()                  -> Result<bool, Error>
-//
-//   io.Stream                 interface                the five methods above
-//   io.copy(src, dst)          -> Result<int, Error>    everything from one to the other
-//   io.read_line_of(s, limit)  -> Result<Option<str>, Error>  a line of any stream
-//
-//   io.buffer()                -> Buffer                bytes in memory, empty
-//   io.buffer_of(b)            -> Buffer                the same, holding a copy of `b`
-//   b.read(n), b.read_all(), b.read_until(d, l), b.write(b), b.close()   as a File's
-//   b.write_some(b)            -> Result<int, Error>    as a File's
-//   b.size()                   -> int                   bytes written and not yet read
-//   b.peek()                   -> bytes                 those bytes, without consuming
-//
-// **A failed read loses nothing; a failed write loses where you were.**
-// Those are the two halves of one rule, and they are not symmetric because
-// the two directions are not. A read that fails part way -- a socket's
-// timeout is the case that matters -- puts every byte it had already taken
-// back in front of the stream, so the retry sees the whole thing and no
-// caller has to hold a partial result itself. A write that fails part way
-// cannot take its bytes back out of the kernel: `write` reports `Err` with
-// no count, an unknown prefix of `b` is gone, and the only correct next
-// move is `close()`. A caller that must resync writes with `write_some`,
-// which does one attempt and reports exactly what it managed.
-//
-// Everything here is language source down to one system call per primitive
-// (runtime/sys.h, docs/sys-layer.md): the read loop, the buffer, the line
-// splitting, the `\r\n` rule, the retry on EINTR, and what every errno
-// means. A primitive answers a value or -errno and decides nothing.
-//
-// A `File` deals in `bytes`, both ways, as Oro's streams do. Text is a
-// decision the caller writes down -- `b.utf8()` in, `s.to_bytes()` out --
-// except in the whole-file helpers, which exist because reading a text file
-// is the common case and should be one call.
+/*   io.read(path)              -> Result<str, Error>    the whole file, as UTF-8 text
+ *   io.read_bytes(path)        -> Result<bytes, Error>  the whole file, exactly
+ *   io.write(path, s)          -> Result<int, Error>    replace the contents with text
+ *   io.write_bytes(path, b)    -> Result<int, Error>    replace the contents with octets
+ *   io.append(path, s)         -> Result<int, Error>    add text at the end
+ *   io.eprint(s)               -> void                  a line to standard error
+ *
+ *   io.open(path, mode:, perm:)  -> Result<File, Error>
+ *   io.stdin(), io.stdout(), io.stderr()  -> File       descriptors 0, 1 and 2
+ *   f.read(n)                  -> Result<bytes, Error>  1..n bytes; empty only at the end
+ *   f.read_all()               -> Result<bytes, Error>  everything to the end
+ *   f.read_until(delim, limit) -> Result<bytes, Error>  through `delim`, at most `limit`
+ *   f.write(b)                 -> Result<int, Error>    all of `b`
+ *   f.write_some(b)            -> Result<int, Error>    one attempt; what the kernel took
+ *   f.seek(n)                  -> Result<int, Error>    to `n` from the start; the position
+ *   f.seek_by(d)               -> Result<int, Error>    `d` from where `read` continues
+ *   f.seek_from_end(n)         -> Result<int, Error>    to `n` from the end (0 or below)
+ *   f.tell()                   -> Result<int, Error>    where `read` continues
+ *   f.close()                  -> Result<bool, Error>
+ *
+ *   io.Stream                 interface                the five methods above
+ *   io.copy(src, dst)          -> Result<int, Error>    everything from one to the other
+ *   io.read_line_of(s, limit)  -> Result<Option<str>, Error>  a line of any stream
+ *
+ *   io.buffer()                -> Buffer                bytes in memory, empty
+ *   io.buffer_of(b)            -> Buffer                the same, holding a copy of `b`
+ *   b.read(n), b.read_all(), b.read_until(d, l), b.write(b), b.close()   as a File's
+ *   b.write_some(b)            -> Result<int, Error>    as a File's
+ *   b.size()                   -> int                   bytes written and not yet read
+ *   b.peek()                   -> bytes                 those bytes, without consuming
+ *
+ * **A failed read loses nothing; a failed write loses where you were.**
+ * Those are the two halves of one rule, and they are not symmetric because
+ * the two directions are not. A read that fails part way -- a socket's
+ * timeout is the case that matters -- puts every byte it had already taken
+ * back in front of the stream, so the retry sees the whole thing and no
+ * caller has to hold a partial result itself. A write that fails part way
+ * cannot take its bytes back out of the kernel: `write` reports `Err` with
+ * no count, an unknown prefix of `b` is gone, and the only correct next
+ * move is `close()`. A caller that must resync writes with `write_some`,
+ * which does one attempt and reports exactly what it managed.
+ *
+ * Everything here is language source down to one system call per primitive
+ * (runtime/sys.h, docs/sys-layer.md): the read loop, the buffer, the line
+ * splitting, the `\r\n` rule, the retry on EINTR, and what every errno
+ * means. A primitive answers a value or -errno and decides nothing.
+ *
+ * A `File` deals in `bytes`, both ways, as Oro's streams do. Text is a
+ * decision the caller writes down -- `b.utf8()` in, `s.to_bytes()` out --
+ * except in the whole-file helpers, which exist because reading a text file
+ * is the common case and should be one call. */
 
 prim int __open(str path, int flags, int mode);
 prim int __read(int descriptor, bytes byte_buffer, int off, int byte_count);
 prim int __write(int descriptor, bytes byte_buffer, int off, int byte_count);
-// Like `__read`, but `out` is filled rather than written into: the read
-// lands in a scratch buffer the runtime keeps per carrier, and `out` (an
-// empty `bytes` the caller passes) ends up holding exactly the bytes that
-// arrived, not padded to `max_n`. Lets `File.fill` stop keeping a whole
-// CHUNK alive for every open file's whole lifetime -- see its own comment,
-// and lib/net.m31's `Conn.fill`, which uses the same primitive first.
+/* Like `__read`, but `out` is filled rather than written into: the read
+ * lands in a scratch buffer the runtime keeps per carrier, and `out` (an
+ * empty `bytes` the caller passes) ends up holding exactly the bytes that
+ * arrived, not padded to `max_n`. Lets `File.fill` stop keeping a whole
+ * CHUNK alive for every open file's whole lifetime -- see its own comment,
+ * and lib/net.m31's `Conn.fill`, which uses the same primitive first. */
 prim int __read_chunk(int descriptor, int max_n, bytes out);
 prim int __write_str(int descriptor, str text, int off, int byte_count);
 prim int __close(int descriptor);
@@ -70,33 +70,33 @@ prim int __seek(int descriptor, int off, int whence);
 prim int __fstat(int descriptor, List<int> out);
 prim void __out_flush();
 
-// The sys layer's own constants (runtime/sys.h), written as numbers because
-// they are the layer's and not the host's: the same on every target, which
-// is what makes a number here safe. The flags and modes are written in
-// octal, as the C headers spell them, so each can be checked against one.
-//
-//   open flags   WRONLY 0o1, CREAT 0o100, TRUNC 0o1000, APPEND 0o2000
-//   seek         SET 0, CUR 1
-//   file type    mode & 0o170000; a regular file is 0o100000
-//   errno        EINTR 4, EIO 5 -- the rest are named in from_errno
+/* The sys layer's own constants (runtime/sys.h), written as numbers because
+ * they are the layer's and not the host's: the same on every target, which
+ * is what makes a number here safe. The flags and modes are written in
+ * octal, as the C headers spell them, so each can be checked against one.
+ *
+ *   open flags   WRONLY 0o1, CREAT 0o100, TRUNC 0o1000, APPEND 0o2000
+ *   seek         SET 0, CUR 1
+ *   file type    mode & 0o170000; a regular file is 0o100000
+ *   errno        EINTR 4, EIO 5 -- the rest are named in from_errno */
 
-// How much a `File` reads the kernel in, and the size its buffer goes back
-// to after `unread` has borrowed it for a push-back.
+/* How much a `File` reads the kernel in, and the size its buffer goes back
+ * to after `unread` has borrowed it for a push-back. */
 const int CHUNK = 65536;
 
-/// Why an operation on a file failed.
-///
-/// `Other` is what keeps this enum from ever needing a new variant. `match`
-/// is exhaustive and has no default, so adding a variant would break every
-/// program that handles the error; instead, a failure nobody named arrives
-/// as `Other(errno)`. The named ones are the failures a caller plausibly
-/// branches on: Go's `fs.ErrNotExist`, `ErrPermission` and `ErrExist`, the
-/// three `fs` needs to say why a directory operation failed, and the one
-/// failure that is this module's own rather than the kernel's.
-///
-/// The number in `Other` is a Linux errno on every host -- the sys layer
-/// translates (docs/sys-layer.md §1) -- so it means the same thing wherever
-/// the program runs.
+/** Why an operation on a file failed.
+ *
+ * `Other` is what keeps this enum from ever needing a new variant. `match`
+ * is exhaustive and has no default, so adding a variant would break every
+ * program that handles the error; instead, a failure nobody named arrives
+ * as `Other(errno)`. The named ones are the failures a caller plausibly
+ * branches on: Go's `fs.ErrNotExist`, `ErrPermission` and `ErrExist`, the
+ * three `fs` needs to say why a directory operation failed, and the one
+ * failure that is this module's own rather than the kernel's.
+ *
+ * The number in `Other` is a Linux errno on every host -- the sys layer
+ * translates (docs/sys-layer.md §1) -- so it means the same thing wherever
+ * the program runs. */
 pub enum Error {
     NotFound;
     PermissionDenied;
@@ -108,8 +108,8 @@ pub enum Error {
     Other(int);
 }
 
-/// A sentence saying what went wrong. A method named `to_str`, so
-/// `print(e)` prints it and `"x: " + e.to_str()` builds on it.
+/** A sentence saying what went wrong. A method named `to_str`, so
+ * `print(e)` prints it and `"x: " + e.to_str()` builds on it. */
 pub str Error.to_str() {
     match (this) {
         case NotFound: {
@@ -140,59 +140,59 @@ pub str Error.to_str() {
 }
 
 // --- the stream protocol ---------------------------------------------------
-/// What a `File` and a `Buffer` both are: five methods over octets.
-///
-/// Interfaces are structural (reference §3.4), so this declares nothing new
-/// about either type -- `File` had exactly these five before `Stream`
-/// existed, and anything else with them is a stream too, including a type
-/// written outside this module. That is the point: `copy` and
-/// `read_line_of` below are written once, against the protocol, and a
-/// program that wants to test
-/// code that reads a file hands it a `Buffer` instead.
-///
-/// **One interface, not `Reader` and `Writer`.** A `File` is a single type
-/// with both halves and only one of them working -- a write to a file
-/// opened for reading traps -- so splitting the protocol would not make an
-/// unusable method unreachable, it would only make every signature choose a
-/// half. Which half a given stream answers is its own business, and it says
-/// so the same way through the interface as directly: by trapping. Oro
-/// draws it the same way (its reference §5.13): one protocol, and a write to
-/// a reader is an error at the call, not a type that lacks the method.
-///
-/// `read_all` and `read_until` are in here rather than written once over
-/// `read` because each type has a better way: a `File` asks the file system
-/// for its size, and a `Buffer` already holds everything and answers with a
-/// slice. Through the vtable a caller gets the good one.
-///
-/// ### What a failure means, for every stream
-///
-/// **A read that returns `Err` has consumed nothing.** `read` is trivially
-/// that -- it hands out what one buffer holds and fails before taking any.
-/// `read_all` and `read_until` are not: they collect across as many reads
-/// as it takes, so each of them puts what it had collected back in front of
-/// the stream before handing the error out, and the next read sees those
-/// bytes first. A `read_until` that times out with
-/// half a line in hand therefore loses neither the half line nor its place:
-/// call it again and the whole line comes back. `io.read_line_of` inherits
-/// this, because it is one `read_until`. The one thing a failing read can
-/// still consume is `read_line_of`'s `Err(InvalidUtf8)`: the line was read,
-/// it is not text, and there is no way to say so and also un-read it.
-///
-/// **A write that returns `Err` has written an unknown amount.** There is
-/// no matching promise and there cannot be one: the bytes a `write` has
-/// already handed the kernel are gone, and a `Result` has room for a count
-/// or a cause and not both. So `write`'s `Err` means the stream's place in
-/// whatever protocol is running over it is lost, and the only correct next
-/// move is `close()` -- not a retry, which would duplicate or skip an
-/// unknown prefix. A caller that has to resync instead of closing uses
-/// `write_some`, which a `File`, a `Buffer` and a `net.Conn` all have: one
-/// attempt, an exact count of what the kernel took, and an `Err` that means
-/// nothing at all was written. It is deliberately not in this interface --
-/// `copy` and `read_line_of` do not need it, and a five-method protocol is
-/// the thing an outside type can satisfy by accident.
-///
-/// There is no `drop` here and there cannot be: an interface requiring a
-/// destructor would be a way to call one by hand (docs/destructors-decision.md).
+/** What a `File` and a `Buffer` both are: five methods over octets.
+ *
+ * Interfaces are structural (reference §3.4), so this declares nothing new
+ * about either type -- `File` had exactly these five before `Stream`
+ * existed, and anything else with them is a stream too, including a type
+ * written outside this module. That is the point: `copy` and
+ * `read_line_of` below are written once, against the protocol, and a
+ * program that wants to test
+ * code that reads a file hands it a `Buffer` instead.
+ *
+ * **One interface, not `Reader` and `Writer`.** A `File` is a single type
+ * with both halves and only one of them working -- a write to a file
+ * opened for reading traps -- so splitting the protocol would not make an
+ * unusable method unreachable, it would only make every signature choose a
+ * half. Which half a given stream answers is its own business, and it says
+ * so the same way through the interface as directly: by trapping. Oro
+ * draws it the same way (its reference §5.13): one protocol, and a write to
+ * a reader is an error at the call, not a type that lacks the method.
+ *
+ * `read_all` and `read_until` are in here rather than written once over
+ * `read` because each type has a better way: a `File` asks the file system
+ * for its size, and a `Buffer` already holds everything and answers with a
+ * slice. Through the vtable a caller gets the good one.
+ *
+ * ### What a failure means, for every stream
+ *
+ * **A read that returns `Err` has consumed nothing.** `read` is trivially
+ * that -- it hands out what one buffer holds and fails before taking any.
+ * `read_all` and `read_until` are not: they collect across as many reads
+ * as it takes, so each of them puts what it had collected back in front of
+ * the stream before handing the error out, and the next read sees those
+ * bytes first. A `read_until` that times out with
+ * half a line in hand therefore loses neither the half line nor its place:
+ * call it again and the whole line comes back. `io.read_line_of` inherits
+ * this, because it is one `read_until`. The one thing a failing read can
+ * still consume is `read_line_of`'s `Err(InvalidUtf8)`: the line was read,
+ * it is not text, and there is no way to say so and also un-read it.
+ *
+ * **A write that returns `Err` has written an unknown amount.** There is
+ * no matching promise and there cannot be one: the bytes a `write` has
+ * already handed the kernel are gone, and a `Result` has room for a count
+ * or a cause and not both. So `write`'s `Err` means the stream's place in
+ * whatever protocol is running over it is lost, and the only correct next
+ * move is `close()` -- not a retry, which would duplicate or skip an
+ * unknown prefix. A caller that has to resync instead of closing uses
+ * `write_some`, which a `File`, a `Buffer` and a `net.Conn` all have: one
+ * attempt, an exact count of what the kernel took, and an `Err` that means
+ * nothing at all was written. It is deliberately not in this interface --
+ * `copy` and `read_line_of` do not need it, and a five-method protocol is
+ * the thing an outside type can satisfy by accident.
+ *
+ * There is no `drop` here and there cannot be: an interface requiring a
+ * destructor would be a way to call one by hand (docs/destructors-decision.md). */
 pub interface Stream {
     Result<bytes, Error> read(int max_bytes);
     Result<bytes, Error> read_all();
@@ -202,53 +202,53 @@ pub interface Stream {
 }
 
 // --- files ---------------------------------------------------------------
-/// What `open` opens a file for.
-///
-/// An enum rather than Oro's `"r"`/`"w"`/`"a"` strings, so that a mode that
-/// does not exist is a compile error rather than a trap. There is no
-/// read-write mode, as there is none in Oro: a file read and written through
-/// one buffer has to decide what a write does to data already read ahead,
-/// and no answer to that is obvious enough to freeze.
+/** What `open` opens a file for.
+ *
+ * An enum rather than Oro's `"r"`/`"w"`/`"a"` strings, so that a mode that
+ * does not exist is a compile error rather than a trap. There is no
+ * read-write mode, as there is none in Oro: a file read and written through
+ * one buffer has to decide what a write does to data already read ahead,
+ * and no answer to that is obvious enough to freeze. */
 pub enum Mode {
     Read;
     Write;
     Append;
 }
 
-/// An open file, or one of the standard streams.
-///
-/// Reads are buffered, 64 KiB at a time. Writes are not: `write` has handed
-/// everything to the kernel when it returns, so there is no `flush` to
-/// forget -- Oro's rule. A write to standard output or standard error first
-/// flushes what `print` has buffered, so the two land in program order.
-///
-/// **A `File` closes itself when its last reference goes** -- at the end of
-/// a scope, on a `return` or a `?` that leaves it, when it is reassigned --
-/// so no path leaks its descriptor. That close is silent: a writer that
-/// needs to know whether the close failed calls `close()` itself and looks
-/// at the result (docs/destructors-decision.md).
-///
-/// Every field is private: a `File` is made by `open` or one of the standard
-/// stream functions, and its buffer is only ever moved by its own methods.
+/** An open file, or one of the standard streams.
+ *
+ * Reads are buffered, 64 KiB at a time. Writes are not: `write` has handed
+ * everything to the kernel when it returns, so there is no `flush` to
+ * forget -- Oro's rule. A write to standard output or standard error first
+ * flushes what `print` has buffered, so the two land in program order.
+ *
+ * **A `File` closes itself when its last reference goes** -- at the end of
+ * a scope, on a `return` or a `?` that leaves it, when it is reassigned --
+ * so no path leaks its descriptor. That close is silent: a writer that
+ * needs to know whether the close failed calls `close()` itself and looks
+ * at the result (docs/destructors-decision.md).
+ *
+ * Every field is private: a `File` is made by `open` or one of the standard
+ * stream functions, and its buffer is only ever moved by its own methods. */
 pub type File {
     int descriptor;
     bool is_readable;
     bool is_writable;
     bool is_live = true;
-    // The read buffer, allocated on the first read so that a writer, and
-    // each of the standard streams, costs nothing. buf[at .. end] is read
-    // from the kernel and not yet handed out.
+    /* The read buffer, allocated on the first read so that a writer, and
+     * each of the standard streams, costs nothing. buf[at .. end] is read
+     * from the kernel and not yet handed out. */
     bytes buffer = [];
     int position = 0;
     int end = 0;
 }
 
-/// Between 1 and `max_bytes` bytes, or an empty `bytes` at the end of the file.
-///
-/// **It may return fewer than `max_bytes` without being at the end** -- `max_bytes` is a
-/// maximum, and the answer is what one read of the buffer had. Code that
-/// needs everything calls `read_all`. `max_bytes` below 1 traps, so that an empty
-/// result has exactly one meaning.
+/** Between 1 and `max_bytes` bytes, or an empty `bytes` at the end of the file.
+ *
+ * **It may return fewer than `max_bytes` without being at the end** -- `max_bytes` is a
+ * maximum, and the answer is what one read of the buffer had. Code that
+ * needs everything calls `read_all`. `max_bytes` below 1 traps, so that an empty
+ * result has exactly one meaning. */
 pub Result<bytes, Error> File.read(int max_bytes) {
     if (max_bytes < 1) {
         trap("read(" + max_bytes.to_str() + "): read at least one byte; read_all() reads everything");
@@ -268,18 +268,18 @@ pub Result<bytes, Error> File.read(int max_bytes) {
     return Result<bytes, Error>.Ok(out);
 }
 
-/// Everything from here to the end of the file.
-///
-/// For a regular file the size is asked first and the result allocated
-/// once, so a large file is not held twice while a growing buffer doubles.
-/// The size is only a hint -- a file can grow while it is read, and a pipe
-/// has none -- so the read goes on to the real end regardless.
-///
-/// **A failure does not throw away what had arrived**: everything read so
-/// far goes back in front of the stream and the next read starts with it,
-/// as `Stream` says. That matters most where this cannot finish at all --
-/// a socket with a read timeout, where "the peer has not stopped sending
-/// yet" is the ordinary answer.
+/** Everything from here to the end of the file.
+ *
+ * For a regular file the size is asked first and the result allocated
+ * once, so a large file is not held twice while a growing buffer doubles.
+ * The size is only a hint -- a file can grow while it is read, and a pipe
+ * has none -- so the read goes on to the real end regardless.
+ *
+ * **A failure does not throw away what had arrived**: everything read so
+ * far goes back in front of the stream and the next read starts with it,
+ * as `Stream` says. That matters most where this cannot finish at all --
+ * a socket with a read timeout, where "the peer has not stopped sending
+ * yet" is the ordinary answer. */
 pub Result<bytes, Error> File.read_all() {
     check_readable();
     // What the buffer already holds comes first.
@@ -288,8 +288,8 @@ pub Result<bytes, Error> File.read_all() {
         out = buffer.substr(position, end);
         position = end;
     }
-    // The size hint: what is left of a regular file past the kernel's
-    // offset, which is where the buffer stopped.
+    /* The size hint: what is left of a regular file past the kernel's
+     * offset, which is where the buffer stopped. */
     int hint = 0;
     List<int> stat_fields = [];
     if (__fstat(descriptor, stat_fields) == 0 && stat_fields[1] & 0o170000 == 0o100000) {
@@ -307,8 +307,8 @@ pub Result<bytes, Error> File.read_all() {
                 continue;
             }
             if (read_result < 0) {
-                // The kernel's offset has moved by `got`, so those bytes
-                // are only in `big`: they go back with the rest.
+                /* The kernel's offset has moved by `got`, so those bytes
+                 * are only in `big`: they go back with the rest. */
                 big.truncate(got);
                 out.extend(big);
                 unread(out);
@@ -319,20 +319,20 @@ pub Result<bytes, Error> File.read_all() {
             }
             got = got + read_result;
         }
-        // The common case -- nothing buffered, the file as big as it said --
-        // hands back the one allocation without copying it.
+        /* The common case -- nothing buffered, the file as big as it said --
+         * hands back the one allocation without copying it. */
         if (got == hint && out.size() == 0) {
             out = big;
         } else {
-            // The file was shorter than it said, or something was buffered
-            // already: cut `big` down where it is rather than allocating a
-            // copy of the part that was filled.
+            /* The file was shorter than it said, or something was buffered
+             * already: cut `big` down where it is rather than allocating a
+             * copy of the part that was filled. */
             big.truncate(got);
             out.extend(big);
         }
     }
-    // The rest, until the kernel says the end: all of it for a pipe, and
-    // for a regular file one empty read that confirms the hint was right.
+    /* The rest, until the kernel says the end: all of it for a pipe, and
+     * for a regular file one empty read that confirms the hint was right. */
     while (fill_keeping(out)? > 0) {
         if (end == buffer.size()) {
             out.extend(buffer);
@@ -344,22 +344,22 @@ pub Result<bytes, Error> File.read_all() {
     return Result<bytes, Error>.Ok(out);
 }
 
-/// Bytes up to and including the first `delim`, reading no more than
-/// `limit` of them.
-///
-/// Three outcomes, told apart by the result alone: it ends with `delim`
-/// (found); it is `limit` long and does not (no delimiter within the limit
-/// -- call again for the rest); or it is shorter and does not (the file
-/// ended first; empty means it had already ended). The limit is what makes
-/// this safe on input nobody controls: without one, a line that never ends
-/// is a request for all of memory.
-///
-/// **A failure does not throw away the part that had arrived.** The bytes
-/// taken so far go back in front of the stream, so a `read_until` that
-/// times out half way through a line and is called again reads the whole
-/// line, delimiter and all, exactly as if the wait had been longer.
-///
-/// An empty `delim` or a `limit` below 1 traps.
+/** Bytes up to and including the first `delim`, reading no more than
+ * `limit` of them.
+ *
+ * Three outcomes, told apart by the result alone: it ends with `delim`
+ * (found); it is `limit` long and does not (no delimiter within the limit
+ * -- call again for the rest); or it is shorter and does not (the file
+ * ended first; empty means it had already ended). The limit is what makes
+ * this safe on input nobody controls: without one, a line that never ends
+ * is a request for all of memory.
+ *
+ * **A failure does not throw away the part that had arrived.** The bytes
+ * taken so far go back in front of the stream, so a `read_until` that
+ * times out half way through a line and is called again reads the whole
+ * line, delimiter and all, exactly as if the wait had been longer.
+ *
+ * An empty `delim` or a `limit` below 1 traps. */
 pub Result<bytes, Error> File.read_until(bytes delim, int limit) {
     if (delim.size() == 0) {
         trap("read_until: the delimiter is empty");
@@ -386,20 +386,20 @@ pub Result<bytes, Error> File.read_until(bytes delim, int limit) {
     return Result<bytes, Error>.Ok(out);
 }
 
-/// Write all of `data`, returning its size.
-///
-/// "All" is the promise: the kernel may take a write in pieces, and the
-/// loop that hands it the rest is here so that no caller writes one.
-///
-/// **`Err` means an unknown amount of `data` was written**, somewhere between
-/// none and all of it but the last byte, and the file's contents are
-/// therefore in a state no caller can name. This is not an oversight and it
-/// is not fixable in this signature: a `Result` carries a count or a cause,
-/// never both, and unlike a failed read there is nothing to put back --
-/// what the kernel took, it took. So an `Err` here means the file is done:
-/// `close()` it and report. Retrying `write` would duplicate or skip an
-/// unknown prefix, which is worse than failing. `write_some` is the way to
-/// go on writing and know where you are.
+/** Write all of `data`, returning its size.
+ *
+ * "All" is the promise: the kernel may take a write in pieces, and the
+ * loop that hands it the rest is here so that no caller writes one.
+ *
+ * **`Err` means an unknown amount of `data` was written**, somewhere between
+ * none and all of it but the last byte, and the file's contents are
+ * therefore in a state no caller can name. This is not an oversight and it
+ * is not fixable in this signature: a `Result` carries a count or a cause,
+ * never both, and unlike a failed read there is nothing to put back --
+ * what the kernel took, it took. So an `Err` here means the file is done:
+ * `close()` it and report. Retrying `write` would duplicate or skip an
+ * unknown prefix, which is worse than failing. `write_some` is the way to
+ * go on writing and know where you are. */
 pub Result<int, Error> File.write(bytes data) {
     if (!is_live) {
         trap("write on a closed file");
@@ -413,27 +413,27 @@ pub Result<int, Error> File.write(bytes data) {
     return write_all(descriptor, data);
 }
 
-/// One attempt at writing `data`: the number of bytes the kernel took, at
-/// least 1 and at most `b.size()`. An empty `data` writes nothing and is 0.
-///
-/// This is `write` with the loop taken out, and the point of it is the
-/// error: **`Err` from here means nothing was written.** A short write is
-/// `Ok(n)` with `n` below `b.size()`, so the two answers never overlap and
-/// a caller always knows where it is. That is exactly what `write` cannot
-/// tell it, which is why a protocol that has to resync after a failure --
-/// a socket with a send timeout is the case that forces it -- writes with
-/// this and keeps its own offset:
-///
-///     int off = 0;
-///     while (off < b.size()) {
-///         off = off + f.write_some(b.substr(off, b.size()))?;
-///     }
-///
-/// The guarantee is the kernel's, not a loop's: `write(2)` that moved any
-/// bytes at all returns their count rather than an error, including when a
-/// socket's `SO_SNDTIMEO` expires part way (`man 7 socket`). A signal with
-/// nothing written is retried here, as everywhere in this module, so it is
-/// not one of the errors.
+/** One attempt at writing `data`: the number of bytes the kernel took, at
+ * least 1 and at most `b.size()`. An empty `data` writes nothing and is 0.
+ *
+ * This is `write` with the loop taken out, and the point of it is the
+ * error: **`Err` from here means nothing was written.** A short write is
+ * `Ok(n)` with `n` below `b.size()`, so the two answers never overlap and
+ * a caller always knows where it is. That is exactly what `write` cannot
+ * tell it, which is why a protocol that has to resync after a failure --
+ * a socket with a send timeout is the case that forces it -- writes with
+ * this and keeps its own offset:
+ *
+ *     int off = 0;
+ *     while (off < b.size()) {
+ *         off = off + f.write_some(b.substr(off, b.size()))?;
+ *     }
+ *
+ * The guarantee is the kernel's, not a loop's: `write(2)` that moved any
+ * bytes at all returns their count rather than an error, including when a
+ * socket's `SO_SNDTIMEO` expires part way (`man 7 socket`). A signal with
+ * nothing written is retried here, as everywhere in this module, so it is
+ * not one of the errors. */
 pub Result<int, Error> File.write_some(bytes data) {
     if (!is_live) {
         trap("write on a closed file");
@@ -450,37 +450,37 @@ pub Result<int, Error> File.write_some(bytes data) {
     return write_once(descriptor, data);
 }
 
-/// Move the file's position to `offset` bytes from its start, and answer it.
-///
-/// **The position is the one `read` sees**, not the kernel's: a `File` reads
-/// ahead 64 KiB at a time, so what had been read ahead is dropped, and the
-/// next `read` starts at `offset`. `tell` is the same position without
-/// moving. Seeking past the end is allowed, as it is for `lseek(2)`: a read
-/// there is at the end of the file, and a write leaves a hole. A negative
-/// `offset` is `Err`, as is a file that cannot seek (a pipe, a socket, a
-/// terminal: `Other(29)`, ESPIPE). Writes are not buffered, so there is
-/// nothing to flush first. Seeking a closed file traps.
+/** Move the file's position to `offset` bytes from its start, and answer it.
+ *
+ * **The position is the one `read` sees**, not the kernel's: a `File` reads
+ * ahead 64 KiB at a time, so what had been read ahead is dropped, and the
+ * next `read` starts at `offset`. `tell` is the same position without
+ * moving. Seeking past the end is allowed, as it is for `lseek(2)`: a read
+ * there is at the end of the file, and a write leaves a hole. A negative
+ * `offset` is `Err`, as is a file that cannot seek (a pipe, a socket, a
+ * terminal: `Other(29)`, ESPIPE). Writes are not buffered, so there is
+ * nothing to flush first. Seeking a closed file traps. */
 pub Result<int, Error> File.seek(int offset) {
     return reposition(offset, 0);
 }
 
-/// Move the position by `delta` bytes from where `read` would continue --
-/// not from the kernel's offset, which is ahead of it by whatever has been
-/// read ahead. The new position counted from the start, or `Err` as for
-/// `seek`.
+/** Move the position by `delta` bytes from where `read` would continue --
+ * not from the kernel's offset, which is ahead of it by whatever has been
+ * read ahead. The new position counted from the start, or `Err` as for
+ * `seek`. */
 pub Result<int, Error> File.seek_by(int delta) {
     return reposition(delta - (end - position), 1);
 }
 
-/// Move the position to `offset` bytes from the end of the file -- zero or
-/// negative to land inside it. The new position counted from the start, or
-/// `Err` as for `seek`.
+/** Move the position to `offset` bytes from the end of the file -- zero or
+ * negative to land inside it. The new position counted from the start, or
+ * `Err` as for `seek`. */
 pub Result<int, Error> File.seek_from_end(int offset) {
     return reposition(offset, 2);
 }
 
-/// The position `read` would continue from, counted from the start of the
-/// file.
+/** The position `read` would continue from, counted from the start of the
+ * file. */
 pub Result<int, Error> File.tell() {
     if (!is_live) {
         trap("tell on a closed file");
@@ -492,8 +492,8 @@ pub Result<int, Error> File.tell() {
     return Result<int, Error>.Ok(here - (end - position));
 }
 
-// The three seeks, on the kernel's own `whence` numbers (SET 0, CUR 1,
-// END 2): the sys layer's constants, as everywhere in this module.
+/* The three seeks, on the kernel's own `whence` numbers (SET 0, CUR 1,
+ * END 2): the sys layer's constants, as everywhere in this module. */
 Result<int, Error> File.reposition(int offset, int whence) {
     if (!is_live) {
         trap("seek on a closed file");
@@ -510,22 +510,22 @@ Result<int, Error> File.reposition(int offset, int whence) {
     return Result<int, Error>.Ok(moved);
 }
 
-/// Release the descriptor. Closing twice is not an error; any other use of
-/// a closed `File` traps.
-///
-/// It returns a Result because closing is where some file systems report a
-/// write that failed -- NFS, a full disk -- and a writer should look.
-/// It is never retried on EINTR: on Linux the descriptor is already gone by
-/// then, and a retry could close one another thread has just been given.
+/** Release the descriptor. Closing twice is not an error; any other use of
+ * a closed `File` traps.
+ *
+ * It returns a Result because closing is where some file systems report a
+ * write that failed -- NFS, a full disk -- and a writer should look.
+ * It is never retried on EINTR: on Linux the descriptor is already gone by
+ * then, and a retry could close one another thread has just been given. */
 pub Result<bool, Error> File.close() {
     return release();
 }
 
-// What `close()` and the destructor share, so the same rules hold for both:
-// a second close is a no-op, and the standard streams are marked closed
-// without their descriptors being released. A separate name because the
-// destructor cannot call `close()` bare -- that also names the channel
-// builtin, which the language refuses as ambiguous.
+/* What `close()` and the destructor share, so the same rules hold for both:
+ * a second close is a no-op, and the standard streams are marked closed
+ * without their descriptors being released. A separate name because the
+ * destructor cannot call `close()` bare -- that also names the channel
+ * builtin, which the language refuses as ambiguous. */
 Result<bool, Error> File.release() {
     if (!is_live) {
         return Result<bool, Error>.Ok(true);
@@ -545,8 +545,8 @@ Result<bool, Error> File.release() {
     return Result<bool, Error>.Ok(true);
 }
 
-// A read on a closed file, or on one opened for writing, is a bug in the
-// program, not a failure of the file.
+/* A read on a closed file, or on one opened for writing, is a bug in the
+ * program, not a failure of the file. */
 void File.check_readable() {
     if (!is_live) {
         trap("read on a closed file");
@@ -556,26 +556,26 @@ void File.check_readable() {
     }
 }
 
-// Refill an empty buffer. The number of bytes now buffered, 0 at the end.
-//
-// `buf` is replaced, not reused: `__read_chunk` reads into a scratch buffer
-// the runtime keeps per carrier (not per file) and hands back a fresh
-// `bytes` sized to exactly what arrived, so a file with little buffered
-// holds only that -- never a whole CHUNK it is not using -- and the one
-// real CHUNK-sized buffer per carrier is shared by every file that carrier
-// ever reads. Safe even though a file's `read` genuinely blocks the OS
-// thread: the scratch buffer is only ever touched by the one real OS thread
-// running this call, from the read to the copy-out below, with nothing of
-// this green thread's own resuming elsewhere in between -- unlike a
-// cooperative park (rt_wait_io's own comment, runtime/rt.c), a real
-// blocking syscall never hands the rest of this call to a different carrier.
+/* Refill an empty buffer. The number of bytes now buffered, 0 at the end.
+ *
+ * `buf` is replaced, not reused: `__read_chunk` reads into a scratch buffer
+ * the runtime keeps per carrier (not per file) and hands back a fresh
+ * `bytes` sized to exactly what arrived, so a file with little buffered
+ * holds only that -- never a whole CHUNK it is not using -- and the one
+ * real CHUNK-sized buffer per carrier is shared by every file that carrier
+ * ever reads. Safe even though a file's `read` genuinely blocks the OS
+ * thread: the scratch buffer is only ever touched by the one real OS thread
+ * running this call, from the read to the copy-out below, with nothing of
+ * this green thread's own resuming elsewhere in between -- unlike a
+ * cooperative park (rt_wait_io's own comment, runtime/rt.c), a real
+ * blocking syscall never hands the rest of this call to a different carrier. */
 Result<int, Error> File.fill() {
     check_readable();
     bytes next = [];
     while (true) {
         int read_result = __read_chunk(descriptor, CHUNK, next);
-        // A signal arriving during a read interrupts it without having read
-        // anything. It is not a failure of the file, so it is not reported.
+        /* A signal arriving during a read interrupts it without having read
+         * anything. It is not a failure of the file, so it is not reported. */
         if (read_result == -4) {
             continue;
         }
@@ -589,9 +589,9 @@ Result<int, Error> File.fill() {
     }
 }
 
-// `fill`, except that a failure first puts `held` back in front of the
-// stream. Every accumulating read calls this instead of `fill` and may then
-// propagate with `?`, because the bytes are safe before the error moves.
+/* `fill`, except that a failure first puts `held` back in front of the
+ * stream. Every accumulating read calls this instead of `fill` and may then
+ * propagate with `?`, because the bytes are safe before the error moves. */
 Result<int, Error> File.fill_keeping(bytes held) {
     match (fill()) {
         case Ok(int buffered_count): {
@@ -604,15 +604,15 @@ Result<int, Error> File.fill_keeping(bytes held) {
     }
 }
 
-// Put `data` back in front of the stream: the next read hands those bytes out
-// before anything new arrives.
-//
-// It is only ever called from a failing read, and a failing read has always
-// drained the buffer before asking `fill` for more -- `at == end` at every
-// call site -- so there is nothing here to merge with and `data` simply
-// becomes the buffer. `data` may be much larger than a chunk (a `read_all`
-// that collected megabytes before the peer went quiet); that is why `fill`
-// checks the size rather than only whether there is a buffer at all.
+/* Put `data` back in front of the stream: the next read hands those bytes out
+ * before anything new arrives.
+ *
+ * It is only ever called from a failing read, and a failing read has always
+ * drained the buffer before asking `fill` for more -- `at == end` at every
+ * call site -- so there is nothing here to merge with and `data` simply
+ * becomes the buffer. `data` may be much larger than a chunk (a `read_all`
+ * that collected megabytes before the peer went quiet); that is why `fill`
+ * checks the size rather than only whether there is a buffer at all. */
 void File.unread(bytes data) {
     if (data.size() == 0) {
         return;
@@ -622,22 +622,22 @@ void File.unread(bytes data) {
     end = data.size();
 }
 
-// The destructor: close whatever `close()` was not called on. Its error is
-// discarded because a destructor has nobody to hand one to; `close()` is how
-// a program sees it.
+/* The destructor: close whatever `close()` was not called on. Its error is
+ * discarded because a destructor has nobody to hand one to; `close()` is how
+ * a program sees it. */
 void File.drop() {
     Result<bool, Error> ignored = release();
 }
 
-/// The `Error` for a Linux errno number -- positive, as errno is written;
-/// a primitive's result `r < 0` is `from_errno(-r)`.
-///
-/// Public because `fs` builds the same errors from the same primitives, and
-/// one mapping is the point: a program handling `io.Error` from `fs.mkdir`
-/// and from `io.open` should see one vocabulary. EPERM joins EACCES as
-/// PermissionDenied, as it does in Go and Rust: which of the two the kernel
-/// returns depends on the file system, not on anything a caller would
-/// branch on.
+/** The `Error` for a Linux errno number -- positive, as errno is written;
+ * a primitive's result `r < 0` is `from_errno(-r)`.
+ *
+ * Public because `fs` builds the same errors from the same primitives, and
+ * one mapping is the point: a program handling `io.Error` from `fs.mkdir`
+ * and from `io.open` should see one vocabulary. EPERM joins EACCES as
+ * PermissionDenied, as it does in Go and Rust: which of the two the kernel
+ * returns depends on the file system, not on anything a caller would
+ * branch on. */
 pub Error from_errno(int errno_code) {
     if (errno_code == 2) {
         return Error.NotFound;
@@ -660,14 +660,14 @@ pub Error from_errno(int errno_code) {
     return Error.Other(errno_code);
 }
 
-/// Open `path`. `Read` needs the file to exist; `Write` creates it or
-/// empties it; `Append` creates it or adds to its end, every write landing
-/// at the end even with other writers.
-///
-/// A file this creates gets `perm` -- the permission bits, less the
-/// process's umask. The default is `0o666`, what every C program
-/// and Go's `os.Create` use; `0o600` is a file only its owner can read.
-/// The descriptor is close-on-exec, as every descriptor the runtime opens.
+/** Open `path`. `Read` needs the file to exist; `Write` creates it or
+ * empties it; `Append` creates it or adds to its end, every write landing
+ * at the end even with other writers.
+ *
+ * A file this creates gets `perm` -- the permission bits, less the
+ * process's umask. The default is `0o666`, what every C program
+ * and Go's `os.Create` use; `0o600` is a file only its owner can read.
+ * The descriptor is close-on-exec, as every descriptor the runtime opens. */
 pub Result<File, Error> open(str path, Mode mode = Mode.Read, int perm = 0o666) {
     int flags = 0;
     bool is_readable = true;
@@ -691,25 +691,25 @@ pub Result<File, Error> open(str path, Mode mode = Mode.Read, int perm = 0o666) 
     return Result<File, Error>.Ok(File(descriptor, is_readable, !is_readable));
 }
 
-/// Standard input as a `File`.
-///
-/// Each call is a new `File` with its own buffer, so call it once and keep
-/// it: two of them would each read ahead, and each would hold input the
-/// other never sees. (A module cannot hold state, so there is nowhere to
-/// keep the one shared `File` this wants to be.)
-///
-/// Lines come off it with `read_line_of(s, limit)`. There is no
-/// `io.read_line()` and there was: a module-level line reader has nowhere to
-/// keep a buffer, so to leave the rest of the input for whoever reads next
-/// it had to read one byte per `read(2)` on a pipe. That contract cannot be
-/// made cheap, so it is gone rather than slow; the buffer lives here, in the
-/// `File` the program holds.
+/** Standard input as a `File`.
+ *
+ * Each call is a new `File` with its own buffer, so call it once and keep
+ * it: two of them would each read ahead, and each would hold input the
+ * other never sees. (A module cannot hold state, so there is nowhere to
+ * keep the one shared `File` this wants to be.)
+ *
+ * Lines come off it with `read_line_of(s, limit)`. There is no
+ * `io.read_line()` and there was: a module-level line reader has nowhere to
+ * keep a buffer, so to leave the rest of the input for whoever reads next
+ * it had to read one byte per `read(2)` on a pipe. That contract cannot be
+ * made cheap, so it is gone rather than slow; the buffer lives here, in the
+ * `File` the program holds. */
 pub File stdin() {
     return File(0, true, false);
 }
 
-/// Standard output as a `File`. `close()` on it marks this `File` closed
-/// and leaves the descriptor open, because `print` still writes to it.
+/** Standard output as a `File`. `close()` on it marks this `File` closed
+ * and leaves the descriptor open, because `print` still writes to it. */
 pub File stdout() {
     return File(1, false, true);
 }
@@ -730,8 +730,8 @@ Result<int, Error> write_all(int descriptor, bytes data) {
         if (write_result < 0) {
             return Result<int, Error>.Err(from_errno(-write_result));
         }
-        // A write of nothing to a regular file makes no progress and never
-        // will; calling it an I/O error beats looping forever.
+        /* A write of nothing to a regular file makes no progress and never
+         * will; calling it an I/O error beats looping forever. */
         if (write_result == 0) {
             return Result<int, Error>.Err(from_errno(5));
         }
@@ -740,9 +740,9 @@ Result<int, Error> write_all(int descriptor, bytes data) {
     return Result<int, Error>.Ok(off);
 }
 
-// One `write(2)` of all of `data`, retried only on a signal that wrote
-// nothing: what the kernel took, which is at least one byte. `data` is not
-// empty -- the caller has already answered that with 0 and no system call.
+/* One `write(2)` of all of `data`, retried only on a signal that wrote
+ * nothing: what the kernel took, which is at least one byte. `data` is not
+ * empty -- the caller has already answered that with 0 and no system call. */
 Result<int, Error> write_once(int descriptor, bytes data) {
     while (true) {
         int write_result = __write(descriptor, data, 0, data.size());
@@ -752,8 +752,8 @@ Result<int, Error> write_once(int descriptor, bytes data) {
         if (write_result < 0) {
             return Result<int, Error>.Err(from_errno(-write_result));
         }
-        // Nothing written and no reason given: it will not get better, and
-        // an error beats a caller looping on a zero forever.
+        /* Nothing written and no reason given: it will not get better, and
+         * an error beats a caller looping on a zero forever. */
         if (write_result == 0) {
             return Result<int, Error>.Err(from_errno(5));
         }
@@ -781,50 +781,50 @@ Result<int, Error> write_all_str(int descriptor, str text) {
 }
 
 // --- buffers ---------------------------------------------------------------
-/// Bytes in memory, read and written like a file.
-///
-/// `write` appends at the end; `read` takes from the front and moves the
-/// read position past what it took. It is a `Stream`, with the same five
-/// methods a `File` has and the same meanings, so code written against
-/// `Stream` cannot tell the two apart -- which is what a `Buffer` is for:
-/// assembling output before one `write`, and standing in for a file in a
-/// test with no file system in it.
-///
-/// **Its `Result`s are always `Ok`.** A `Buffer` has no kernel to say no
-/// to it: none of `Error`'s variants can come out of one, not even
-/// `Other`. The shape is a `File`'s anyway, because the two are meant to
-/// be interchangeable and a `Stream` has to declare one signature. A
-/// caller that knows it holds a `Buffer` may treat the error arm as dead;
-/// a caller holding a `Stream` cannot, and should not.
-///
-/// A mistake still traps, as it does on a `File`: `read(0)`, an empty
-/// delimiter, a limit below 1, and any use of a closed `Buffer` but a
-/// second `close()`.
-///
-/// **The end of a `Buffer` is wherever the writing has got to.** Running
-/// out of unread bytes is indistinguishable from the end of a file, so a
-/// `read_until` whose delimiter has not been written yet consumes what is
-/// there and reports no delimiter, exactly as it would at the end of a
-/// file. A reader that may be overtaken by a writer checks
-/// `ends_with(delim)` before believing it, which is the contract
-/// `File.read_until` already asks for.
-///
-/// Every field is private: a `Buffer` is made by `buffer` or `buffer_of`,
-/// and only its own methods move the read position.
+/** Bytes in memory, read and written like a file.
+ *
+ * `write` appends at the end; `read` takes from the front and moves the
+ * read position past what it took. It is a `Stream`, with the same five
+ * methods a `File` has and the same meanings, so code written against
+ * `Stream` cannot tell the two apart -- which is what a `Buffer` is for:
+ * assembling output before one `write`, and standing in for a file in a
+ * test with no file system in it.
+ *
+ * **Its `Result`s are always `Ok`.** A `Buffer` has no kernel to say no
+ * to it: none of `Error`'s variants can come out of one, not even
+ * `Other`. The shape is a `File`'s anyway, because the two are meant to
+ * be interchangeable and a `Stream` has to declare one signature. A
+ * caller that knows it holds a `Buffer` may treat the error arm as dead;
+ * a caller holding a `Stream` cannot, and should not.
+ *
+ * A mistake still traps, as it does on a `File`: `read(0)`, an empty
+ * delimiter, a limit below 1, and any use of a closed `Buffer` but a
+ * second `close()`.
+ *
+ * **The end of a `Buffer` is wherever the writing has got to.** Running
+ * out of unread bytes is indistinguishable from the end of a file, so a
+ * `read_until` whose delimiter has not been written yet consumes what is
+ * there and reports no delimiter, exactly as it would at the end of a
+ * file. A reader that may be overtaken by a writer checks
+ * `ends_with(delim)` before believing it, which is the contract
+ * `File.read_until` already asks for.
+ *
+ * Every field is private: a `Buffer` is made by `buffer` or `buffer_of`,
+ * and only its own methods move the read position. */
 pub type Buffer {
-    // Written and not yet read is buf[at .. buf.size()); buf[0 .. at) is
-    // dead, waiting for a compaction to drop it. No default, so that the two
-    // constructors below pass it positionally rather than by name (§4.2).
+    /* Written and not yet read is buf[at .. buf.size()); buf[0 .. at) is
+     * dead, waiting for a compaction to drop it. No default, so that the two
+     * constructors below pass it positionally rather than by name (§4.2). */
     bytes buffer;
     int position = 0;
     bool is_live = true;
 }
 
-/// Between 1 and `max_bytes` bytes, or an empty `bytes` when everything written has
-/// been read.
-///
-/// As on a `File`, `max_bytes` is a maximum: what is left, if that is less. `max_bytes`
-/// below 1 traps, so that an empty result has exactly one meaning.
+/** Between 1 and `max_bytes` bytes, or an empty `bytes` when everything written has
+ * been read.
+ *
+ * As on a `File`, `max_bytes` is a maximum: what is left, if that is less. `max_bytes`
+ * below 1 traps, so that an empty result has exactly one meaning. */
 pub Result<bytes, Error> Buffer.read(int max_bytes) {
     if (max_bytes < 1) {
         trap("read(" + max_bytes.to_str() + "): read at least one byte; read_all() reads everything");
@@ -843,9 +843,9 @@ pub Result<bytes, Error> Buffer.read(int max_bytes) {
 /// Everything written and not yet read, leaving the `Buffer` empty.
 pub Result<bytes, Error> Buffer.read_all() {
     check_live();
-    // Nothing has been read yet, so the whole buffer is the answer: hand it
-    // over and start again, the way `File.read_all` hands back its one
-    // allocation rather than copying it.
+    /* Nothing has been read yet, so the whole buffer is the answer: hand it
+     * over and start again, the way `File.read_all` hands back its one
+     * allocation rather than copying it. */
     if (position == 0) {
         bytes whole = buffer;
         bytes fresh = [];
@@ -858,14 +858,14 @@ pub Result<bytes, Error> Buffer.read_all() {
     return Result<bytes, Error>.Ok(out);
 }
 
-/// Bytes up to and including the first `delim`, taking no more than `limit`
-/// of them.
-///
-/// The three outcomes are a `File`'s, told apart the same way: it ends with
-/// `delim`; it is `limit` long and does not; or it is shorter and does not,
-/// meaning the written bytes ran out first (empty: they had already).
-///
-/// An empty `delim` or a `limit` below 1 traps.
+/** Bytes up to and including the first `delim`, taking no more than `limit`
+ * of them.
+ *
+ * The three outcomes are a `File`'s, told apart the same way: it ends with
+ * `delim`; it is `limit` long and does not; or it is shorter and does not,
+ * meaning the written bytes ran out first (empty: they had already).
+ *
+ * An empty `delim` or a `limit` below 1 traps. */
 pub Result<bytes, Error> Buffer.read_until(bytes delim, int limit) {
     if (delim.size() == 0) {
         trap("read_until: the delimiter is empty");
@@ -874,8 +874,8 @@ pub Result<bytes, Error> Buffer.read_until(bytes delim, int limit) {
         trap("read_until(" + limit.to_str() + "): the limit must be at least 1");
     }
     check_live();
-    // The end of the search, computed by subtracting rather than adding so
-    // that a limit near the largest int cannot overflow on the way.
+    /* The end of the search, computed by subtracting rather than adding so
+     * that a limit near the largest int cannot overflow on the way. */
     int stop = buffer.size();
     if (stop - position > limit) {
         stop = position + limit;
@@ -886,8 +886,8 @@ pub Result<bytes, Error> Buffer.read_until(bytes delim, int limit) {
     while (scan_index < stop) {
         int octet = buffer[scan_index];
         scan_index = scan_index + 1;
-        // Only a byte that could end the delimiter is worth comparing on,
-        // and only once enough bytes have been taken to hold one.
+        /* Only a byte that could end the delimiter is worth comparing on,
+         * and only once enough bytes have been taken to hold one. */
         if (octet == last && scan_index - delimiter_length >= position && is_ending_at(buffer, scan_index, delim)) {
             break;
         }
@@ -898,12 +898,12 @@ pub Result<bytes, Error> Buffer.read_until(bytes delim, int limit) {
     return Result<bytes, Error>.Ok(out);
 }
 
-/// Append all of `data`, returning its size. It cannot fail.
-///
-/// `Stream`'s warning about a failed `write` -- an unknown amount written,
-/// close it -- is therefore about a case that cannot arise here. That is a
-/// property of a `Buffer` and not of the contract: a caller holding a
-/// `Stream` still has to assume the worst.
+/** Append all of `data`, returning its size. It cannot fail.
+ *
+ * `Stream`'s warning about a failed `write` -- an unknown amount written,
+ * close it -- is therefore about a case that cannot arise here. That is a
+ * property of a `Buffer` and not of the contract: a caller holding a
+ * `Stream` still has to assume the worst. */
 pub Result<int, Error> Buffer.write(bytes data) {
     if (!is_live) {
         trap("write on a closed buffer");
@@ -912,17 +912,17 @@ pub Result<int, Error> Buffer.write(bytes data) {
     return Result<int, Error>.Ok(data.size());
 }
 
-/// The same as `write`: memory always takes all of it, so the one attempt
-/// is the whole thing and the answer is `b.size()`.
-///
-/// It is here so that the resync loop in `File.write_some`'s docs is one
-/// piece of code, whichever of the three writable types it is handed --
-/// that loop over a `Buffer` runs exactly once and never fails, which is
-/// what standing in for a file in a test is supposed to look like.
-///
-/// Written out rather than calling `write`, because a bare `write(b)` here
-/// could mean this type's method or the module's `io.write(path, data)`,
-/// which the language refuses as ambiguous.
+/** The same as `write`: memory always takes all of it, so the one attempt
+ * is the whole thing and the answer is `b.size()`.
+ *
+ * It is here so that the resync loop in `File.write_some`'s docs is one
+ * piece of code, whichever of the three writable types it is handed --
+ * that loop over a `Buffer` runs exactly once and never fails, which is
+ * what standing in for a file in a test is supposed to look like.
+ *
+ * Written out rather than calling `write`, because a bare `write(b)` here
+ * could mean this type's method or the module's `io.write(path, data)`,
+ * which the language refuses as ambiguous. */
 pub Result<int, Error> Buffer.write_some(bytes data) {
     if (!is_live) {
         trap("write on a closed buffer");
@@ -937,27 +937,27 @@ pub int Buffer.size() {
     return buffer.size() - position;
 }
 
-/// Those bytes, without consuming them: `read_all` without the reading.
-///
-/// A copy, so that holding it does not pin the `Buffer`'s own storage and
-/// changing it does not change the `Buffer`.
-///
-/// Oro spells this `bytes()` (its reference §5.13) and this language cannot:
-/// `bytes` is a type keyword (§3.10), so `b.bytes()` does not parse.
+/** Those bytes, without consuming them: `read_all` without the reading.
+ *
+ * A copy, so that holding it does not pin the `Buffer`'s own storage and
+ * changing it does not change the `Buffer`.
+ *
+ * Oro spells this `bytes()` (its reference §5.13) and this language cannot:
+ * `bytes` is a type keyword (§3.10), so `b.bytes()` does not parse. */
 pub bytes Buffer.peek() {
     check_live();
     return buffer.substr(position, buffer.size());
 }
 
-/// Drop what has not been read and mark the `Buffer` closed.
-///
-/// A `Buffer` holds no descriptor, so there is nothing a close has to
-/// release -- but `Stream` has `close()`, because a `File` and a socket do,
-/// and a stream whose close a caller must skip would not be interchangeable
-/// with one whose close it must not. So it does the one thing a close can
-/// still mean here: the storage goes now rather than when the last
-/// reference does. Closing twice is not an error; any other use of a closed
-/// `Buffer` traps, as on a `File`.
+/** Drop what has not been read and mark the `Buffer` closed.
+ *
+ * A `Buffer` holds no descriptor, so there is nothing a close has to
+ * release -- but `Stream` has `close()`, because a `File` and a socket do,
+ * and a stream whose close a caller must skip would not be interchangeable
+ * with one whose close it must not. So it does the one thing a close can
+ * still mean here: the storage goes now rather than when the last
+ * reference does. Closing twice is not an error; any other use of a closed
+ * `Buffer` traps, as on a `File`. */
 pub Result<bool, Error> Buffer.close() {
     if (!is_live) {
         return Result<bool, Error>.Ok(true);
@@ -969,33 +969,33 @@ pub Result<bool, Error> Buffer.close() {
     return Result<bool, Error>.Ok(true);
 }
 
-// Using a closed `Buffer` is a bug in the program, not a failure of the
-// `Buffer` -- the same call `File` makes.
+/* Using a closed `Buffer` is a bug in the program, not a failure of the
+ * `Buffer` -- the same call `File` makes. */
 void Buffer.check_live() {
     if (!is_live) {
         trap("read on a closed buffer");
     }
 }
 
-// Drop the dead prefix once it is worth the move.
-//
-// **The rule: compact when the dead prefix is at least half the buffer.**
-// Reading from the front therefore never copies the remainder -- it only
-// moves `at` -- until half of what is held is dead, and the copy that then
-// runs moves fewer live bytes than the number of bytes read since the last
-// compaction. Charging each moved byte to one of those reads makes reading
-// amortised O(1) a byte, so a loop of small reads over a large `Buffer` is
-// linear in the bytes, not quadratic.
-//
-// The move is `drop_front`, in place: the storage is the one already here,
-// so a compaction costs the memmove and nothing else. It used to be
-// `substr`, which allocated a second buffer the size of what was left and
-// freed the first.
-//
-// Everything read is the case worth its own branch, because it is the shape
-// of every write-then-drain loop: `clear()` keeps the allocation (§3.10),
-// so the next write refills the same storage and the loop copies nothing
-// and allocates nothing, forever.
+/* Drop the dead prefix once it is worth the move.
+ *
+ * **The rule: compact when the dead prefix is at least half the buffer.**
+ * Reading from the front therefore never copies the remainder -- it only
+ * moves `at` -- until half of what is held is dead, and the copy that then
+ * runs moves fewer live bytes than the number of bytes read since the last
+ * compaction. Charging each moved byte to one of those reads makes reading
+ * amortised O(1) a byte, so a loop of small reads over a large `Buffer` is
+ * linear in the bytes, not quadratic.
+ *
+ * The move is `drop_front`, in place: the storage is the one already here,
+ * so a compaction costs the memmove and nothing else. It used to be
+ * `substr`, which allocated a second buffer the size of what was left and
+ * freed the first.
+ *
+ * Everything read is the case worth its own branch, because it is the shape
+ * of every write-then-drain loop: `clear()` keeps the allocation (§3.10),
+ * so the next write refills the same storage and the loop copies nothing
+ * and allocates nothing, forever. */
 void Buffer.compact() {
     int stored_length = buffer.size();
     if (position == 0) {
@@ -1018,29 +1018,29 @@ pub Buffer buffer() {
     return Buffer(none);
 }
 
-/// A `Buffer` holding a copy of `data`, positioned at its first byte: what a
-/// file containing those bytes would read like.
-///
-/// A copy, not `data` itself. A `bytes` is a reference (§3.10), so keeping the
-/// caller's would make two owners of one mutable run: a `push` on their side
-/// would appear in the middle of the `Buffer`, and a compaction on this side
-/// would silently stop it doing so. Which of those a program meets would
-/// depend on how much had been read, and that is not a rule anyone can hold
-/// in their head. `buffer()` then `write(b)` is the same copy written out.
-///
-/// **Two functions rather than one with a default.** An optional parameter
-/// is named at the call (§4.2), so a single `buffer` would be written
-/// `io.buffer(from: b)` -- ceremony around the one argument that is the
-/// whole point of the call. Two names keep both spellings short, and follow
-/// the module's house style of a lowercase function named for what it
-/// returns (`io.stdin`, `date.civil`, `random.seeded`).
+/** A `Buffer` holding a copy of `data`, positioned at its first byte: what a
+ * file containing those bytes would read like.
+ *
+ * A copy, not `data` itself. A `bytes` is a reference (§3.10), so keeping the
+ * caller's would make two owners of one mutable run: a `push` on their side
+ * would appear in the middle of the `Buffer`, and a compaction on this side
+ * would silently stop it doing so. Which of those a program meets would
+ * depend on how much had been read, and that is not a rule anyone can hold
+ * in their head. `buffer()` then `write(b)` is the same copy written out.
+ *
+ * **Two functions rather than one with a default.** An optional parameter
+ * is named at the call (§4.2), so a single `buffer` would be written
+ * `io.buffer(from: b)` -- ceremony around the one argument that is the
+ * whole point of the call. Two names keep both spellings short, and follow
+ * the module's house style of a lowercase function named for what it
+ * returns (`io.stdin`, `date.civil`, `random.seeded`). */
 pub Buffer buffer_of(bytes data) {
     return Buffer(clone(data));
 }
 
-// Whether `suffix` sits in `data` ending just before `end_index`. Written out rather than
-// `b.substr(i - d.size(), i) == d` because that allocates a copy of the
-// window for every byte scanned.
+/* Whether `suffix` sits in `data` ending just before `end_index`. Written out rather than
+ * `b.substr(i - d.size(), i) == d` because that allocates a copy of the
+ * window for every byte scanned. */
 bool is_ending_at(bytes data, int end_index, bytes suffix) {
     int suffix_length = suffix.size();
     for (int offset in 0 .. suffix_length) {
@@ -1056,21 +1056,21 @@ bool is_ending_at(bytes data, int end_index, bytes suffix) {
 pub Result<bytes, Error> read_bytes(str path) {
     File file = open(path)?;
     Result<bytes, Error> got = file.read_all();
-    // Closing a descriptor that was only read cannot lose data, so its
-    // result is not allowed to replace the read's.
+    /* Closing a descriptor that was only read cannot lose data, so its
+     * result is not allowed to replace the read's. */
     Result<bool, Error> closed = file.close();
     return got;
 }
 
-/// The whole file, as text. A file that is not valid UTF-8 is
-/// `Err(InvalidUtf8)`; `read_bytes` reads it anyway.
-///
-/// Text or octets is decided here, at the door, because `bytes.utf8()` is
-/// the language's only way from octets to a `str` and it is strict. That
-/// makes `read` the lower-regret half of a choice the language has not
-/// frozen (reference §3.10): if `str` stays able to hold any bytes, `read`
-/// can later stop checking and no program breaks; if `str` becomes always
-/// valid, a `read` that had never checked would have to start failing.
+/** The whole file, as text. A file that is not valid UTF-8 is
+ * `Err(InvalidUtf8)`; `read_bytes` reads it anyway.
+ *
+ * Text or octets is decided here, at the door, because `bytes.utf8()` is
+ * the language's only way from octets to a `str` and it is strict. That
+ * makes `read` the lower-regret half of a choice the language has not
+ * frozen (reference §3.10): if `str` stays able to hold any bytes, `read`
+ * can later stop checking and no program breaks; if `str` becomes always
+ * valid, a `read` that had never checked would have to start failing. */
 pub Result<str, Error> read(str path) {
     bytes data = read_bytes(path)?;
     match (data.utf8()) {
@@ -1083,8 +1083,8 @@ pub Result<str, Error> read(str path) {
     }
 }
 
-// Open for `flags`, write `data`, close; the close counts, because it is
-// where a delayed write failure surfaces.
+/* Open for `flags`, write `data`, close; the close counts, because it is
+ * where a delayed write failure surfaces. */
 Result<int, Error> write_whole(str path, int flags, str data) {
     int descriptor = __open(path, flags, 0o666);
     if (descriptor < 0) {
@@ -1105,8 +1105,8 @@ Result<int, Error> write_whole(str path, int flags, str data) {
     }
 }
 
-/// Replace the file's contents with `data`, creating it if it is missing.
-/// Returns the number of bytes written.
+/** Replace the file's contents with `data`, creating it if it is missing.
+ * Returns the number of bytes written. */
 pub Result<int, Error> write(str path, str data) {
     return write_whole(path, 0o1 | 0o100 | 0o1000, data);
 }
@@ -1127,34 +1127,34 @@ pub Result<int, Error> write_bytes(str path, bytes data) {
 }
 
 // --- the standard streams --------------------------------------------------
-/// Write a line to standard error. Standard output is flushed first, so the
-/// two interleave in the order the program wrote them. A failure to write
-/// to standard error has nobody left to report to, so it is not reported.
+/** Write a line to standard error. Standard output is flushed first, so the
+ * two interleave in the order the program wrote them. A failure to write
+ * to standard error has nobody left to report to, so it is not reported. */
 pub void eprint(str text) {
     __out_flush();
     Result<int, Error> wrote = write_all_str(2, text + "\n");
 }
 
 // --- over any stream -------------------------------------------------------
-/// Everything left in `source`, written to `destination`; the number of bytes moved.
-///
-/// Neither stream is closed: `copy` did not open them and does not know
-/// whether the caller is finished with them.
-///
-/// **The two failures are not the same failure**, and `Stream` says why. A
-/// read error stops the copy with `source` unmoved -- whatever that read had
-/// taken is back in front of `source`, and everything before it is already in
-/// `destination` -- so a caller that wants to go on may call `copy` again and it
-/// resumes. A write error is the end: an unknown amount of the last chunk
-/// reached `destination`, `destination` is no longer at a place anyone can name, and the
-/// answer is to close it. Both lose the count, because a `Result` carries a
-/// count or a cause and not both; after a read error the count is at least
-/// recoverable (it is what `destination` grew by), and after a write error it is
-/// not, which is the same asymmetry one level down.
-///
-/// 64 KiB a time, the size `File` reads the kernel in: large enough that
-/// the per-call cost disappears, small enough that copying a huge file
-/// does not need a huge allocation. A stream is free to hand back less.
+/** Everything left in `source`, written to `destination`; the number of bytes moved.
+ *
+ * Neither stream is closed: `copy` did not open them and does not know
+ * whether the caller is finished with them.
+ *
+ * **The two failures are not the same failure**, and `Stream` says why. A
+ * read error stops the copy with `source` unmoved -- whatever that read had
+ * taken is back in front of `source`, and everything before it is already in
+ * `destination` -- so a caller that wants to go on may call `copy` again and it
+ * resumes. A write error is the end: an unknown amount of the last chunk
+ * reached `destination`, `destination` is no longer at a place anyone can name, and the
+ * answer is to close it. Both lose the count, because a `Result` carries a
+ * count or a cause and not both; after a read error the count is at least
+ * recoverable (it is what `destination` grew by), and after a write error it is
+ * not, which is the same asymmetry one level down.
+ *
+ * 64 KiB a time, the size `File` reads the kernel in: large enough that
+ * the per-call cost disappears, small enough that copying a huge file
+ * does not need a huge allocation. A stream is free to hand back less. */
 pub Result<int, Error> copy(Stream source, Stream destination) {
     int total = 0;
     while (true) {
@@ -1166,35 +1166,35 @@ pub Result<int, Error> copy(Stream source, Stream destination) {
     }
 }
 
-/// The next line of `stream` without its line ending, or `None` at the end of
-/// the stream. Reads at most `limit` bytes.
-///
-/// A `\r\n` ending comes off whole, so input written on Windows reads the
-/// same, and a last line with no newline is still a line. Text that is not
-/// UTF-8 is `Err(InvalidUtf8)` and not the end of the input: a `Result` has
-/// room to say why it stopped.
-///
-/// **A stream failure part way through a line loses nothing**, because this
-/// is one `read_until` and that is what `read_until` promises: the half
-/// line is back in front of the stream, and calling this again once the
-/// rest has arrived returns the whole line. A line that times out is
-/// therefore a line that is not ready yet, not a line that is gone.
-/// `Err(InvalidUtf8)` is the exception, and the only one: those bytes were
-/// read, they are not text, and there is nowhere to put them back that
-/// would not hand them out again as the same error.
-///
-/// **This is the only line reader.** It reads through the stream's own
-/// buffer, so the next reader of that stream sees what follows the line,
-/// nothing is read twice, and a pipe costs one `read(2)` per buffer rather
-/// than one per byte. The `io.read_line()` that read standard input with no
-/// stream to hold the buffer is gone; `io.stdin()`, called once and kept, is
-/// the stream.
-///
-/// `limit` is mandatory, as it is on `read_until` and for the same reason:
-/// a line that never ends is otherwise a request for all of memory. A line
-/// longer than `limit` comes back in pieces of `limit` bytes, and the piece
-/// that is not the last has no line ending to take off -- so a caller that
-/// must tell a long line from a short one calls `read_until` and looks.
+/** The next line of `stream` without its line ending, or `None` at the end of
+ * the stream. Reads at most `limit` bytes.
+ *
+ * A `\r\n` ending comes off whole, so input written on Windows reads the
+ * same, and a last line with no newline is still a line. Text that is not
+ * UTF-8 is `Err(InvalidUtf8)` and not the end of the input: a `Result` has
+ * room to say why it stopped.
+ *
+ * **A stream failure part way through a line loses nothing**, because this
+ * is one `read_until` and that is what `read_until` promises: the half
+ * line is back in front of the stream, and calling this again once the
+ * rest has arrived returns the whole line. A line that times out is
+ * therefore a line that is not ready yet, not a line that is gone.
+ * `Err(InvalidUtf8)` is the exception, and the only one: those bytes were
+ * read, they are not text, and there is nowhere to put them back that
+ * would not hand them out again as the same error.
+ *
+ * **This is the only line reader.** It reads through the stream's own
+ * buffer, so the next reader of that stream sees what follows the line,
+ * nothing is read twice, and a pipe costs one `read(2)` per buffer rather
+ * than one per byte. The `io.read_line()` that read standard input with no
+ * stream to hold the buffer is gone; `io.stdin()`, called once and kept, is
+ * the stream.
+ *
+ * `limit` is mandatory, as it is on `read_until` and for the same reason:
+ * a line that never ends is otherwise a request for all of memory. A line
+ * longer than `limit` comes back in pieces of `limit` bytes, and the piece
+ * that is not the last has no line ending to take off -- so a caller that
+ * must tell a long line from a short one calls `read_until` and looks. */
 pub Result<Option<str>, Error> read_line_of(Stream stream, int limit) {
     bytes newline = [10];
     bytes got = stream.read_until(newline, limit)?;

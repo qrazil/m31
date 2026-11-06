@@ -1,68 +1,68 @@
-// SSH Phase 3 (`docs/ssh-decision.md`): RFC 4252 publickey authentication
-// with an Ed25519 key, run over a finished transport (`lib/ssh.m31`).
-//
-// API
+/* SSH Phase 3 (`docs/ssh-decision.md`): RFC 4252 publickey authentication
+ * with an Ed25519 key, run over a finished transport (`lib/ssh.m31`).
+ *
+ * API */
 // ---
-//   sshauth.authenticate(link, user, key)  -> Result<str, Error>
-//   sshauth.authenticate_as(link, user, public_blob, signer) -> Result<str, Error>
-//
-// `link` is anything satisfying `ssh.Link` -- in practice an `ssh.Transport`.
-// `key` is an `sshkey.PrivateKey` (any type: ed25519, ECDSA P-256, RSA). `Ok` carries the text of any
-// `SSH_MSG_USERAUTH_BANNER` the server sent along the way ("" if none): a
-// pre-login notice is the server's to show, and this library does not print.
-// The server is trusted only as far as the host-key check the transport
-// already did; nothing here weakens or repeats it.
-//
+/*   sshauth.authenticate(link, user, key)  -> Result<str, Error>
+ *   sshauth.authenticate_as(link, user, public_blob, signer) -> Result<str, Error>
+ *
+ * `link` is anything satisfying `ssh.Link` -- in practice an `ssh.Transport`.
+ * `key` is an `sshkey.PrivateKey` (any type: ed25519, ECDSA P-256, RSA). `Ok` carries the text of any
+ * `SSH_MSG_USERAUTH_BANNER` the server sent along the way ("" if none): a
+ * pre-login notice is the server's to show, and this library does not print.
+ * The server is trusted only as far as the host-key check the transport
+ * already did; nothing here weakens or repeats it.
+ * */
 // --- the exchange (RFC 4252 §5, §7) -----------------------------------------
-//
-//   C: SSH_MSG_SERVICE_REQUEST "ssh-userauth"     S: SSH_MSG_SERVICE_ACCEPT
-//   C: USERAUTH_REQUEST user "ssh-connection" "publickey" FALSE alg blob
-//   S: USERAUTH_PK_OK alg blob          (the key is acceptable)
-//      or USERAUTH_FAILURE              (it is not: unknown user, key not
-//                                        authorized, method not offered)
-//   C: USERAUTH_REQUEST ... "publickey" TRUE alg blob signature
-//   S: USERAUTH_SUCCESS  or  USERAUTH_FAILURE (the signature was refused)
-//
-// The first request asks without signing -- RFC 4252 §7's own probe, which
-// is what makes `PK_OK` a message this client really receives, and splits a
-// refused key (`Error.KeyRejected`: nothing was signed or proven) from a
-// refused signature (`Error.AuthFailed`). `SSH_MSG_USERAUTH_BANNER` may
-// arrive at any point before the end and is collected, never mistaken for an
-// answer. The signature covers (§7) `string session_id || byte 50 || string
-// user || string "ssh-connection" || string "publickey" || boolean TRUE ||
-// string "ssh-ed25519" || string public_key_blob`, so it cannot be replayed
-// on another connection (the session id is this connection's exchange hash)
-// or for another user. For ECDSA the algorithm name is the key type; for RSA
-// the key type is `ssh-rsa` and the algorithm the SHA-2 signature name
-// (`rsa-sha2-512`, then `rsa-sha2-256`): never `ssh-rsa`, whose signature is
-// SHA-1. `try_key` takes the algorithm to name.
-//
-// A server that wants more than one method (`partial success`) cannot be
-// satisfied by a publickey-only client: that too is `Error.AuthFailed`.
+/*
+ *   C: SSH_MSG_SERVICE_REQUEST "ssh-userauth"     S: SSH_MSG_SERVICE_ACCEPT
+ *   C: USERAUTH_REQUEST user "ssh-connection" "publickey" FALSE alg blob
+ *   S: USERAUTH_PK_OK alg blob          (the key is acceptable)
+ *      or USERAUTH_FAILURE              (it is not: unknown user, key not
+ *                                        authorized, method not offered)
+ *   C: USERAUTH_REQUEST ... "publickey" TRUE alg blob signature
+ *   S: USERAUTH_SUCCESS  or  USERAUTH_FAILURE (the signature was refused)
+ *
+ * The first request asks without signing -- RFC 4252 §7's own probe, which
+ * is what makes `PK_OK` a message this client really receives, and splits a
+ * refused key (`Error.KeyRejected`: nothing was signed or proven) from a
+ * refused signature (`Error.AuthFailed`). `SSH_MSG_USERAUTH_BANNER` may
+ * arrive at any point before the end and is collected, never mistaken for an
+ * answer. The signature covers (§7) `string session_id || byte 50 || string
+ * user || string "ssh-connection" || string "publickey" || boolean TRUE ||
+ * string "ssh-ed25519" || string public_key_blob`, so it cannot be replayed
+ * on another connection (the session id is this connection's exchange hash)
+ * or for another user. For ECDSA the algorithm name is the key type; for RSA
+ * the key type is `ssh-rsa` and the algorithm the SHA-2 signature name
+ * (`rsa-sha2-512`, then `rsa-sha2-256`): never `ssh-rsa`, whose signature is
+ * SHA-1. `try_key` takes the algorithm to name.
+ *
+ * A server that wants more than one method (`partial success`) cannot be
+ * satisfied by a publickey-only client: that too is `Error.AuthFailed`. */
 
 import ssh;
 import ssh.sshkey;
 
 /// Why authentication did not complete.
 pub enum Error {
-    /// The transport failed underneath (a reset, a MAC failure, a
-    /// disconnect); the `ssh.Error` says which.
+    /** The transport failed underneath (a reset, a MAC failure, a
+     * disconnect); the `ssh.Error` says which. */
     Transport(ssh.Error);
     /// A server message named more bytes than it held.
     Truncated;
-    /// A message type that cannot appear at this step (including a
-    /// `SERVICE_ACCEPT` for some other service, or too many banners).
+    /** A message type that cannot appear at this step (including a
+     * `SERVICE_ACCEPT` for some other service, or too many banners). */
     UnexpectedMessage;
-    /// A message arrived with the right type but a wrong content: a `PK_OK`
-    /// for a different key than the one offered, or a banner that is not
-    /// UTF-8.
+    /** A message arrived with the right type but a wrong content: a `PK_OK`
+     * for a different key than the one offered, or a banner that is not
+     * UTF-8. */
     BadMessage;
-    /// The server answered the unsigned probe with `USERAUTH_FAILURE`: it
-    /// does not accept this key for this user (unknown user, key not in
-    /// `authorized_keys`, or publickey not offered). Nothing was signed.
+    /** The server answered the unsigned probe with `USERAUTH_FAILURE`: it
+     * does not accept this key for this user (unknown user, key not in
+     * `authorized_keys`, or publickey not offered). Nothing was signed. */
     KeyRejected;
-    /// The server answered the signed request with `USERAUTH_FAILURE`, or
-    /// asked for a further method this client does not have.
+    /** The server answered the signed request with `USERAUTH_FAILURE`, or
+     * asked for a further method this client does not have. */
     AuthFailed;
     /// The signer (an ssh-agent) could not produce a signature.
     SignerFailed;
@@ -103,12 +103,12 @@ const str SERVICE_NAME = "ssh-userauth";
 const str CONNECTION_SERVICE = "ssh-connection";
 const str METHOD = "publickey";
 const str KEY_ALGO = "ssh-ed25519";
-/// More banners than this in one authentication is a server playing games,
-/// not a notice.
+/** More banners than this in one authentication is a server playing games,
+ * not a notice. */
 const int MAX_BANNERS = 32;
-/// The pre-authentication text kept, in bytes: the rest is dropped (OpenSSH
-/// shows a few KB at most), so a hostile server cannot make the client spend
-/// time or memory on it.
+/** The pre-authentication text kept, in bytes: the rest is dropped (OpenSSH
+ * shows a few KB at most), so a hostile server cannot make the client spend
+ * time or memory on it. */
 const int MAX_BANNER_BYTES = 16384;
 
 // --- Part 0: message builders (pure) ----------------------------------------
@@ -121,8 +121,8 @@ pub bytes build_service_request() {
     return out;
 }
 
-// The body every `publickey` request shares, up to and including the key
-// blob (RFC 4252 §7), with `has_signature` as the boolean.
+/* The body every `publickey` request shares, up to and including the key
+ * blob (RFC 4252 §7), with `has_signature` as the boolean. */
 bytes request_prefix(str user, bool has_signature, str algorithm, bytes public_blob) {
     bytes out = [];
     out.push(SSH_MESSAGE_USERAUTH_REQUEST);
@@ -139,21 +139,21 @@ bytes request_prefix(str user, bool has_signature, str algorithm, bytes public_b
     return out;
 }
 
-/// The unsigned probe: "would you accept this key for this user?"
-/// (`ssh-ed25519`.)
+/** The unsigned probe: "would you accept this key for this user?"
+ * (`ssh-ed25519`.) */
 pub bytes build_query(str user, bytes public_blob) {
     return build_query_for(user, KEY_ALGO, public_blob);
 }
 
-/// The probe for any signature `algorithm` (the name that goes in the
-/// request: `ssh-ed25519`, `ecdsa-sha2-nistp256`, `rsa-sha2-512`, ...).
+/** The probe for any signature `algorithm` (the name that goes in the
+ * request: `ssh-ed25519`, `ecdsa-sha2-nistp256`, `rsa-sha2-512`, ...). */
 pub bytes build_query_for(str user, str algorithm, bytes public_blob) {
     return request_prefix(user, false, algorithm, public_blob);
 }
 
-/// What the signature covers (RFC 4252 §7): the session id as a `string`,
-/// then the signed request's body without the signature itself.
-/// (`ssh-ed25519`.)
+/** What the signature covers (RFC 4252 §7): the session id as a `string`,
+ * then the signed request's body without the signature itself.
+ * (`ssh-ed25519`.) */
 pub bytes signature_data(bytes session_id, str user, bytes public_blob) {
     return signature_data_for(session_id, user, KEY_ALGO, public_blob);
 }
@@ -165,8 +165,8 @@ pub bytes signature_data_for(bytes session_id, str user, str algorithm, bytes pu
     return out;
 }
 
-/// The signed request: the same fields as the probe with the boolean set,
-/// followed by the signature blob as one more `string`. (`ssh-ed25519`.)
+/** The signed request: the same fields as the probe with the boolean set,
+ * followed by the signature blob as one more `string`. (`ssh-ed25519`.) */
 pub bytes build_signed_request(str user, bytes public_blob, bytes signature_blob) {
     return build_signed_request_for(user, KEY_ALGO, public_blob, signature_blob);
 }
@@ -196,8 +196,8 @@ pub Result<Failure, Error> parse_failure(bytes payload) {
     return Result<Failure, Error>.Ok(Failure(names.names, payload[names.next] != 0));
 }
 
-/// `USERAUTH_BANNER`: the message text (UTF-8). The language tag after it is
-/// parsed for bounds and dropped.
+/** `USERAUTH_BANNER`: the message text (UTF-8). The language tag after it is
+ * parsed for bounds and dropped. */
 pub Result<str, Error> parse_banner(bytes payload) {
     if (payload.size() < 1 || payload[0] != SSH_MESSAGE_USERAUTH_BANNER) {
         return Result<str, Error>.Err(Error.UnexpectedMessage);
@@ -214,8 +214,8 @@ pub Result<str, Error> parse_banner(bytes payload) {
     }
 }
 
-/// `USERAUTH_PK_OK`: it must echo the algorithm and key blob that were
-/// offered, byte for byte.
+/** `USERAUTH_PK_OK`: it must echo the algorithm and key blob that were
+ * offered, byte for byte. */
 pub Result<bool, Error> parse_pk_ok(bytes payload, bytes public_blob) {
     return parse_pk_ok_for(payload, KEY_ALGO, public_blob);
 }
@@ -290,9 +290,9 @@ Result<bytes, Error> recv_message(ssh.Link link) {
     }
 }
 
-/// Something that can sign the authentication data for one public key: a
-/// loaded `sshkey.PrivateKey` (through `KeySigner`), or an ssh-agent
-/// (`sshagent.AgentSigner`). `Err` carries a short reason with no secret in it.
+/** Something that can sign the authentication data for one public key: a
+ * loaded `sshkey.PrivateKey` (through `KeySigner`), or an ssh-agent
+ * (`sshagent.AgentSigner`). `Err` carries a short reason with no secret in it. */
 pub interface Signer {
     Result<bytes, str> sign_blob(bytes message, str algorithm);
 }
@@ -306,17 +306,17 @@ pub Result<bytes, str> KeySigner.sign_blob(bytes message, str algorithm) {
     return key.signature_blob_for(algorithm, message);
 }
 
-/// Authenticates as `user` with `key` over `link`. `Ok` is the server's
-/// banner text, possibly empty.
+/** Authenticates as `user` with `key` over `link`. `Ok` is the server's
+ * banner text, possibly empty. */
 pub Result<str, Error> authenticate(ssh.Link link, str user, sshkey.PrivateKey key) {
     start(link)?;
     return try_key(link, user, key.signature_algorithms()[0], key.public_blob(), KeySigner(key));
 }
 
-/// As `authenticate`, but the key blob announced (and echoed back in the
-/// signed data) is `public_blob`, signed by `signer`. `authenticate` passes
-/// the signer's own public blob; the two differ only in a test that proves a
-/// signature by the wrong key is refused.
+/** As `authenticate`, but the key blob announced (and echoed back in the
+ * signed data) is `public_blob`, signed by `signer`. `authenticate` passes
+ * the signer's own public blob; the two differ only in a test that proves a
+ * signature by the wrong key is refused. */
 pub Result<str, Error> authenticate_as(ssh.Link link, str user, bytes public_blob, sshkey.PrivateKey signer) {
     start(link)?;
     return try_key(link, user, KEY_ALGO, public_blob, KeySigner(signer));
@@ -330,10 +330,10 @@ pub Result<void, Error> start(ssh.Link link) {
     return Result<void, Error>.Ok;
 }
 
-/// Tries one identity: probe, then sign and send. `Ok(banner)` is success;
-/// `Err(KeyRejected)` means the server does not accept this key and the
-/// caller may `try_key` another over the same link (nothing was signed);
-/// `Err(AuthFailed)` means the server refused the signature.
+/** Tries one identity: probe, then sign and send. `Ok(banner)` is success;
+ * `Err(KeyRejected)` means the server does not accept this key and the
+ * caller may `try_key` another over the same link (nothing was signed);
+ * `Err(AuthFailed)` means the server refused the signature. */
 pub Result<str, Error> try_key(ssh.Link link, str user, str algorithm, bytes public_blob, Signer signer) {
     send_message(link, build_query_for(user, algorithm, public_blob))?;
     str banner = "";

@@ -1,38 +1,38 @@
-// Which hardware kernels this process may call, decided in the language.
-//
-// The crypto modules each carry a portable implementation written in m31 and,
-// beside it, assembly kernels (runtime/crypto_*.S) reached through
-// `prim "c"` declarations (docs/ffi-decision.md). A kernel is called only
-// when `features()` says its bit is set; otherwise the m31 code does the work,
-// and produces the same bytes (tests/cryptodiff runs both).
-//
-//   if ((accel.features() & accel.AES) != 0) { ... kernel ... } else { ... }
-//
-// How the set is found:
-//
-//   x86-64          `cpuid`, through an assembly function that writes the four
-//                   registers into a `bytes`.
-//   aarch64 Linux   `AT_HWCAP` from /proc/self/auxv, read with the file API
-//                   (what `getauxval` returns). Without /proc only the
-//                   kernels that need no extension (NEON, integer unit) run.
-//   aarch64 macOS   A static assumption: every Apple arm64 CPU (M1 and later)
-//                   has AES, PMULL, SHA-1 and SHA-256, so none is asked.
-//                   `M31_CRYPTO_ACCEL=off` is the way out. (Asking would need
-//                   an assembly adapter for `sysctlbyname`, which cannot be
-//                   assembled or run on any machine this was written on.)
-//   anything else   no kernels: `__k_platform` answers -1 ("absent").
-//
-// `M31_CRYPTO_ACCEL` is the switch for tests and for anyone who wants the
-// portable code: `off` (or `0`) disables every kernel; otherwise a comma list
-// of `-aes`, `-sha256`, `-sha512`, `-sha1`, `-chacha`, `-poly`, `-fe` disables
-// just those.
-//
-// The answer is computed once per process and kept in one word of the
-// runtime, written by `__k_cache_store`: a module may not have mutable state
-// of its own (docs/module-state-decision.md), and `cpuid` traps to the
-// hypervisor on a virtual machine, so asking on every call is not an option.
-// Two threads that both find the word empty both compute and store the same
-// value, which is harmless.
+/* Which hardware kernels this process may call, decided in the language.
+ *
+ * The crypto modules each carry a portable implementation written in m31 and,
+ * beside it, assembly kernels (runtime/crypto_*.S) reached through
+ * `prim "c"` declarations (docs/ffi-decision.md). A kernel is called only
+ * when `features()` says its bit is set; otherwise the m31 code does the work,
+ * and produces the same bytes (tests/cryptodiff runs both).
+ *
+ *   if ((accel.features() & accel.AES) != 0) { ... kernel ... } else { ... }
+ *
+ * How the set is found:
+ *
+ *   x86-64          `cpuid`, through an assembly function that writes the four
+ *                   registers into a `bytes`.
+ *   aarch64 Linux   `AT_HWCAP` from /proc/self/auxv, read with the file API
+ *                   (what `getauxval` returns). Without /proc only the
+ *                   kernels that need no extension (NEON, integer unit) run.
+ *   aarch64 macOS   A static assumption: every Apple arm64 CPU (M1 and later)
+ *                   has AES, PMULL, SHA-1 and SHA-256, so none is asked.
+ *                   `M31_CRYPTO_ACCEL=off` is the way out. (Asking would need
+ *                   an assembly adapter for `sysctlbyname`, which cannot be
+ *                   assembled or run on any machine this was written on.)
+ *   anything else   no kernels: `__k_platform` answers -1 ("absent").
+ *
+ * `M31_CRYPTO_ACCEL` is the switch for tests and for anyone who wants the
+ * portable code: `off` (or `0`) disables every kernel; otherwise a comma list
+ * of `-aes`, `-sha256`, `-sha512`, `-sha1`, `-chacha`, `-poly`, `-fe` disables
+ * just those.
+ *
+ * The answer is computed once per process and kept in one word of the
+ * runtime, written by `__k_cache_store`: a module may not have mutable state
+ * of its own (docs/module-state-decision.md), and `cpuid` traps to the
+ * hypervisor on a virtual machine, so asking on every call is not an option.
+ * Two threads that both find the word empty both compute and store the same
+ * value, which is harmless. */
 import io;
 import os;
 
@@ -50,11 +50,11 @@ const int COMPUTED = 128;
 const int PLATFORM_X86_64 = 1;
 const int PLATFORM_AARCH64_LINUX = 2;
 const int PLATFORM_AARCH64_APPLE = 3;
-// What needs no CPU extension on an architecture that has the kernels: the
-// integer unit and SSE2 / NEON, present on every x86-64 and aarch64 CPU.
+/* What needs no CPU extension on an architecture that has the kernels: the
+ * integer unit and SSE2 / NEON, present on every x86-64 and aarch64 CPU. */
 const int ALWAYS = 4 | 8 | 16 | 64;
-// Linux's auxiliary vector (include/uapi/linux/auxvec.h) and the arm64 HWCAP
-// bits (arch/arm64/include/uapi/asm/hwcap.h).
+/* Linux's auxiliary vector (include/uapi/linux/auxvec.h) and the arm64 HWCAP
+ * bits (arch/arm64/include/uapi/asm/hwcap.h). */
 const int AT_HWCAP = 16;
 const int HWCAP_AES = 8;
 const int HWCAP_PMULL = 16;
@@ -70,12 +70,12 @@ prim "c" nonblocking int __k_cache_load();
 prim "c" nonblocking void __k_cache_store(
     int value);
 
-/// The kernels this process may call, as a set of the bits above. Computed
-/// on the first call, then one word read.
+/** The kernels this process may call, as a set of the bits above. Computed
+ * on the first call, then one word read. */
 pub int features() {
     int cached = __k_cache_load();
-    // -1 is what any `int` kernel answers on a target that has none (macOS
-    // by default, docs/ffi-decision.md): no kernels, and nothing to store.
+    /* -1 is what any `int` kernel answers on a target that has none (macOS
+     * by default, docs/ffi-decision.md): no kernels, and nothing to store. */
     if (cached < 0) {
         return 0;
     }
@@ -145,8 +145,8 @@ bytes auxv() {
     }
 }
 
-/// `AT_HWCAP` out of an auxiliary vector: pairs of little-endian 64-bit
-/// words, `(type, value)`, ended by type 0. 0 if there is none.
+/** `AT_HWCAP` out of an auxiliary vector: pairs of little-endian 64-bit
+ * words, `(type, value)`, ended by type 0. 0 if there is none. */
 pub int hwcap_of_auxv(bytes vector) {
     int position = 0;
     while (position + 16 <= vector.size()) {

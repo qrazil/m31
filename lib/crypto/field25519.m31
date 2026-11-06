@@ -1,69 +1,69 @@
-// Arithmetic in GF(2^255 - 19), the base field Curve25519 (RFC 7748) and
-// edwards25519 (RFC 8032) both share. Shared by `x25519` and `ed25519`.
-//
-// This module is the SECURITY-CRITICAL core of both: every operation here
-// runs on secret data at some point (an X25519 ladder step, an Ed25519
-// signing scalar multiplication), so every place this file relies on
-// something being constant-time says so, in a comment, at the line that
-// relies on it. Read that before changing anything below.
-//
+/* Arithmetic in GF(2^255 - 19), the base field Curve25519 (RFC 7748) and
+ * edwards25519 (RFC 8032) both share. Shared by `x25519` and `ed25519`.
+ *
+ * This module is the SECURITY-CRITICAL core of both: every operation here
+ * runs on secret data at some point (an X25519 ladder step, an Ed25519
+ * signing scalar multiplication), so every place this file relies on
+ * something being constant-time says so, in a comment, at the line that
+ * relies on it. Read that before changing anything below.
+ * */
 // --- representation: 10 limbs, radix 2^25.5 -----------------------------------
-//
-// A field element is an `Array<int>` of 10 signed limbs, value = sum of
-// `limb[i] * 2^e(i)` with e(i) = ceil(25.5 * i) (weights 2^0, 2^26, 2^51,
-// 2^77, 2^102, 2^128, 2^153, 2^179, 2^204, 2^230): even limbs carry 26 bits,
-// odd limbs 25. This is the layout of Bernstein et al.'s `ref10` and of
-// `curve25519-donna`'s 32-bit code: a product of two limbs is under 2^53 and
-// a whole column of ten of them, with the wrap-around factor 19 folded in,
-// stays under 2^61 -- inside `int`'s 2^63 trap threshold, so the
-// multiplication needs no 128-bit arithmetic. (An earlier version of this file
-// used 16 limbs of 16 bits: 256 partial products per multiplication instead of
-// 100, three allocating carry passes, and about 15 times the running time --
-// docs/CRYPTO-PERF.md.)
-//
-// Every function returns a CARRIED element: limbs balanced around zero, each
-// within about 2^25 (even) or 2^24 (odd) in magnitude. `add` and `sub` carry
-// too, so there is one invariant -- every input and every output is carried --
-// and the bound on `mul`'s partial products below always holds.
-//
+/*
+ * A field element is an `Array<int>` of 10 signed limbs, value = sum of
+ * `limb[i] * 2^e(i)` with e(i) = ceil(25.5 * i) (weights 2^0, 2^26, 2^51,
+ * 2^77, 2^102, 2^128, 2^153, 2^179, 2^204, 2^230): even limbs carry 26 bits,
+ * odd limbs 25. This is the layout of Bernstein et al.'s `ref10` and of
+ * `curve25519-donna`'s 32-bit code: a product of two limbs is under 2^53 and
+ * a whole column of ten of them, with the wrap-around factor 19 folded in,
+ * stays under 2^61 -- inside `int`'s 2^63 trap threshold, so the
+ * multiplication needs no 128-bit arithmetic. (An earlier version of this file
+ * used 16 limbs of 16 bits: 256 partial products per multiplication instead of
+ * 100, three allocating carry passes, and about 15 times the running time --
+ * docs/CRYPTO-PERF.md.)
+ *
+ * Every function returns a CARRIED element: limbs balanced around zero, each
+ * within about 2^25 (even) or 2^24 (odd) in magnitude. `add` and `sub` carry
+ * too, so there is one invariant -- every input and every output is carried --
+ * and the bound on `mul`'s partial products below always holds.
+ * */
 // --- constant time: what this file promises, and how ------------------------
-//
-//   - No comparison, `if`, `while` condition or array index in this file
-//     ever depends on a field element's value. Every loop bound is a fixed
-//     count; every `Array` index is a loop counter or a constant.
-//
-//   - Carries are `(limb + half) >> width`: an ARITHMETIC right shift of a
-//     value that really can be negative. The runtime's `>>` (runtime/rt.h,
-//     `rt_ishr`) does the sign extension with arithmetic on the sign bit, not
-//     a branch (an earlier version of the runtime branched on the sign, which
-//     is why this module used to add a public bias before every shift; it no
-//     longer needs to). The shift counts are public constants.
-//
-//   - `+ - *` on `int` trap on overflow (reference §6.1) via a branch on the
-//     CPU's overflow flag. That branch's OUTCOME never depends on secret
-//     data, because every bound in this file keeps every intermediate value
-//     far below 2^63 -- the check always takes the same "did not overflow"
-//     path, so it carries no information about which secret input it was.
-//
-//   - `& | ^ ~` never trap and compile to plain unconditional operators --
-//     the operations `cselect` and `cswap` are built from.
-//
-// What this file does NOT independently verify: that gcc/clang, across every
-// version and -O level, emit branch-free machine code for the overflow-checked
-// arithmetic and the masked `cselect` pattern. This file does the one thing
-// under its own control -- never write a branch, a comparison or an index
-// that depends on a field element -- and no more than that.
+/*
+ *   - No comparison, `if`, `while` condition or array index in this file
+ *     ever depends on a field element's value. Every loop bound is a fixed
+ *     count; every `Array` index is a loop counter or a constant.
+ *
+ *   - Carries are `(limb + half) >> width`: an ARITHMETIC right shift of a
+ *     value that really can be negative. The runtime's `>>` (runtime/rt.h,
+ *     `rt_ishr`) does the sign extension with arithmetic on the sign bit, not
+ *     a branch (an earlier version of the runtime branched on the sign, which
+ *     is why this module used to add a public bias before every shift; it no
+ *     longer needs to). The shift counts are public constants.
+ *
+ *   - `+ - *` on `int` trap on overflow (reference §6.1) via a branch on the
+ *     CPU's overflow flag. That branch's OUTCOME never depends on secret
+ *     data, because every bound in this file keeps every intermediate value
+ *     far below 2^63 -- the check always takes the same "did not overflow"
+ *     path, so it carries no information about which secret input it was.
+ *
+ *   - `& | ^ ~` never trap and compile to plain unconditional operators --
+ *     the operations `cselect` and `cswap` are built from.
+ *
+ * What this file does NOT independently verify: that gcc/clang, across every
+ * version and -O level, emit branch-free machine code for the overflow-checked
+ * arithmetic and the masked `cselect` pattern. This file does the one thing
+ * under its own control -- never write a branch, a comparison or an index
+ * that depends on a field element -- and no more than that. */
 
 import crypto.accel;
 
-// The hardware field kernels (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md):
-// assembly in runtime/crypto_*.S that does `mul`, `add` and `sub` below
-// instruction for instruction (ref10's multiply and carry chain), so the limbs
-// that come back are identical to the m31 code's. Each takes ten-limb elements
-// as `Array<int>` spans, checked by the compiler; `result` may be `left` or
-// `right`. They run unless `M31_CRYPTO_ACCEL` has switched them off
-// (`accel.features()`), and then the m31 code runs. Straight-line, no table,
-// no branch: the constant-time argument above carries over unchanged.
+/* The hardware field kernels (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md):
+ * assembly in runtime/crypto_*.S that does `mul`, `add` and `sub` below
+ * instruction for instruction (ref10's multiply and carry chain), so the limbs
+ * that come back are identical to the m31 code's. Each takes ten-limb elements
+ * as `Array<int>` spans, checked by the compiler; `result` may be `left` or
+ * `right`. They run unless `M31_CRYPTO_ACCEL` has switched them off
+ * (`accel.features()`), and then the m31 code runs. Straight-line, no table,
+ * no branch: the constant-time argument above carries over unchanged. */
 prim "c" nonblocking void __k_fe_mul(
     out Array<int> result[0 .. 10],
     in Array<int> left[0 .. 10],
@@ -91,24 +91,24 @@ pub Array<int> one() {
     return out;
 }
 
-/// The element `number` names, for the handful of small constants the curves need
-/// (486662's Montgomery `(A-2)/4`, the `2*d` of the twisted Edwards curve, ...).
-/// `number` must be below 2^26, which is every constant this module is ever
-/// asked to build.
+/** The element `number` names, for the handful of small constants the curves need
+ * (486662's Montgomery `(A-2)/4`, the `2*d` of the twisted Edwards curve, ...).
+ * `number` must be below 2^26, which is every constant this module is ever
+ * asked to build. */
 pub Array<int> small(int number) {
     Array<int> out = [0; 10];
     out[0] = number;
     return out;
 }
 
-/// The field element 32 little-endian octets encode, taken as a raw 256-bit
-/// load with NO masking of any bit (the result is carried, so a value at or
-/// above p is accepted and simply represents itself mod p).
-///
-/// Both RFC 7748 (the u-coordinate's top bit) and RFC 8032 (the sign bit
-/// riding on the y-coordinate's encoding) reserve the top bit of the last
-/// octet for something that is not field data; masking it off is the
-/// caller's job, on the raw bytes, before this function ever sees them.
+/** The field element 32 little-endian octets encode, taken as a raw 256-bit
+ * load with NO masking of any bit (the result is carried, so a value at or
+ * above p is accepted and simply represents itself mod p).
+ *
+ * Both RFC 7748 (the u-coordinate's top bit) and RFC 8032 (the sign bit
+ * riding on the y-coordinate's encoding) reserve the top bit of the last
+ * octet for something that is not field data; masking it off is the
+ * caller's job, on the raw bytes, before this function ever sees them. */
 pub Array<int> from_bytes(bytes encoded) {
     int h_0 = (encoded[0] | (encoded[1] << 8) | (encoded[2] << 16) | (encoded[3] << 24) | (encoded[4] << 32)) >> 0 & 0x3ffffff;
     int h_1 = (encoded[3] | (encoded[4] << 8) | (encoded[5] << 16) | (encoded[6] << 24) | (encoded[7] << 32)) >> 2 & 0x1ffffff;
@@ -170,13 +170,13 @@ pub Array<int> from_bytes(bytes encoded) {
     return out;
 }
 
-/// `element`, canonically reduced to `[0, p)` and packed as 32 little-endian
-/// octets -- the encoding RFC 7748 and RFC 8032 both specify. (ref10's
-/// `fe_tobytes`: find the quotient q in {0, 1} of the value by p with a chain
-/// of carries, add 19 * q, carry again and drop bit 255.)
-///
-/// This runs on secret data (an X25519 shared secret, an Ed25519 nonce
-/// point); its constant-time argument is the header's.
+/** `element`, canonically reduced to `[0, p)` and packed as 32 little-endian
+ * octets -- the encoding RFC 7748 and RFC 8032 both specify. (ref10's
+ * `fe_tobytes`: find the quotient q in {0, 1} of the value by p with a chain
+ * of carries, add 19 * q, carry again and drop bit 255.)
+ *
+ * This runs on secret data (an X25519 shared secret, an Ed25519 nonce
+ * point); its constant-time argument is the header's. */
 pub bytes to_bytes(Array<int> element) {
     int h_0 = element[0];
     int h_1 = element[1];
@@ -394,13 +394,13 @@ pub Array<int> neg(Array<int> element) {
     return sub(zero(), element);
 }
 
-/// `left * right`, carried. Ten limbs by ten: each product `f_i * g_j` lands in
-/// limb `(i + j) % 10`, doubled when both `i` and `j` are odd (two half-bit
-/// radix steps make a whole bit: 2^e(i) * 2^e(j) = 2 * 2^e(i + j) there) and
-/// times 19 when `i + j >= 10` (2^255 = 19 mod p). Bound: carried inputs are
-/// at most 2^26 in magnitude, so `19 * g` is under 2^31, `2 * f` under 2^27, a
-/// product under 2^58, and a column of ten under 2^62 -- the overflow
-/// check cannot fire on any legal input.
+/** `left * right`, carried. Ten limbs by ten: each product `f_i * g_j` lands in
+ * limb `(i + j) % 10`, doubled when both `i` and `j` are odd (two half-bit
+ * radix steps make a whole bit: 2^e(i) * 2^e(j) = 2 * 2^e(i + j) there) and
+ * times 19 when `i + j >= 10` (2^255 = 19 mod p). Bound: carried inputs are
+ * at most 2^26 in magnitude, so `19 * g` is under 2^31, `2 * f` under 2^27, a
+ * product under 2^58, and a column of ten under 2^62 -- the overflow
+ * check cannot fire on any legal input. */
 pub void mul_into(Array<int> out, Array<int> left, Array<int> right) {
     if ((accel.features() & accel.FIELD) != 0) {
         __k_fe_mul(out, left, right);
@@ -513,9 +513,9 @@ pub void square_into(Array<int> out, Array<int> element) {
     mul_into(out, element, element);
 }
 
-/// `2*a*a` -- the extended-coordinates addition law wants this exact shape
-/// as its own step often enough (`ed25519.m31`) to give it a name; it is
-/// `add(sq(a), sq(a))` and nothing more.
+/** `2*a*a` -- the extended-coordinates addition law wants this exact shape
+ * as its own step often enough (`ed25519.m31`) to give it a name; it is
+ * `add(sq(a), sq(a))` and nothing more. */
 pub Array<int> sq2(Array<int> element) {
     Array<int> squared = square(element);
     return add(squared, squared);
@@ -523,16 +523,16 @@ pub Array<int> sq2(Array<int> element) {
 
 // --- constant-time selection -------------------------------------------------
 
-/// `when_one` if `cond` is 1, `when_zero` if `cond` is 0 -- with no branch, for any two
-/// elements. `cond` must be exactly 0 or 1; anything else is a bug in the
-/// caller (not checked, the way an out-of-range index is not re-checked by
-/// every caller of `Array` indexing).
-///
-/// CONSTANT TIME: `mask` is `0 - cond`, which is 0 or -1 (all 64 bits set,
-/// two's complement) -- `-` never traps here because 0-0 and 0-1 both fit
-/// trivially. `&`, `|` and `^` are the runtime's plain, unconditional bitwise
-/// operators: the whole selection is arithmetic on 64-bit patterns, never a
-/// read of `cond` by anything that could branch on it.
+/** `when_one` if `cond` is 1, `when_zero` if `cond` is 0 -- with no branch, for any two
+ * elements. `cond` must be exactly 0 or 1; anything else is a bug in the
+ * caller (not checked, the way an out-of-range index is not re-checked by
+ * every caller of `Array` indexing).
+ *
+ * CONSTANT TIME: `mask` is `0 - cond`, which is 0 or -1 (all 64 bits set,
+ * two's complement) -- `-` never traps here because 0-0 and 0-1 both fit
+ * trivially. `&`, `|` and `^` are the runtime's plain, unconditional bitwise
+ * operators: the whole selection is arithmetic on 64-bit patterns, never a
+ * read of `cond` by anything that could branch on it. */
 pub Array<int> cselect(int cond, Array<int> when_one, Array<int> when_zero) {
     int mask = 0 - cond;
     int notmask = mask ^ -1;
@@ -543,8 +543,8 @@ pub Array<int> cselect(int cond, Array<int> when_one, Array<int> when_zero) {
     return out;
 }
 
-/// `cselect` into an array the caller owns: `out` becomes `when_one` or
-/// `when_zero`; `out` may be either. Same masking argument as `cselect`.
+/** `cselect` into an array the caller owns: `out` becomes `when_one` or
+ * `when_zero`; `out` may be either. Same masking argument as `cselect`. */
 pub void cselect_into(int cond, Array<int> out, Array<int> when_one, Array<int> when_zero) {
     int mask = 0 - cond;
     int notmask = mask ^ -1;
@@ -553,11 +553,11 @@ pub void cselect_into(int cond, Array<int> out, Array<int> when_one, Array<int> 
     }
 }
 
-/// Swap `first` and `second` in place when `cond` is 1, leave them alone when it is
-/// 0 -- the Montgomery ladder's `cswap`. `Array` is a reference type
-/// (reference §3.9), so `first` and `second` here are the caller's own arrays: this
-/// mutates them directly, element by element, rather than building and
-/// returning new ones. Same masking argument as `cselect`.
+/** Swap `first` and `second` in place when `cond` is 1, leave them alone when it is
+ * 0 -- the Montgomery ladder's `cswap`. `Array` is a reference type
+ * (reference §3.9), so `first` and `second` here are the caller's own arrays: this
+ * mutates them directly, element by element, rather than building and
+ * returning new ones. Same masking argument as `cselect`. */
 pub void cswap(int cond, Array<int> first, Array<int> second) {
     int mask = 0 - cond;
     int notmask = mask ^ -1;
@@ -570,11 +570,11 @@ pub void cswap(int cond, Array<int> first, Array<int> second) {
 }
 
 // --- inversion and the square-root helper: fixed exponents ------------------
-//
-// Both exponents are FIXED public constants (they name the field, not any
-// input), so these are the classic ref10 addition chains: 254 squarings and 11
-// multiplications for `p - 2`, 251 squarings and 2 multiplications for
-// `(p - 5) / 8`. The chain is the same for every input.
+/*
+ * Both exponents are FIXED public constants (they name the field, not any
+ * input), so these are the classic ref10 addition chains: 254 squarings and 11
+ * multiplications for `p - 2`, 251 squarings and 2 multiplications for
+ * `(p - 5) / 8`. The chain is the same for every input. */
 
 // `element` squared `count` times (`count` is a public constant at every call).
 Array<int> square_times(Array<int> element, int count) {
@@ -585,8 +585,8 @@ Array<int> square_times(Array<int> element, int count) {
     return power;
 }
 
-// `element^(2^250 - 1)`, the stretch the two exponents below share, and
-// `element^11` on the side, in `Array<Array<int>>`'s two slots.
+/* `element^(2^250 - 1)`, the stretch the two exponents below share, and
+ * `element^11` on the side, in `Array<Array<int>>`'s two slots. */
 Array<Array<int>> power_chain(Array<int> element) {
     Array<int> z_2 = square(element);
     Array<int> z_8 = square_times(z_2, 2);
@@ -605,17 +605,17 @@ Array<Array<int>> power_chain(Array<int> element) {
     return out;
 }
 
-/// `a^(p-2) = a^-1` for any nonzero `element` (undefined, like any inverse, at
-/// zero -- callers that can see zero must decide what that means to them).
+/** `a^(p-2) = a^-1` for any nonzero `element` (undefined, like any inverse, at
+ * zero -- callers that can see zero must decide what that means to them). */
 pub Array<int> invert(Array<int> element) {
     Array<Array<int>> chain = power_chain(element);
     return mul(square_times(chain[0], 5), chain[1]);
 }
 
-/// `a^((p-5)/8)` -- the candidate exponent RFC 8032 §5.1.3 uses to compute a
-/// square root mod p (since p = 5 mod 8): the caller still has to check the
-/// candidate and correct it by `sqrt(-1)` if needed, exactly as the RFC
-/// describes. Not a square root on its own.
+/** `a^((p-5)/8)` -- the candidate exponent RFC 8032 §5.1.3 uses to compute a
+ * square root mod p (since p = 5 mod 8): the caller still has to check the
+ * candidate and correct it by `sqrt(-1)` if needed, exactly as the RFC
+ * describes. Not a square root on its own. */
 pub Array<int> pow_p_minus_5_over_8(Array<int> element) {
     Array<Array<int>> chain = power_chain(element);
     return mul(square_times(chain[0], 2), element);
@@ -623,11 +623,11 @@ pub Array<int> pow_p_minus_5_over_8(Array<int> element) {
 
 // --- equality and parity -----------------------------------------------------
 
-/// Whether `left` and `right` are the same field element. Compares canonical
-/// encodings, so two representations of the same value always agree; this
-/// is used on public values only (a decoded point's coordinates against a
-/// recomputed candidate) and makes no constant-time claim -- `==` on `bytes`
-/// is ordinary byte comparison.
+/** Whether `left` and `right` are the same field element. Compares canonical
+ * encodings, so two representations of the same value always agree; this
+ * is used on public values only (a decoded point's coordinates against a
+ * recomputed candidate) and makes no constant-time claim -- `==` on `bytes`
+ * is ordinary byte comparison. */
 pub bool eq(Array<int> left, Array<int> right) {
     return to_bytes(left) == to_bytes(right);
 }
@@ -636,9 +636,9 @@ pub bool is_zero(Array<int> element) {
     return eq(element, zero());
 }
 
-/// The low bit of `element`'s canonical representative -- the "sign" RFC 8032
-/// packs into a point encoding's spare bit. Not a constant-time operation
-/// (it reads a public coordinate, never a secret scalar).
+/** The low bit of `element`'s canonical representative -- the "sign" RFC 8032
+ * packs into a point encoding's spare bit. Not a constant-time operation
+ * (it reads a public coordinate, never a secret scalar). */
 pub int parity(Array<int> element) {
     bytes encoded = to_bytes(element);
     return encoded[0] & 1;

@@ -1,22 +1,22 @@
-// Differential driver for the speed-sensitive primitives: reads one case per
-// line from stdin, `OP SIZE_A SIZE_B SEED`, builds the inputs from a
-// deterministic generator (the same one oracle.py has), and prints the
-// result as hex. `test.sh` compares every line with hashlib, `cryptography`
-// (OpenSSL) and PyNaCl, so nothing here is checked against itself.
-//
-//   sha1|sha256|sha384|sha512 N _ S   digest of N bytes
-//   sha1x|sha256x|sha512x N _ S       the same through Hasher.update in odd-sized pieces
-//                                     (3, 61, 7, 130, then the rest), so the block
-//                                     routine is entered at unaligned offsets
-//   hmac256 K M S                     HMAC-SHA256, key of K bytes, message of M
-//   hkdf256 N L S                     extract(salt 16, ikm N) then expand(info 7, L)
-//   chacha N C S                      ChaCha20 (RFC 8439), N bytes, block counter C
-//   poly N _ S                        Poly1305 tag over N bytes
-//   ccp N A S                         ChaCha20-Poly1305 seal; open must round trip
-//   gcm N A S                         AES-256-GCM seal (A = aad size), open must round trip
-//   gcm128 N A S                      the same with a 16-byte key
-//   aesblock _ _ S                    one AES-256 block
-//   aesblock128 _ _ S                 one AES-128 block
+/* Differential driver for the speed-sensitive primitives: reads one case per
+ * line from stdin, `OP SIZE_A SIZE_B SEED`, builds the inputs from a
+ * deterministic generator (the same one oracle.py has), and prints the
+ * result as hex. `test.sh` compares every line with hashlib, `cryptography`
+ * (OpenSSL) and PyNaCl, so nothing here is checked against itself.
+ *
+ *   sha1|sha256|sha384|sha512 N _ S   digest of N bytes
+ *   sha1x|sha256x|sha512x N _ S       the same through Hasher.update in odd-sized pieces
+ *                                     (3, 61, 7, 130, then the rest), so the block
+ *                                     routine is entered at unaligned offsets
+ *   hmac256 K M S                     HMAC-SHA256, key of K bytes, message of M
+ *   hkdf256 N L S                     extract(salt 16, ikm N) then expand(info 7, L)
+ *   chacha N C S                      ChaCha20 (RFC 8439), N bytes, block counter C
+ *   poly N _ S                        Poly1305 tag over N bytes
+ *   ccp N A S                         ChaCha20-Poly1305 seal; open must round trip
+ *   gcm N A S                         AES-256-GCM seal (A = aad size), open must round trip
+ *   gcm128 N A S                      the same with a 16-byte key
+ *   aesblock _ _ S                    one AES-256 block
+ *   aesblock128 _ _ S                 one AES-128 block */
 import io;
 import crypto.sha1digest;
 import crypto.sha256;

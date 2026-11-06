@@ -1,49 +1,49 @@
-// RFC 4648 base64, in both of its alphabets.
-//
-// `url: false` is RFC 4648 §4, the standard alphabet (`+` and `/`); `url:
-// true` is §5, the URL- and filename-safe alphabet (`-` and `_`). Both are
-// padded with `=` in both directions. The alphabet is a flag on the one
-// operation rather than a second pair of names, because it is one codec with
-// one table swapped, not a second codec.
-//
-// **The two halves compose**: `decode(encode(b))` is `b` again for every
-// `bytes`, in either alphabet.
-//
-// **`decode` is strict, and there is no lenient mode.** A character outside
-// the chosen alphabet, a length that is not a multiple of four, and padding
-// that is in the wrong place or of the wrong length are each an `Error` saying
-// which it was and at what position. There is no whitespace skipping (base64
-// in a header or a JSON string has none, and MIME's 76-column lines are a MIME
-// problem: strip them first, in the open) and no guessing the alphabet from
-// what arrived -- a `-` handed to the standard decoder is refused, with a
-// message pointing at `url: true`, rather than quietly accepted. A decoder
-// that accepts more than one spelling of the same octets is one that two
-// parsers can disagree about.
-//
-// One leniency is kept, and it is CPython's: the unused low bits of the last
-// character before the padding are not required to be zero, so `"QR=="` and
-// `"QQ=="` both decode to the one byte `A`. RFC 4648 §3.5 lets a decoder go either way,
-// and a caller who needs the canonical spelling can compare
-// `encode(decode(t)) == t`.
-//
+/* RFC 4648 base64, in both of its alphabets.
+ *
+ * `url: false` is RFC 4648 §4, the standard alphabet (`+` and `/`); `url:
+ * true` is §5, the URL- and filename-safe alphabet (`-` and `_`). Both are
+ * padded with `=` in both directions. The alphabet is a flag on the one
+ * operation rather than a second pair of names, because it is one codec with
+ * one table swapped, not a second codec.
+ *
+ * **The two halves compose**: `decode(encode(b))` is `b` again for every
+ * `bytes`, in either alphabet.
+ *
+ * **`decode` is strict, and there is no lenient mode.** A character outside
+ * the chosen alphabet, a length that is not a multiple of four, and padding
+ * that is in the wrong place or of the wrong length are each an `Error` saying
+ * which it was and at what position. There is no whitespace skipping (base64
+ * in a header or a JSON string has none, and MIME's 76-column lines are a MIME
+ * problem: strip them first, in the open) and no guessing the alphabet from
+ * what arrived -- a `-` handed to the standard decoder is refused, with a
+ * message pointing at `url: true`, rather than quietly accepted. A decoder
+ * that accepts more than one spelling of the same octets is one that two
+ * parsers can disagree about.
+ *
+ * One leniency is kept, and it is CPython's: the unused low bits of the last
+ * character before the padding are not required to be zero, so `"QR=="` and
+ * `"QQ=="` both decode to the one byte `A`. RFC 4648 §3.5 lets a decoder go either way,
+ * and a caller who needs the canonical spelling can compare
+ * `encode(decode(t)) == t`.
+ * */
 // --- the types ---------------------------------------------------------------
-//
-// `encode` takes `bytes` and answers a `str`; `decode` takes a `str` and
-// answers `bytes`. What comes out of base64 is text by construction -- sixty-
-// five ASCII characters -- bound for a header, a URL or a JSON string, every
-// one of which is a `str`. What goes in is octets, and only the caller knows
-// whether they were UTF-8, so `decode` hands back octets and `utf8()` is the
-// decode, in the open. These are Oro's shapes.
-//
-// Oro's `encode` also accepts a `str` and takes its UTF-8. Here a parameter
-// has one static type, so text is passed as `s.to_bytes()`: one entry point,
-// and the crossing from text to octets written where it happens, as it is
-// everywhere else `str` meets `bytes` (reference §3.10), rather than a second
-// function that differs only in the conversion it hides.
+/*
+ * `encode` takes `bytes` and answers a `str`; `decode` takes a `str` and
+ * answers `bytes`. What comes out of base64 is text by construction -- sixty-
+ * five ASCII characters -- bound for a header, a URL or a JSON string, every
+ * one of which is a `str`. What goes in is octets, and only the caller knows
+ * whether they were UTF-8, so `decode` hands back octets and `utf8()` is the
+ * decode, in the open. These are Oro's shapes.
+ *
+ * Oro's `encode` also accepts a `str` and takes its UTF-8. Here a parameter
+ * has one static type, so text is passed as `s.to_bytes()`: one entry point,
+ * and the crossing from text to octets written where it happens, as it is
+ * everywhere else `str` meets `bytes` (reference §3.10), rather than a second
+ * function that differs only in the conversion it hides. */
 
-/// Why `decode` refused its input. Payload-free (docs/errors-decision.md §4):
-/// the position of what was wrong is context the caller already has at the
-/// point it reports, not something this value carries.
+/** Why `decode` refused its input. Payload-free (docs/errors-decision.md §4):
+ * the position of what was wrong is context the caller already has at the
+ * point it reports, not something this value carries. */
 pub enum Error {
     /// A byte that is neither in the chosen alphabet nor `=`.
     Character;
@@ -55,8 +55,8 @@ pub enum Error {
     Padding;
 }
 
-/// A sentence saying what was wrong. A method named `to_str`, so
-/// `print(e)` prints it.
+/** A sentence saying what was wrong. A method named `to_str`, so
+ * `print(e)` prints it. */
 pub str Error.to_str() {
     match (this) {
         case Character: {
@@ -74,10 +74,10 @@ pub str Error.to_str() {
     }
 }
 
-/// `data`, as base64 text.
-///
-///     base64.encode("user:pass".to_bytes())    == "dXNlcjpwYXNz"
-///     base64.encode("é".to_bytes())            == "w6k="
+/** `data`, as base64 text.
+ *
+ *     base64.encode("user:pass".to_bytes())    == "dXNlcjpwYXNz"
+ *     base64.encode("é".to_bytes())            == "w6k=" */
 pub str encode(bytes data, bool is_url_safe = false) {
     List<str> digits = alphabet(is_url_safe);
     int byte_count = data.size();
@@ -107,14 +107,14 @@ pub str encode(bytes data, bool is_url_safe = false) {
     return out.join("");
 }
 
-/// The octets base64 `text` spells.
-///
-///     base64.decode("dXNlcjpwYXNz")         -> Ok("user:pass".to_bytes())
-///     base64.decode("-_8=", url: true)      -> Ok([251, 255])
-///
-/// The refusals are checked in reading order -- first a character that is not
-/// base64 at all, then the length, then the padding -- so the error names the
-/// first thing wrong with the input rather than whichever check ran first.
+/** The octets base64 `text` spells.
+ *
+ *     base64.decode("dXNlcjpwYXNz")         -> Ok("user:pass".to_bytes())
+ *     base64.decode("-_8=", url: true)      -> Ok([251, 255])
+ *
+ * The refusals are checked in reading order -- first a character that is not
+ * base64 at all, then the length, then the padding -- so the error names the
+ * first thing wrong with the input rather than whichever check ran first. */
 pub Result<bytes, Error> decode(str text, bool is_url_safe = false) {
     int text_length = text.size();
     int index = 0;
@@ -128,8 +128,8 @@ pub Result<bytes, Error> decode(str text, bool is_url_safe = false) {
     if (text_length % 4 != 0) {
         return Result<bytes, Error>.Err(Error.Length);
     }
-    // Everything is now alphabet or `=`, so the first `=` is where the padding
-    // starts, and the padding must run from there to the end.
+    /* Everything is now alphabet or `=`, so the first `=` is where the padding
+     * starts, and the padding must run from there to the end. */
     int data = 0;
     while (data < text_length && text.byte_at(data) != '=') {
         data = data + 1;
@@ -171,8 +171,8 @@ pub Result<bytes, Error> decode(str text, bool is_url_safe = false) {
     return Result<bytes, Error>.Ok(out);
 }
 
-// The first `count` characters of the group at `start`, packed six bits each
-// from the top: `a << 18 | b << 12 | c << 6 | d`, with the missing ones zero.
+/* The first `count` characters of the group at `start`, packed six bits each
+ * from the top: `a << 18 | b << 12 | c << 6 | d`, with the missing ones zero. */
 int quad(str text, int start, int count, bool is_url_safe) {
     int packed = 0;
     for (int slot in 0 .. 4) {
@@ -184,9 +184,9 @@ int quad(str text, int start, int count, bool is_url_safe) {
     return packed;
 }
 
-// The six-bit value of byte `octet` in the chosen alphabet, or -1 if it is not
-// in it: A-Z are 0-25, a-z 26-51, 0-9 52-61, and the two alphabets differ
-// only in 62 and 63 -- `+ /` for the standard one, `- _` for the URL one.
+/* The six-bit value of byte `octet` in the chosen alphabet, or -1 if it is not
+ * in it: A-Z are 0-25, a-z 26-51, 0-9 52-61, and the two alphabets differ
+ * only in 62 and 63 -- `+ /` for the standard one, `- _` for the URL one. */
 int value(int octet, bool is_url_safe) {
     if (octet >= 'A' && octet <= 'Z') {
         return octet - 65;
@@ -206,9 +206,9 @@ int value(int octet, bool is_url_safe) {
     return -1;
 }
 
-// The sixty-four digits of the chosen alphabet, one str each. Written out
-// rather than assembled, because they are quotations: a reader checking this
-// against RFC 4648's tables should read the same characters in both places.
+/* The sixty-four digits of the chosen alphabet, one str each. Written out
+ * rather than assembled, because they are quotations: a reader checking this
+ * against RFC 4648's tables should read the same characters in both places. */
 List<str> alphabet(bool is_url_safe) {
     str chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     if (is_url_safe) {

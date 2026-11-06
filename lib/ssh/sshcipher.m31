@@ -1,36 +1,36 @@
-// The SSH binary packet protocol's ciphers (RFC 4253 §6, RFC 5647,
-// PROTOCOL.chacha20poly1305): turning a payload into the bytes that go on
-// the wire and back, for each cipher this client negotiates.
-//
-//   chacha20-poly1305@openssh.com                      (AEAD, own length cipher)
-//   aes256-gcm@openssh.com, aes128-gcm@openssh.com     (AEAD, RFC 5647)
-//   aes256-ctr, aes128-ctr  with  hmac-sha2-256-etm@openssh.com
-//                           or    hmac-sha2-256         (RFC 4344 + RFC 6668)
-//
-// API
+/* The SSH binary packet protocol's ciphers (RFC 4253 §6, RFC 5647,
+ * PROTOCOL.chacha20poly1305): turning a payload into the bytes that go on
+ * the wire and back, for each cipher this client negotiates.
+ *
+ *   chacha20-poly1305@openssh.com                      (AEAD, own length cipher)
+ *   aes256-gcm@openssh.com, aes128-gcm@openssh.com     (AEAD, RFC 5647)
+ *   aes256-ctr, aes128-ctr  with  hmac-sha2-256-etm@openssh.com
+ *                           or    hmac-sha2-256         (RFC 4344 + RFC 6668)
+ *
+ * API */
 // ---
-//   Cipher c = sshcipher.new_chacha(material64);
-//   Cipher c = sshcipher.new_aes_gcm(key, iv12);
-//   Cipher c = sshcipher.new_aes_ctr(key, iv16, mac_key, is_etm);
-//   c.header_size()                       -> int    bytes to read to learn the length
-//   c.remaining(header, seq)              -> Result<int, Error>    bytes still to read
-//   c.open(header, rest, seq)             -> Result<bytes, Error>  the payload
-//   c.seal(payload, seq, rng)             -> bytes                 the wire packet
-//
-// The receive side is two steps because the length arrives first: read
-// `header_size()` bytes, ask `remaining`, read that many, `open`. A `Cipher`
-// is **stateful** (the AES-CTR keystream and the GCM invocation counter move
-// on): one object per direction, used in packet order, and never after an
-// error -- a failed packet ends the connection.
-//
-// Authentication before use, in every mode where the format allows it: the
-// ChaCha20-Poly1305, GCM and encrypt-then-MAC tags are verified (with
-// `consttime.is_equal`) **before** any decryption of the payload; the length
-// is only trusted for how many bytes to read, and is bounded first. The one
-// exception is the plain (MAC-then-encrypt) `hmac-sha2-256` mode, where the
-// format forces decrypting the first block to learn the length -- the
-// payload is still not looked at until the MAC over the whole packet has
-// verified, and the length is bounded before the rest is read.
+/*   Cipher c = sshcipher.new_chacha(material64);
+ *   Cipher c = sshcipher.new_aes_gcm(key, iv12);
+ *   Cipher c = sshcipher.new_aes_ctr(key, iv16, mac_key, is_etm);
+ *   c.header_size()                       -> int    bytes to read to learn the length
+ *   c.remaining(header, seq)              -> Result<int, Error>    bytes still to read
+ *   c.open(header, rest, seq)             -> Result<bytes, Error>  the payload
+ *   c.seal(payload, seq, rng)             -> bytes                 the wire packet
+ *
+ * The receive side is two steps because the length arrives first: read
+ * `header_size()` bytes, ask `remaining`, read that many, `open`. A `Cipher`
+ * is **stateful** (the AES-CTR keystream and the GCM invocation counter move
+ * on): one object per direction, used in packet order, and never after an
+ * error -- a failed packet ends the connection.
+ *
+ * Authentication before use, in every mode where the format allows it: the
+ * ChaCha20-Poly1305, GCM and encrypt-then-MAC tags are verified (with
+ * `consttime.is_equal`) **before** any decryption of the payload; the length
+ * is only trusted for how many bytes to read, and is bounded first. The one
+ * exception is the plain (MAC-then-encrypt) `hmac-sha2-256` mode, where the
+ * format forces decrypting the first block to learn the length -- the
+ * payload is still not looked at until the MAC over the whole packet has
+ * verified, and the length is bounded before the rest is read. */
 
 import random;
 import crypto.chacha20poly1305;
@@ -57,8 +57,8 @@ pub str Error.to_str() {
     }
 }
 
-/// The largest `packet_length` accepted (RFC 4253 §6.1's minimum every
-/// implementation must handle; OpenSSH sends less).
+/** The largest `packet_length` accepted (RFC 4253 §6.1's minimum every
+ * implementation must handle; OpenSSH sends less). */
 pub const int MAX_PACKET = 35000;
 const int MIN_PADDING = 4;
 const int KIND_CHACHA = 0;
@@ -72,8 +72,8 @@ pub type Cipher {
     int kind;
     /// chacha: 64 octets, K_2 (payload) then K_1 (length); gcm/ctr: the AES key.
     bytes key;
-    /// gcm: 12 octets, 4 fixed then the 64-bit invocation counter; ctr: the
-    /// 16-octet counter block.
+    /** gcm: 12 octets, 4 fixed then the 64-bit invocation counter; ctr: the
+     * 16-octet counter block. */
     bytes counter;
     bytes mac_key;
     aes.Cipher aes_schedule;
@@ -83,10 +83,10 @@ pub type Cipher {
     bytes first_plain;
 }
 
-// `data` XORed with the AES-CTR keystream, advancing the counter block. The
-// leftover keystream of a partly used block goes first, whole blocks then go
-// through `aes.Cipher.did_ctr_xor_at` (a hardware kernel where the CPU has one),
-// and only a final partial block is done octet by octet.
+/* `data` XORed with the AES-CTR keystream, advancing the counter block. The
+ * leftover keystream of a partly used block goes first, whole blocks then go
+ * through `aes.Cipher.did_ctr_xor_at` (a hardware kernel where the CPU has one),
+ * and only a final partial block is done octet by octet. */
 bytes Cipher.ctr_xor(bytes data) {
     bytes out = [0; data.size()];
     int taken = 0;
@@ -119,8 +119,8 @@ pub int Cipher.header_size() {
     return 4;
 }
 
-/// How many octets follow `header` on the wire (everything including the
-/// tag or MAC), after bounding the length it announces.
+/** How many octets follow `header` on the wire (everything including the
+ * tag or MAC), after bounding the length it announces. */
 pub Result<int, Error> Cipher.remaining(bytes header, int seq) {
     if (kind == KIND_CHACHA) {
         bytes seq8 = seq_bytes8(seq);
@@ -156,8 +156,8 @@ pub Result<int, Error> Cipher.remaining(bytes header, int seq) {
     return Result<int, Error>.Ok(length + 4 - 16 + MAC_SIZE);
 }
 
-/// Verifies and decrypts one packet: `header` (`header_size()` octets) then
-/// `rest` (`remaining(...)` octets). Returns the payload.
+/** Verifies and decrypts one packet: `header` (`header_size()` octets) then
+ * `rest` (`remaining(...)` octets). Returns the payload. */
 pub Result<bytes, Error> Cipher.open(bytes header, bytes rest, int seq) {
     if (kind == KIND_CHACHA) {
         bytes payload_key = sub_key(key, 0, 32);
@@ -211,8 +211,8 @@ pub Result<bytes, Error> Cipher.open(bytes header, bytes rest, int seq) {
     return strip_padding(plain.substr(4, plain.size()));
 }
 
-/// One packet for the wire: padding (from `rng`), length, encryption and
-/// tag or MAC, as the cipher dictates.
+/** One packet for the wire: padding (from `rng`), length, encryption and
+ * tag or MAC, as the cipher dictates. */
 pub bytes Cipher.seal(bytes payload, int seq, random.System rng) {
     if (kind == KIND_CHACHA) {
         bytes payload_key = sub_key(key, 0, 32);

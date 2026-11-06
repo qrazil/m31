@@ -1,20 +1,20 @@
-// `lib/ssh/sshkey.m31`, checked two ways.
-//
-// 1. In-process, with no oracle: a key file is *built here* from a known
-//    seed (the openssh-key-v1 layout, PROTOCOL.key), parsed back, and then
-//    broken one field at a time -- every `sshkey.Error` variant has a
-//    fixture that produces it, and every proper prefix of the valid file is
-//    refused rather than trapped on. A `trap` means a check failed.
-// 2. Against real keys: `test.sh` generates keys with `ssh-keygen` and passes
-//    their paths as arguments:
-//
-//        t_ssh_key <encrypted key> <plain key>...
-//
-//    The program prints the public key, comment and the signature over a
-//    fixed message for each plain key, and `oracle_ssh_key.py` prints the
-//    same from the `cryptography` package (Ed25519 signatures are
-//    deterministic, so the two must agree to the byte). The encrypted key
-//    must be refused with `Error.Encrypted`.
+/* `lib/ssh/sshkey.m31`, checked two ways.
+ *
+ * 1. In-process, with no oracle: a key file is *built here* from a known
+ *    seed (the openssh-key-v1 layout, PROTOCOL.key), parsed back, and then
+ *    broken one field at a time -- every `sshkey.Error` variant has a
+ *    fixture that produces it, and every proper prefix of the valid file is
+ *    refused rather than trapped on. A `trap` means a check failed.
+ * 2. Against real keys: `test.sh` generates keys with `ssh-keygen` and passes
+ *    their paths as arguments:
+ *
+ *        t_ssh_key <encrypted key> <plain key>...
+ *
+ *    The program prints the public key, comment and the signature over a
+ *    fixed message for each plain key, and `oracle_ssh_key.py` prints the
+ *    same from the `cryptography` package (Ed25519 signatures are
+ *    deterministic, so the two must agree to the byte). The encrypted key
+ *    must be refused with `Error.Encrypted`. */
 import io;
 import os;
 import encoding.base64;
@@ -95,8 +95,8 @@ const int ERROR_WRONG_PASSPHRASE = 9;
 const int ERROR_CIPHER = 10;
 const int ERROR_KDF = 11;
 
-// Every field of an `openssh-key-v1` file, so a fixture can change exactly
-// one of them.
+/* Every field of an `openssh-key-v1` file, so a fixture can change exactly
+ * one of them. */
 type Spec {
     pub str cipher;
     pub str kdf;
@@ -110,8 +110,8 @@ type Spec {
     pub bytes inner_pub;
     pub bytes secret;
     pub bytes comment;
-    // 0: the correct 1,2,3.. padding; 1: a wrong sequence; 2: a whole extra
-    // block of padding; 3: none (so the section is not a multiple of 8).
+    /* 0: the correct 1,2,3.. padding; 1: a wrong sequence; 2: a whole extra
+     * block of padding; 3: none (so the section is not a multiple of 8). */
     pub int pad_mode;
     pub int trailing;
 }
@@ -239,8 +239,8 @@ match (sshkey.parse(spec_text(good))) {
         trap("the built fixture did not parse: " + error.to_str());
     }
 }
-// A file with CRLF line ends and a 70-column wrapped
-// body (what ssh-keygen writes) parses the same.
+/* A file with CRLF line ends and a 70-column wrapped
+ * body (what ssh-keygen writes) parses the same. */
 str one_line = base64.encode(build_blob(good));
 str wrapped = "";
 int offset = 0;
@@ -276,8 +276,8 @@ bytes bad_magic = build_blob(good);
 bad_magic[0] = bad_magic[0] ^ 1;
 checks = check(checks, refusal(armor(bad_magic)) == ERROR_NOT_OPENSSH, "a wrong magic is NotOpenSshKey");
 checks = check(checks, refusal(armor([1, 2, 3])) == ERROR_NOT_OPENSSH, "a body shorter than the magic is NotOpenSshKey");
-// Encrypted -- refused whatever else is in the file, and before the private
-// section is read (here it is garbage that would otherwise be BadCheck).
+/* Encrypted -- refused whatever else is in the file, and before the private
+ * section is read (here it is garbage that would otherwise be BadCheck). */
 Spec enc = valid_spec();
 enc.cipher = "aes256-ctr";
 enc.kdf = "bcrypt";

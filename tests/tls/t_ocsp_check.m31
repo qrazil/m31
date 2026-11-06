@@ -1,9 +1,9 @@
-// `ocsp.check` on files, driven from `test_ocsp.sh`.
-//
-//   t_ocsp_check <response.der> <leaf.pem> <issuer.pem> <now>
-//
-// Prints `ok this_update=<n> next_update=<n>` or `error <Name>`, exiting 0
-// either way; a file that cannot be read traps.
+/* `ocsp.check` on files, driven from `test_ocsp.sh`.
+ *
+ *   t_ocsp_check <response.der> <leaf.pem> <issuer.pem> <now>
+ *
+ * Prints `ok this_update=<n> next_update=<n>` or `error <Name>`, exiting 0
+ * either way; a file that cannot be read traps. */
 
 import io;
 import pki.ocsp;

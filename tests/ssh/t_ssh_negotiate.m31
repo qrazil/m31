@@ -1,12 +1,12 @@
-// `lib/ssh.m31`'s algorithm negotiation (`negotiate`, `offer_preferring`)
-// and host-key parsing for every accepted type (`parse_host_key`), pure:
-//   * the client's preference order wins, not the server's;
-//   * AEAD ciphers need no MAC, CTR ciphers do;
-//   * strict kex is on only when both sides say so;
-//   * nothing outside the offer is ever chosen (no downgrade);
-//   * host-key blobs from ssh-keygen parse and fingerprint as ssh-keygen
-//     says; off-curve points, a 1024-bit RSA modulus, an unknown curve,
-//     trailing bytes and every proper prefix are refused without a trap.
+/* `lib/ssh.m31`'s algorithm negotiation (`negotiate`, `offer_preferring`)
+ * and host-key parsing for every accepted type (`parse_host_key`), pure:
+ *   * the client's preference order wins, not the server's;
+ *   * AEAD ciphers need no MAC, CTR ciphers do;
+ *   * strict kex is on only when both sides say so;
+ *   * nothing outside the offer is ever chosen (no downgrade);
+ *   * host-key blobs from ssh-keygen parse and fingerprint as ssh-keygen
+ *     says; off-curve points, a 1024-bit RSA modulus, an unknown curve,
+ *     trailing bytes and every proper prefix are refused without a trap. */
 import random;
 import encoding.base64;
 import ssh;

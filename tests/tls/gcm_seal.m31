@@ -1,12 +1,12 @@
-// AES-GCM (`lib/crypto/aesgcm.m31`) against `gcm_oracle.py`, which seals the same
-// messages with the `cryptography` package's AESGCM and asserts the McGrew &
-// Viega GCM specification's published test cases (the 128-bit cases 1-4, the
-// 256-bit cases 13-16) against it first. Every line this prints is printed
-// again by the oracle; `test_aesgcm.sh` diffs the two. The tamper lines are
-// the negative tests: every corrupted input must be refused, and the oracle
-// has OpenSSL refuse the same ones.
-//
-//   ./build.sh tests/tls/gcm_seal.m31 -o gcm_seal && ./gcm_seal
+/* AES-GCM (`lib/crypto/aesgcm.m31`) against `gcm_oracle.py`, which seals the same
+ * messages with the `cryptography` package's AESGCM and asserts the McGrew &
+ * Viega GCM specification's published test cases (the 128-bit cases 1-4, the
+ * 256-bit cases 13-16) against it first. Every line this prints is printed
+ * again by the oracle; `test_aesgcm.sh` diffs the two. The tamper lines are
+ * the negative tests: every corrupted input must be refused, and the oracle
+ * has OpenSSL refuse the same ones.
+ *
+ *   ./build.sh tests/tls/gcm_seal.m31 -o gcm_seal && ./gcm_seal */
 
 import crypto.aesgcm;
 import TLS13_hex;

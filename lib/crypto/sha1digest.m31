@@ -1,55 +1,55 @@
-// SHA-1 (FIPS 180-4), written in the language over `bytes` and the bit
-// operators. This is `apps/git/sha1.m31`, byte for byte in its arithmetic, under
-// a name that does not collide with that app-local module (module names are
-// globally unique); when the git app moves to the library one of the two goes.
-//
-// API
+/* SHA-1 (FIPS 180-4), written in the language over `bytes` and the bit
+ * operators. This is `apps/git/sha1.m31`, byte for byte in its arithmetic, under
+ * a name that does not collide with that app-local module (module names are
+ * globally unique); when the git app moves to the library one of the two goes.
+ *
+ * API */
 // ---
-//   sha1digest.Hasher h = sha1digest.Hasher();
-//   h.update(chunk);            // as many times as you like
-//   bytes d = h.digest();       // 20 octets; ends the hash
-//
-//   sha1digest.sum(data)        -> bytes, the 20 octets
-//   sha1digest.hex(data)        -> str, 40 lowercase hex digits
-//
-// **SHA-1 is broken for collision resistance, and nothing here may rely on
-// it for that.** It is in the library because two standards still name things
-// with it: an OCSP CertID is the SHA-1 of an issuer's name and key by default
-// (RFC 6960 §4.1.1), and a responder may be identified by the SHA-1 of its key
-// (§4.2.2.3). `lib/pki/ocsp.m31` uses it only to *find* which response is about
-// which certificate; the response's authenticity rests on its signature
-// (SHA-256 or better, SHA-1 signatures refused), never on these hashes.
-//
+/*   sha1digest.Hasher h = sha1digest.Hasher();
+ *   h.update(chunk);            // as many times as you like
+ *   bytes d = h.digest();       // 20 octets; ends the hash
+ *
+ *   sha1digest.sum(data)        -> bytes, the 20 octets
+ *   sha1digest.hex(data)        -> str, 40 lowercase hex digits
+ *
+ * **SHA-1 is broken for collision resistance, and nothing here may rely on
+ * it for that.** It is in the library because two standards still name things
+ * with it: an OCSP CertID is the SHA-1 of an issuer's name and key by default
+ * (RFC 6960 §4.1.1), and a responder may be identified by the SHA-1 of its key
+ * (§4.2.2.3). `lib/pki/ocsp.m31` uses it only to *find* which response is about
+ * which certificate; the response's authenticity rests on its signature
+ * (SHA-256 or better, SHA-1 signatures refused), never on these hashes.
+ * */
 // --- 32-bit arithmetic on a 64-bit int ---------------------------------------
-//
-// SHA-1 is defined on 32-bit words, and this language has one integer type,
-// which is 64 bits and TRAPS on overflow (reference §6.1). Both facts help
-// here rather than getting in the way:
-//
-//   - every word is kept as a non-negative `int` below 2^32, so `>>` -- which
-//     is arithmetic, sign-extending -- behaves as a logical shift, and no
-//     masking is needed on the way out of one;
-//   - `+` on five such words cannot reach 2^63, so the additions are ordinary
-//     `+` and are still checked by the language. `wrapping_add` would have
-//     switched that check off for no gain: the sum is masked with
-//     `& 0xFFFF_FFFF` at the end, which is what "modulo 2^32" means;
-//   - `<<` discards the bits that fall off the top (reference §6.1) and does
-//     not trap, so the rotate is written directly.
-//
-// `~` never appears. The `Ch` function is spelled `d ^ (b & (c ^ d))` rather
-// than `(b & c) | (~b & d)`: the two agree on 32-bit words, and the second
-// would produce a negative `int` from `~b` that then has to be masked back.
-//
+/*
+ * SHA-1 is defined on 32-bit words, and this language has one integer type,
+ * which is 64 bits and TRAPS on overflow (reference §6.1). Both facts help
+ * here rather than getting in the way:
+ *
+ *   - every word is kept as a non-negative `int` below 2^32, so `>>` -- which
+ *     is arithmetic, sign-extending -- behaves as a logical shift, and no
+ *     masking is needed on the way out of one;
+ *   - `+` on five such words cannot reach 2^63, so the additions are ordinary
+ *     `+` and are still checked by the language. `wrapping_add` would have
+ *     switched that check off for no gain: the sum is masked with
+ *     `& 0xFFFF_FFFF` at the end, which is what "modulo 2^32" means;
+ *   - `<<` discards the bits that fall off the top (reference §6.1) and does
+ *     not trap, so the rotate is written directly.
+ *
+ * `~` never appears. The `Ch` function is spelled `d ^ (b & (c ^ d))` rather
+ * than `(b & c) | (~b & d)`: the two agree on 32-bit words, and the second
+ * would produce a negative `int` from `~b` that then has to be masked back.
+ * */
 // --- what is NOT here --------------------------------------------------------
-//
-// No SHA-256. Git's object names are SHA-1 today in every repository this
-// reads, and a second digest with no caller is a second thing to keep right.
+/*
+ * No SHA-256. Git's object names are SHA-1 today in every repository this
+ * reads, and a second digest with no caller is a second thing to keep right. */
 
 import crypto.accel;
 
-/// The offset basis of the five chaining words, as FIPS 180-4 §5.3.1 gives
-/// them. They are fields with defaults rather than module constants so that
-/// `Hasher()` is the whole of "start a hash".
+/** The offset basis of the five chaining words, as FIPS 180-4 §5.3.1 gives
+ * them. They are fields with defaults rather than module constants so that
+ * `Hasher()` is the whole of "start a hash". */
 pub type Hasher {
     int state0 = 0x6745_2301;
     int state1 = 0xEFCD_AB89;
@@ -60,20 +60,20 @@ pub type Hasher {
     int total = 0;
     /// The partial block: always fewer than 64 octets between `update`s.
     bytes tail = [];
-    /// The message schedule, held across blocks so that the 80-word array is
-    /// allocated once for a whole file rather than once per 64 octets. Read
-    /// into a local at the top of `block` -- see the note there.
+    /** The message schedule, held across blocks so that the 80-word array is
+     * allocated once for a whole file rather than once per 64 octets. Read
+     * into a local at the top of `block` -- see the note there. */
     Array<int> sched = [0; 80];
 }
 
-/// Feed `data` to the hash. Any number of calls, of any sizes, hash the same
-/// as one call with them joined.
+/** Feed `data` to the hash. Any number of calls, of any sizes, hash the same
+ * as one call with them joined. */
 pub void Hasher.update(bytes data) {
     int length = data.size();
     total = total + length;
     int offset = 0;
-    // Finish the partial block first, if there is one, and only then run the
-    // whole blocks straight out of `data` -- no copy for the bulk of a file.
+    /* Finish the partial block first, if there is one, and only then run the
+     * whole blocks straight out of `data` -- no copy for the bulk of a file. */
     if (tail.size() > 0) {
         while (offset < length && tail.size() < 64) {
             tail.push(data[offset]);
@@ -93,10 +93,10 @@ pub void Hasher.update(bytes data) {
     }
 }
 
-/// The 20-octet digest. **This ends the hash**: it appends the padding and
-/// consumes the buffered tail, so a second `digest()` on the same `Hasher`
-/// answers something that is not a SHA-1 of anything. Make another `Hasher`
-/// for another message.
+/** The 20-octet digest. **This ends the hash**: it appends the padding and
+ * consumes the buffered tail, so a second `digest()` on the same `Hasher`
+ * answers something that is not a SHA-1 of anything. Make another `Hasher`
+ * for another message. */
 pub bytes Hasher.digest() {
     int bits = total * 8;
     tail.push(0x80);
@@ -119,9 +119,9 @@ pub bytes Hasher.digest() {
     return out;
 }
 
-// `count` whole blocks of `data` from `offset`: the kernel if there is one,
-// else the portable compression function below, block by block. Same result
-// either way (tests/cryptodiff runs both).
+/* `count` whole blocks of `data` from `offset`: the kernel if there is one,
+ * else the portable compression function below, block by block. Same result
+ * either way (tests/cryptodiff runs both). */
 void Hasher.run_blocks(bytes data, int offset, int count) {
     if (count > 0 && (accel.features() & accel.SHA1) != 0) {
         bytes packed = [0; 20];
@@ -153,16 +153,16 @@ void Hasher.run_blocks(bytes data, int offset, int count) {
     }
 }
 
-// One 64-octet block, read from `data` starting at `offset`. The caller guarantees
-// that 64 octets are there.
+/* One 64-octet block, read from `data` starting at `offset`. The caller guarantees
+ * that 64 octets are there. */
 void Hasher.block(bytes data, int offset) {
-    // `sched` read once into a local, and every `w[i]` below goes through the
-    // local. Reading it afresh each time -- writing `sched[i]` throughout --
-    // is the same program and is 18% slower: a value read out of a field is
-    // retained and released around what follows (reference §7.2), so an index
-    // store through a field name costs an `rc_inc`/`rc_dec` pair, and those
-    // are deliberately not inlinable (`gates.sh`, "runtime stays separate
-    // TU"). A local is borrowed and costs nothing. See apps/git/FRICTION.md.
+    /* `sched` read once into a local, and every `w[i]` below goes through the
+     * local. Reading it afresh each time -- writing `sched[i]` throughout --
+     * is the same program and is 18% slower: a value read out of a field is
+     * retained and released around what follows (reference §7.2), so an index
+     * store through a field name costs an `rc_inc`/`rc_dec` pair, and those
+     * are deliberately not inlinable (`gates.sh`, "runtime stays separate
+     * TU"). A local is borrowed and costs nothing. See apps/git/FRICTION.md. */
     Array<int> schedule = sched;  // FIPS 180-4: W
     for (int i in 0 .. 16) {
         int byte_offset = offset + i * 4;
@@ -177,17 +177,17 @@ void Hasher.block(bytes data, int offset) {
     int state_c = state2;  // FIPS 180-4: c
     int state_d = state3;  // FIPS 180-4: d
     int state_e = state4;  // FIPS 180-4: e
-    // The four rounds are one loop with a branch rather than four loops,
-    // because four loops would repeat the eight lines of the step. The
-    // branch predicts perfectly -- it changes three times in eighty
-    // iterations.
+    /* The four rounds are one loop with a branch rather than four loops,
+     * because four loops would repeat the eight lines of the step. The
+     * branch predicts perfectly -- it changes three times in eighty
+     * iterations. */
     for (int i in 0 .. 80) {
         int round_function = 0;  // FIPS 180-4: f
         int round_constant = 0;  // FIPS 180-4: K
-        // Every parenthesis below is written the way FIPS 180-4 writes it,
-        // so that the four `round_function`s and the step can be checked against the
-        // standard by eye rather than against the precedence table. The
-        // formatter keeps them (reference §6.1); it used to take them out.
+        /* Every parenthesis below is written the way FIPS 180-4 writes it,
+         * so that the four `round_function`s and the step can be checked against the
+         * standard by eye rather than against the precedence table. The
+         * formatter keeps them (reference §6.1); it used to take them out. */
         if (i < 20) {
             round_function = state_d ^ (state_b & (state_c ^ state_d));
             round_constant = 0x5A82_7999;
@@ -215,9 +215,9 @@ void Hasher.block(bytes data, int offset) {
     state4 = state4 + state_e & 0xFFFF_FFFF;
 }
 
-// The hardware kernel (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
-// runtime/crypto_*.S, called with spans the compiler range-checks. Called only
-// when `accel.features()` has SHA1 set.
+/* The hardware kernel (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
+ * runtime/crypto_*.S, called with spans the compiler range-checks. Called only
+ * when `accel.features()` has SHA1 set. */
 prim "c" nonblocking void __k_sha1(
     inout bytes state[0 .. 20],
     in bytes data[offset .. offset + 64 * count],
@@ -231,14 +231,14 @@ pub bytes sum(bytes data) {
     return hasher.digest();
 }
 
-/// The digest of `data` as 40 lowercase hex digits -- the spelling git uses
-/// for an object name.
+/** The digest of `data` as 40 lowercase hex digits -- the spelling git uses
+ * for an object name. */
 pub str hex(bytes data) {
     return sum(data).hex();
 }
 
-// A 32-bit word appended big-endian, which is the order every length and
-// every digit in this file is written in.
+/* A 32-bit word appended big-endian, which is the order every length and
+ * every digit in this file is written in. */
 void word(bytes out, int value) {
     out.push(value >> 24 & 0xFF);
     out.push(value >> 16 & 0xFF);

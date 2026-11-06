@@ -1,14 +1,14 @@
 import io;
 import os;
 
-// The program half of tests/io/test_seek.sh. Arguments: a path, then
-// operations, each printed on its own line:
-//
-//   S:n  seek(n)   C:n  seek_by(n)   E:n  seek_from_end(n)
-//   T    tell()             R:n  read up to n bytes, as hex
-//
-// A seek prints the new position or "ERR"; the oracle, Python's raw
-// `open(path, "rb", buffering=0)`, answers the same operations.
+/* The program half of tests/io/test_seek.sh. Arguments: a path, then
+ * operations, each printed on its own line:
+ *
+ *   S:n  seek(n)   C:n  seek_by(n)   E:n  seek_from_end(n)
+ *   T    tell()             R:n  read up to n bytes, as hex
+ *
+ * A seek prints the new position or "ERR"; the oracle, Python's raw
+ * `open(path, "rb", buffering=0)`, answers the same operations. */
 
 str hex_of(bytes data) {
     return data.hex();
@@ -25,8 +25,8 @@ str position_of(Result<int, io.Error> result) {
     }
 }
 
-// `n` bytes or up to the end of the file: `read` may return less than asked
-// for at a buffer boundary, which is not something Python's raw read does.
+/* `n` bytes or up to the end of the file: `read` may return less than asked
+ * for at a buffer boundary, which is not something Python's raw read does. */
 str read_exactly(io.File file, int wanted) {
     bytes got = [];
     while (got.size() < wanted) {

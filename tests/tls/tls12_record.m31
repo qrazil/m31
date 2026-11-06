@@ -1,11 +1,11 @@
-// TLS 1.2 records (`lib/tls/tls13record.m31`'s `seal_record_legacy` and
-// `open_record_legacy`) against `tls12_record_oracle.py`, which builds the same
-// records from RFC 5246 §6.2.3.3, RFC 5288 §3 and RFC 7905 §2 with the
-// `cryptography` package's AEADs. Every line is printed again by the oracle;
-// `test_tls12.sh` diffs the two, once per suite.
-//
-//   ./build.sh tests/tls/tls12_record.m31 -o tls12_record
-//   ./tls12_record chacha | aes128 | aes256
+/* TLS 1.2 records (`lib/tls/tls13record.m31`'s `seal_record_legacy` and
+ * `open_record_legacy`) against `tls12_record_oracle.py`, which builds the same
+ * records from RFC 5246 §6.2.3.3, RFC 5288 §3 and RFC 7905 §2 with the
+ * `cryptography` package's AEADs. Every line is printed again by the oracle;
+ * `test_tls12.sh` diffs the two, once per suite.
+ *
+ *   ./build.sh tests/tls/tls12_record.m31 -o tls12_record
+ *   ./tls12_record chacha | aes128 | aes256 */
 
 import os;
 import crypto.sha256;

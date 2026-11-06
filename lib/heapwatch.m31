@@ -1,46 +1,46 @@
-// Heap watch: what the program can say to the ledger about its own objects
-// (docs/heap-watch-design.md).
-//
-// API
+/* Heap watch: what the program can say to the ledger about its own objects
+ * (docs/heap-watch-design.md).
+ *
+ * API */
 // ---
-//   heapwatch.forever(x)               -> x, marked as living as long as it likes
-//   heapwatch.epoch(name, body)        -> void, runs body.run() as a unit of work
-//   heapwatch.epoch_of(name, body)     -> body.make(), run as a unit of work
-//   heapwatch.Work                     interface { void run(); }
-//   heapwatch.Make<T>                  interface { T make(); }
-//
-// In a heap watch build (`./build.sh prog.m31 --heapwatch`, or -DRT_HEAPWATCH
-// on both cc lines) the objects a program makes are sampled and counted, by
-// allocation site, in a ledger the runtime keeps in a file; `m31c -heapwatch
-// <ledger|pid>` reads it, from a running process or from one that crashed. A
-// site whose oldest live object is much older than its objects normally live
-// is reported as a suspect. In any other build there is no ledger, and the
-// calls below do only what they do for the program: `forever` returns its
-// argument and `epoch` runs its body.
-//
-// **`forever` is for an object that lives long on purpose**: a game's
-// textures, a cache filled at startup, a connection pool. It exempts that one
-// object from the age report -- it is still counted, still listed, as
-// "forever", and still checked by trace -- and it changes nothing else: the
-// object is freed when its last reference goes, exactly as before. A whole
-// type or site is marked the same way without a rebuild, by
-// `M31_AGE=Type:forever` or `M31_AGE=Type@file.m31:40:forever`.
-//
-// **An epoch is a unit of work that should leave nothing behind**: a
-// request, a frame, a level. With epoch close on (M31_HEAPWATCH=full, or a
-// test build), everything made while `body` runs is counted against the
-// epoch, and the moment it ends whatever is still counted -- held only by
-// other objects of the same epoch, which is a leaked cycle -- is reported in
-// the ledger and the suspect log, with who holds it for a type trace is on
-// for. In a test build (the corpus's, `-DRC_DEBUG`, or
-// `M31_HEAPWATCH_TRAP=1`) it traps. An object leaves the epoch legitimately
-// by being stored into something made before the epoch began (a captured
-// list, a field of an outer object), by being sent to another thread, or by
-// being the value `epoch_of` returns; every spawned thread is an epoch of its
-// own too, without being asked. Epochs nest.
-//
-// The body is a callback (`() => handle(request)`), so it has no way to
-// assign the caller's locals: what it hands back, it returns or stores.
+/*   heapwatch.forever(x)               -> x, marked as living as long as it likes
+ *   heapwatch.epoch(name, body)        -> void, runs body.run() as a unit of work
+ *   heapwatch.epoch_of(name, body)     -> body.make(), run as a unit of work
+ *   heapwatch.Work                     interface { void run(); }
+ *   heapwatch.Make<T>                  interface { T make(); }
+ *
+ * In a heap watch build (`./build.sh prog.m31 --heapwatch`, or -DRT_HEAPWATCH
+ * on both cc lines) the objects a program makes are sampled and counted, by
+ * allocation site, in a ledger the runtime keeps in a file; `m31c -heapwatch
+ * <ledger|pid>` reads it, from a running process or from one that crashed. A
+ * site whose oldest live object is much older than its objects normally live
+ * is reported as a suspect. In any other build there is no ledger, and the
+ * calls below do only what they do for the program: `forever` returns its
+ * argument and `epoch` runs its body.
+ *
+ * **`forever` is for an object that lives long on purpose**: a game's
+ * textures, a cache filled at startup, a connection pool. It exempts that one
+ * object from the age report -- it is still counted, still listed, as
+ * "forever", and still checked by trace -- and it changes nothing else: the
+ * object is freed when its last reference goes, exactly as before. A whole
+ * type or site is marked the same way without a rebuild, by
+ * `M31_AGE=Type:forever` or `M31_AGE=Type@file.m31:40:forever`.
+ *
+ * **An epoch is a unit of work that should leave nothing behind**: a
+ * request, a frame, a level. With epoch close on (M31_HEAPWATCH=full, or a
+ * test build), everything made while `body` runs is counted against the
+ * epoch, and the moment it ends whatever is still counted -- held only by
+ * other objects of the same epoch, which is a leaked cycle -- is reported in
+ * the ledger and the suspect log, with who holds it for a type trace is on
+ * for. In a test build (the corpus's, `-DRC_DEBUG`, or
+ * `M31_HEAPWATCH_TRAP=1`) it traps. An object leaves the epoch legitimately
+ * by being stored into something made before the epoch began (a captured
+ * list, a field of an outer object), by being sent to another thread, or by
+ * being the value `epoch_of` returns; every spawned thread is an epoch of its
+ * own too, without being asked. Epochs nest.
+ *
+ * The body is a callback (`() => handle(request)`), so it has no way to
+ * assign the caller's locals: what it hands back, it returns or stores. */
 
 /// Work an epoch runs and that hands nothing back.
 pub interface Work {
@@ -52,33 +52,33 @@ pub interface Make<T> {
     T make();
 }
 
-/// `value` itself, marked as living as long as it likes on purpose.
-///
-/// A value that is not an object -- an int, a float, a bool, a value enum --
-/// is returned unchanged; there is nothing to mark.
+/** `value` itself, marked as living as long as it likes on purpose.
+ *
+ * A value that is not an object -- an int, a float, a bool, a value enum --
+ * is returned unchanged; there is nothing to mark. */
 pub T forever<T>(T value) {
     __forever(value);
     return value;
 }
 
-/// Run `body` as the unit of work `name`, and report anything it made and
-/// left behind when it returns.
+/** Run `body` as the unit of work `name`, and report anything it made and
+ * left behind when it returns. */
 pub void epoch(str name, Work body) {
-    // The runtime's two halves of an epoch (runtime/heapwatch.c), builtins
-    // only the standard library can name: open one named `name` inside the
-    // current thread, and close the innermost, reporting what it left.
+    /* The runtime's two halves of an epoch (runtime/heapwatch.c), builtins
+     * only the standard library can name: open one named `name` inside the
+     * current thread, and close the innermost, reporting what it left. */
     __epoch_enter(name);
     body.run();
     __epoch_leave();
 }
 
-/// Run `body` as the unit of work `name` and return what it made: that value,
-/// and everything it reaches, leaves the epoch with it; anything else the
-/// body made and left behind is reported when it returns.
+/** Run `body` as the unit of work `name` and return what it made: that value,
+ * and everything it reaches, leaves the epoch with it; anything else the
+ * body made and left behind is reported when it returns. */
 pub T epoch_of<T>(str name, Make<T> body) {
-    // Made before the epoch opens, so storing the result in it is what moves
-    // the result out of the epoch -- the same rule as any store into an
-    // older object, and the only way out a body has besides a send.
+    /* Made before the epoch opens, so storing the result in it is what moves
+     * the result out of the epoch -- the same rule as any store into an
+     * older object, and the only way out a body has besides a send. */
     List<T> out = [];
     __epoch_enter(name);
     out.push(body.make());

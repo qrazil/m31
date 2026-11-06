@@ -1,16 +1,16 @@
-// The m31 TLS client (`lib/tls.m31`) against this repository's TLS server,
-// driven from `test_tlsserver.sh`.
-//
-//   t_tlsserver_client NAME ADDRESS PORT CA_FILE [DEADLINE_MS [TIMEOUT_MS]]
-//
-// Dials ADDRESS (a literal IP; this build's `tls.connect` cannot resolve
-// names), then runs the handshake over that socket expecting a certificate for
-// NAME. Connects with `tls.Trust.CaFile(CA_FILE)`, sends one GET and prints
-// `status LINE` (the response's first line) and `size N` (octets of body), or
-// `error: REASON` and exits 1. This checks the whole chain: certificate chain
-// validation against the CA, CertificateVerify, both Finished messages and the
-// application keys. With DEADLINE_MS the handshake runs under
-// `tls.connect_over_deadline` (a total bound, and TIMEOUT_MS per read).
+/* The m31 TLS client (`lib/tls.m31`) against this repository's TLS server,
+ * driven from `test_tlsserver.sh`.
+ *
+ *   t_tlsserver_client NAME ADDRESS PORT CA_FILE [DEADLINE_MS [TIMEOUT_MS]]
+ *
+ * Dials ADDRESS (a literal IP; this build's `tls.connect` cannot resolve
+ * names), then runs the handshake over that socket expecting a certificate for
+ * NAME. Connects with `tls.Trust.CaFile(CA_FILE)`, sends one GET and prints
+ * `status LINE` (the response's first line) and `size N` (octets of body), or
+ * `error: REASON` and exits 1. This checks the whole chain: certificate chain
+ * validation against the CA, CertificateVerify, both Finished messages and the
+ * application keys. With DEADLINE_MS the handshake runs under
+ * `tls.connect_over_deadline` (a total bound, and TIMEOUT_MS per read). */
 
 import io;
 import net;

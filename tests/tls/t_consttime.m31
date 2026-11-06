@@ -1,11 +1,11 @@
-// `lib/crypto/consttime.m31` against Python's `hmac.compare_digest`. Every line this
-// prints on stdout is printed again by `oracle_consttime.py`, and `test.sh`
-// diffs the two. Timing itself is not measured here -- a source-level loop
-// with no early exit is argued in the module header, and no test of a
-// compiled program's clock would be reliable -- so what is checked is the
-// answer: equal, unequal at each position, unequal lengths, and empty.
-//
-//   ./build.sh tests/tls/t_consttime.m31 -o t_consttime && ./t_consttime
+/* `lib/crypto/consttime.m31` against Python's `hmac.compare_digest`. Every line this
+ * prints on stdout is printed again by `oracle_consttime.py`, and `test.sh`
+ * diffs the two. Timing itself is not measured here -- a source-level loop
+ * with no early exit is argued in the module header, and no test of a
+ * compiled program's clock would be reliable -- so what is checked is the
+ * answer: equal, unequal at each position, unequal lengths, and empty.
+ *
+ *   ./build.sh tests/tls/t_consttime.m31 -o t_consttime && ./t_consttime */
 
 import crypto.consttime;
 

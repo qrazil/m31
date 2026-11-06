@@ -1,63 +1,63 @@
-// SSH Phase 3 (`docs/ssh-decision.md`), the key half: a private key read
-// from an OpenSSH `openssh-key-v1` file (`-----BEGIN OPENSSH PRIVATE KEY-----`,
-// the format `ssh-keygen` writes), and the signing `lib/ssh/sshauth.m31`
-// needs for RFC 4252 §7.
-//
-// API
+/* SSH Phase 3 (`docs/ssh-decision.md`), the key half: a private key read
+ * from an OpenSSH `openssh-key-v1` file (`-----BEGIN OPENSSH PRIVATE KEY-----`,
+ * the format `ssh-keygen` writes), and the signing `lib/ssh/sshauth.m31`
+ * needs for RFC 4252 §7.
+ *
+ * API */
 // ---
-//   sshkey.parse(text)                      -> Result<PrivateKey, Error>
-//   sshkey.parse_with_passphrase(text, pw)  -> Result<PrivateKey, Error>
-//   sshkey.load(path)                       -> Result<PrivateKey, Error>
-//   sshkey.load_with_passphrase(path, pw)   -> Result<PrivateKey, Error>
-//   sshkey.inspect(text)                    -> Result<Info, Error>   no secret needed
-//   k.algorithm            "ssh-ed25519" | "ecdsa-sha2-nistp256" | "ssh-rsa"
-//   k.public_blob()        -> bytes   the wire public key blob
-//   k.public_key()         -> bytes   ed25519: 32 octets; ecdsa: 65-octet point; rsa: empty
-//   k.signature_algorithms() -> List<str>   what userauth may name, best first
-//   k.signature_blob(msg)  -> bytes   signature blob in the default algorithm
-//   k.signature_blob_for(algorithm, msg) -> Result<bytes, str>
-//   k.sign(msg)            -> bytes   ed25519 only: the 64-octet signature
-//
+/*   sshkey.parse(text)                      -> Result<PrivateKey, Error>
+ *   sshkey.parse_with_passphrase(text, pw)  -> Result<PrivateKey, Error>
+ *   sshkey.load(path)                       -> Result<PrivateKey, Error>
+ *   sshkey.load_with_passphrase(path, pw)   -> Result<PrivateKey, Error>
+ *   sshkey.inspect(text)                    -> Result<Info, Error>   no secret needed
+ *   k.algorithm            "ssh-ed25519" | "ecdsa-sha2-nistp256" | "ssh-rsa"
+ *   k.public_blob()        -> bytes   the wire public key blob
+ *   k.public_key()         -> bytes   ed25519: 32 octets; ecdsa: 65-octet point; rsa: empty
+ *   k.signature_algorithms() -> List<str>   what userauth may name, best first
+ *   k.signature_blob(msg)  -> bytes   signature blob in the default algorithm
+ *   k.signature_blob_for(algorithm, msg) -> Result<bytes, str>
+ *   k.sign(msg)            -> bytes   ed25519 only: the 64-octet signature
+ * */
 // --- the file format (PROTOCOL.key in the OpenSSH source) --------------------
-//
-//   "openssh-key-v1\0"
-//   string ciphername      "none", or aes256-ctr, aes128-ctr, aes256-gcm@openssh.com,
-//                          chacha20-poly1305@openssh.com
-//   string kdfname         "none", or "bcrypt"
-//   string kdfoptions      empty, or string salt || uint32 rounds
-//   uint32 number-of-keys  exactly 1 is all `ssh-keygen` ever writes
-//   string public key      the wire blob
-//   string private section (encrypted with the cipher when there is one):
-//       uint32 check1, uint32 check2   equal, or the section was corrupted /
-//                                      the passphrase was wrong
-//       the key's fields (see `parse_private_section`), then string comment,
-//       padding bytes 1, 2, 3, ... to a multiple of the cipher's block size
-//   [authentication tag, for the AEAD ciphers, after the section]
-//
+/*
+ *   "openssh-key-v1\0"
+ *   string ciphername      "none", or aes256-ctr, aes128-ctr, aes256-gcm@openssh.com,
+ *                          chacha20-poly1305@openssh.com
+ *   string kdfname         "none", or "bcrypt"
+ *   string kdfoptions      empty, or string salt || uint32 rounds
+ *   uint32 number-of-keys  exactly 1 is all `ssh-keygen` ever writes
+ *   string public key      the wire blob
+ *   string private section (encrypted with the cipher when there is one):
+ *       uint32 check1, uint32 check2   equal, or the section was corrupted /
+ *                                      the passphrase was wrong
+ *       the key's fields (see `parse_private_section`), then string comment,
+ *       padding bytes 1, 2, 3, ... to a multiple of the cipher's block size
+ *   [authentication tag, for the AEAD ciphers, after the section]
+ * */
 // --- encrypted keys ------------------------------------------------------------
-//
-// `bcrypt_pbkdf` (`lib/crypto/bcryptpbkdf.m31`, OpenBSD's, checked against its
-// published vector and `ssh-keygen`'s own files) turns the passphrase and the
-// file's salt into the cipher's key and IV. A wrong passphrase is
-// `Error.WrongPassphrase` (the AEAD tag, or the two check words, did not
-// match: the two cases cannot be told apart and are not meant to be). Refused,
-// each by name: ciphers this client has not implemented (`aes*-cbc`, 3des-cbc,
-// aes192 -- there is no AES decryption or 192-bit key schedule in the library),
-// any KDF but bcrypt, and more than 1024 rounds (a file chooses its own cost,
-// and a hostile one must not be able to make this spin for an hour).
-//
-// The passphrase is a `bytes` argument; no function here prints, logs or
-// stores it, and no `Error` carries any of it. It is NOT wiped from memory
-// afterwards: the runtime cannot do that (the same limit as every secret in
-// this library).
-//
+/*
+ * `bcrypt_pbkdf` (`lib/crypto/bcryptpbkdf.m31`, OpenBSD's, checked against its
+ * published vector and `ssh-keygen`'s own files) turns the passphrase and the
+ * file's salt into the cipher's key and IV. A wrong passphrase is
+ * `Error.WrongPassphrase` (the AEAD tag, or the two check words, did not
+ * match: the two cases cannot be told apart and are not meant to be). Refused,
+ * each by name: ciphers this client has not implemented (`aes*-cbc`, 3des-cbc,
+ * aes192 -- there is no AES decryption or 192-bit key schedule in the library),
+ * any KDF but bcrypt, and more than 1024 rounds (a file chooses its own cost,
+ * and a hostile one must not be able to make this spin for an hour).
+ *
+ * The passphrase is a `bytes` argument; no function here prints, logs or
+ * stores it, and no `Error` carries any of it. It is NOT wiped from memory
+ * afterwards: the runtime cannot do that (the same limit as every secret in
+ * this library).
+ * */
 // --- key material never leaves this module ------------------------------------
-//
-// `PrivateKey`'s secrets are private fields, `PrivateKey` has no `to_str`
-// (so `print(key)` is a compile error, not a leak), and no `Error` variant
-// carries any bytes of the file: a malformed key says *what* was malformed,
-// never *what it contained*. ECDSA signing is `ecdsasign.m31`'s constant-time
-// one; RSA signing is `rsasign.m31`'s (key consistency is checked at load).
+/*
+ * `PrivateKey`'s secrets are private fields, `PrivateKey` has no `to_str`
+ * (so `print(key)` is a compile error, not a leak), and no `Error` variant
+ * carries any bytes of the file: a malformed key says *what* was malformed,
+ * never *what it contained*. ECDSA signing is `ecdsasign.m31`'s constant-time
+ * one; RSA signing is `rsasign.m31`'s (key consistency is checked at load). */
 
 import io;
 import encoding.base64;
@@ -76,42 +76,42 @@ import crypto.bcryptpbkdf;
 import random;
 import ssh;
 
-/// Why a key file could not be turned into a `PrivateKey`. Payload-free
-/// (`docs/errors-decision.md` §4): in particular nothing in here can carry
-/// key material into a log.
+/** Why a key file could not be turned into a `PrivateKey`. Payload-free
+ * (`docs/errors-decision.md` §4): in particular nothing in here can carry
+ * key material into a log. */
 pub enum Error {
     /// The file could not be read.
     Io;
-    /// Not an `openssh-key-v1` file: the armor lines, the base64 body or the
-    /// magic string is wrong. (A PEM `RSA PRIVATE KEY` or PKCS#8 file lands
-    /// here too -- only OpenSSH's own format is read.)
+    /** Not an `openssh-key-v1` file: the armor lines, the base64 body or the
+     * magic string is wrong. (A PEM `RSA PRIVATE KEY` or PKCS#8 file lands
+     * here too -- only OpenSSH's own format is read.) */
     NotOpenSshKey;
     /// The key is passphrase-protected and no passphrase was given.
     Encrypted;
-    /// A length-prefixed field named more bytes than the file held, or the
-    /// file ended early.
+    /** A length-prefixed field named more bytes than the file held, or the
+     * file ended early. */
     Truncated;
     /// The file holds a key of a type this client does not implement.
     UnsupportedKeyType;
     /// The file holds a number of keys other than exactly one.
     UnsupportedKeyCount;
-    /// The two `check` words ahead of the private section differ: the
-    /// section was corrupted (with a passphrase, this is what a wrong one
-    /// looks like).
+    /** The two `check` words ahead of the private section differ: the
+     * section was corrupted (with a passphrase, this is what a wrong one
+     * looks like). */
     BadCheck;
-    /// The key's fields are not self-consistent: a wrong length, the public
-    /// section disagreeing with the private one, or a public key that is not
-    /// the one the secret generates.
+    /** The key's fields are not self-consistent: a wrong length, the public
+     * section disagreeing with the private one, or a public key that is not
+     * the one the secret generates. */
     BadKey;
-    /// The padding after the comment is not 1, 2, 3, ... or the private
-    /// section is not a whole number of cipher blocks.
+    /** The padding after the comment is not 1, 2, 3, ... or the private
+     * section is not a whole number of cipher blocks. */
     BadPadding;
     /// The passphrase did not decrypt the key.
     WrongPassphrase;
     /// The key is encrypted with a cipher this client has not implemented.
     UnsupportedCipher;
-    /// The key's KDF is not bcrypt, or its options are malformed or ask for
-    /// an unreasonable cost.
+    /** The key's KDF is not bcrypt, or its options are malformed or ask for
+     * an unreasonable cost. */
     UnsupportedKdf;
 }
 
@@ -168,8 +168,8 @@ const int PUBLIC_SIZE = 32;
 const int MAX_ROUNDS = 1024;
 const int MAX_SALT = 1024;
 
-/// A private key. The secrets are private to this module and the type has no
-/// `to_str`.
+/** A private key. The secrets are private to this module and the type has no
+ * `to_str`. */
 pub type PrivateKey {
     /// `ssh-ed25519`, `ecdsa-sha2-nistp256` or `ssh-rsa`.
     pub str algorithm;
@@ -182,20 +182,20 @@ pub type PrivateKey {
     pub str comment;
 }
 
-/// The public key as it goes on the wire (RFC 4253 §6.6): for ed25519
-/// `string "ssh-ed25519", string <32>` (RFC 8709 §4).
+/** The public key as it goes on the wire (RFC 4253 §6.6): for ed25519
+ * `string "ssh-ed25519", string <32>` (RFC 8709 §4). */
 pub bytes PrivateKey.public_blob() {
     return clone(blob);
 }
 
-/// ed25519: the 32 raw octets; ecdsa: the 65-octet point; rsa: empty (use
-/// `public_blob`).
+/** ed25519: the 32 raw octets; ecdsa: the 65-octet point; rsa: empty (use
+ * `public_blob`). */
 pub bytes PrivateKey.public_key() {
     return clone(public);
 }
 
-/// The signature algorithms this key can be used with in userauth (RFC 8332
-/// for RSA: SHA-2 only, never `ssh-rsa`'s SHA-1), best first.
+/** The signature algorithms this key can be used with in userauth (RFC 8332
+ * for RSA: SHA-2 only, never `ssh-rsa`'s SHA-1), best first. */
 pub List<str> PrivateKey.signature_algorithms() {
     if (algorithm == KEY_RSA) {
         return ["rsa-sha2-512", "rsa-sha2-256"];
@@ -203,8 +203,8 @@ pub List<str> PrivateKey.signature_algorithms() {
     return [algorithm];
 }
 
-/// The 64-octet Ed25519 signature of `message`. Traps for other key types
-/// (use `signature_blob_for`).
+/** The 64-octet Ed25519 signature of `message`. Traps for other key types
+ * (use `signature_blob_for`). */
 pub bytes PrivateKey.sign(bytes message) {
     if (algorithm != KEY_ED25519) {
         trap("sshkey: sign() is for ed25519 keys; use signature_blob_for");
@@ -212,8 +212,8 @@ pub bytes PrivateKey.sign(bytes message) {
     return ed25519.sign(secret, message);
 }
 
-/// `signature_blob_for` with the key's first (best) algorithm; traps on the
-/// (impossible for a loaded key) failure.
+/** `signature_blob_for` with the key's first (best) algorithm; traps on the
+ * (impossible for a loaded key) failure. */
 pub bytes PrivateKey.signature_blob(bytes message) {
     match (signature_blob_for(signature_algorithms()[0], message)) {
         case Ok(bytes blob_out): {
@@ -225,11 +225,11 @@ pub bytes PrivateKey.signature_blob(bytes message) {
     }
 }
 
-/// `string algorithm, string signature` for `message` (RFC 4253 §6.6): the
-/// ed25519 signature, the ECDSA `mpint r, mpint s` of SHA-256(message), or
-/// the RSASSA-PKCS1-v1_5 signature with SHA-256 or SHA-512 for
-/// `rsa-sha2-256` / `rsa-sha2-512`. `Err` carries a short reason (no secret
-/// in it) when the algorithm is not one this key can use.
+/** `string algorithm, string signature` for `message` (RFC 4253 §6.6): the
+ * ed25519 signature, the ECDSA `mpint r, mpint s` of SHA-256(message), or
+ * the RSASSA-PKCS1-v1_5 signature with SHA-256 or SHA-512 for
+ * `rsa-sha2-256` / `rsa-sha2-512`. `Err` carries a short reason (no secret
+ * in it) when the algorithm is not one this key can use. */
 pub Result<bytes, str> PrivateKey.signature_blob_for(str signature_algorithm, bytes message) {
     bytes inner = [];
     if (algorithm == KEY_ED25519 && signature_algorithm == KEY_ED25519) {
@@ -270,10 +270,10 @@ pub Result<bytes, str> PrivateKey.signature_blob_for(str signature_algorithm, by
     return Result<bytes, str>.Ok(out);
 }
 
-/// This key written again as an `openssh-key-v1` file, with `comment` and
-/// `passphrase` (empty: none) -- what `ssh-keygen -p` does. Only ed25519 keys
-/// can be written (`UnsupportedKeyType` for the others: the library cannot
-/// serialise ECDSA or RSA private keys).
+/** This key written again as an `openssh-key-v1` file, with `comment` and
+ * `passphrase` (empty: none) -- what `ssh-keygen -p` does. Only ed25519 keys
+ * can be written (`UnsupportedKeyType` for the others: the library cannot
+ * serialise ECDSA or RSA private keys). */
 pub Result<str, Error> PrivateKey.encode(str comment_text, bytes passphrase, int rounds) {
     if (algorithm != KEY_ED25519) {
         return Result<str, Error>.Err(Error.UnsupportedKeyType);
@@ -288,8 +288,8 @@ pub type Info {
     pub bool is_encrypted;
 }
 
-// A `string` at `offset`, with `ssh.Error.Truncated` from the shared parser
-// mapped to this module's own `Truncated`.
+/* A `string` at `offset`, with `ssh.Error.Truncated` from the shared parser
+ * mapped to this module's own `Truncated`. */
 Result<ssh.Field, Error> string_at(bytes buffer, int offset) {
     match (ssh.parse_string(buffer, offset)) {
         case Ok(ssh.Field field): {
@@ -301,8 +301,8 @@ Result<ssh.Field, Error> string_at(bytes buffer, int offset) {
     }
 }
 
-// A `string` at `offset` whose content must be exactly the text `want`; the
-// offset after it.
+/* A `string` at `offset` whose content must be exactly the text `want`; the
+ * offset after it. */
 Result<int, Error> expect_string(bytes buffer, int offset, str want, Error otherwise) {
     ssh.Field field = string_at(buffer, offset)?;
     if (field.value != want.to_bytes()) {
@@ -315,8 +315,8 @@ int be32(bytes buffer, int offset) {
     return buffer[offset] << 24 | buffer[offset + 1] << 16 | buffer[offset + 2] << 8 | buffer[offset + 3];
 }
 
-// The base64 body between the armor lines, as one string with no
-// whitespace in it.
+/* The base64 body between the armor lines, as one string with no
+ * whitespace in it. */
 Result<str, Error> unarmor(str text) {
     List<str> body = [];
     bool is_begun = false;
@@ -361,8 +361,8 @@ Result<bytes, Error> decode_file(str text) {
     }
 }
 
-// The header of the decoded file, split into the pieces both the decrypting
-// and the plain path need.
+/* The header of the decoded file, split into the pieces both the decrypting
+ * and the plain path need. */
 type Layout {
     str cipher;
     bytes salt;
@@ -390,8 +390,8 @@ bool is_supported_cipher(str cipher) {
     return cipher == "aes256-ctr" || cipher == "aes128-ctr" || cipher == "aes256-gcm@openssh.com" || cipher == "chacha20-poly1305@openssh.com";
 }
 
-// The decoded file: magic, the cipher/kdf header, the public key, then the
-// private section (and the tag after it).
+/* The decoded file: magic, the cipher/kdf header, the public key, then the
+ * private section (and the tag after it). */
 Result<Layout, Error> layout_of(bytes raw) {
     bytes magic = MAGIC.to_bytes();
     magic.push(0);
@@ -454,8 +454,8 @@ Result<Layout, Error> layout_of(bytes raw) {
     return Result<Layout, Error>.Ok(Layout(cipher, salt, rounds, pub_section.value, priv_section.value, tag));
 }
 
-// The validated public key from the file's cleartext public section: its
-// `ssh.HostKey` (which checks the shape of each type).
+/* The validated public key from the file's cleartext public section: its
+ * `ssh.HostKey` (which checks the shape of each type). */
 Result<ssh.HostKey, Error> outer_public(bytes blob) {
     match (ssh.parse_host_key(blob)) {
         case Ok(ssh.HostKey key): {
@@ -470,9 +470,9 @@ Result<ssh.HostKey, Error> outer_public(bytes blob) {
     }
 }
 
-/// What `text` says about its key, without a passphrase: the key type, the
-/// public blob (to find the key in an agent or a `.pub` file) and whether a
-/// passphrase will be needed.
+/** What `text` says about its key, without a passphrase: the key type, the
+ * public blob (to find the key in an agent or a `.pub` file) and whether a
+ * passphrase will be needed. */
 pub Result<Info, Error> inspect(str text) {
     bytes raw = decode_file(text)?;
     Layout layout = layout_of(raw)?;
@@ -480,8 +480,8 @@ pub Result<Info, Error> inspect(str text) {
     return Result<Info, Error>.Ok(Info(key.algorithm, layout.public_blob, layout.cipher != "none"));
 }
 
-/// Parses the text of an OpenSSH private key file. A passphrase-protected key
-/// is `Error.Encrypted`, before any of its private section is looked at.
+/** Parses the text of an OpenSSH private key file. A passphrase-protected key
+ * is `Error.Encrypted`, before any of its private section is looked at. */
 pub Result<PrivateKey, Error> parse(str text) {
     bytes raw = decode_file(text)?;
     Layout layout = layout_of(raw)?;
@@ -492,8 +492,8 @@ pub Result<PrivateKey, Error> parse(str text) {
     return parse_private_section(layout.private_section, outer, layout.cipher);
 }
 
-/// As `parse`, decrypting with `passphrase` when the key needs one (an
-/// unencrypted key ignores it).
+/** As `parse`, decrypting with `passphrase` when the key needs one (an
+ * unencrypted key ignores it). */
 pub Result<PrivateKey, Error> parse_with_passphrase(str text, bytes passphrase) {
     bytes raw = decode_file(text)?;
     Layout layout = layout_of(raw)?;
@@ -598,8 +598,8 @@ Result<bytes, Error> decrypt(Layout layout, bytes passphrase) {
             }
         }
     }
-    // chacha20-poly1305@openssh.com with sequence number 0 and no AAD: the
-    // Poly1305 key is block 0 of K_2's stream, the payload block 1 on.
+    /* chacha20-poly1305@openssh.com with sequence number 0 and no AAD: the
+     * Poly1305 key is block 0 of K_2's stream, the payload block 1 on. */
     bytes payload_key = key.substr(0, 32);
     bytes seq8 = [0; 8];
     bytes otk = chacha20poly1305.openssh_block(payload_key, 0, seq8).substr(0, 32);
@@ -639,12 +639,12 @@ bytes padded_section(bytes section, int block) {
     return out;
 }
 
-/// An `openssh-key-v1` file's text for the ed25519 key with `seed`
-/// (`ssh-keygen -t ed25519`'s format). With a non-empty `passphrase` the
-/// private section is encrypted with `aes256-ctr` and a bcrypt key derived
-/// with a fresh 16-octet salt and `rounds` iterations (1 to 1024); an empty
-/// one writes `none`/`none`. The result is what `parse_with_passphrase`
-/// reads back and what OpenSSH's own tools accept.
+/** An `openssh-key-v1` file's text for the ed25519 key with `seed`
+ * (`ssh-keygen -t ed25519`'s format). With a non-empty `passphrase` the
+ * private section is encrypted with `aes256-ctr` and a bcrypt key derived
+ * with a fresh 16-octet salt and `rounds` iterations (1 to 1024); an empty
+ * one writes `none`/`none`. The result is what `parse_with_passphrase`
+ * reads back and what OpenSSH's own tools accept. */
 pub Result<str, Error> encode_ed25519(bytes seed, str comment, bytes passphrase, int rounds) {
     if (seed.size() != SEED_SIZE || rounds < 1 || rounds > MAX_ROUNDS) {
         return Result<str, Error>.Err(Error.BadKey);

@@ -1,65 +1,65 @@
-// RSA SIGNING, RSASSA-PKCS1-v1_5 (RFC 8017 §8.2, §9.2), with the private key
-// in CRT form: what an SSH client needs to authenticate with an `ssh-rsa` key
-// by `rsa-sha2-256` / `rsa-sha2-512`.
-//
-// API
+/* RSA SIGNING, RSASSA-PKCS1-v1_5 (RFC 8017 §8.2, §9.2), with the private key
+ * in CRT form: what an SSH client needs to authenticate with an `ssh-rsa` key
+ * by `rsa-sha2-256` / `rsa-sha2-512`.
+ *
+ * API */
 // ---
-//   Option<SigningKey> key = rsasign.parse_private(n, e, iqmp, p, q);   // big-endian, as in a key file
-//   Result<bytes, Error> sig = rsasign.sign_pkcs1_v15(key, rsa.Hash.Sha256, digest);
-//         // digest: the hash of the message, already computed (32 or 64 octets)
-//         // sig:    exactly modulus-size octets, what the wire carries
-//
-// Verification is `rsa.m31`'s, and `sign_pkcs1_v15` calls it on its own output
-// before returning (see "faults").
-//
+/*   Option<SigningKey> key = rsasign.parse_private(n, e, iqmp, p, q);   // big-endian, as in a key file
+ *   Result<bytes, Error> sig = rsasign.sign_pkcs1_v15(key, rsa.Hash.Sha256, digest);
+ *         // digest: the hash of the message, already computed (32 or 64 octets)
+ *         // sig:    exactly modulus-size octets, what the wire carries
+ *
+ * Verification is `rsa.m31`'s, and `sign_pkcs1_v15` calls it on its own output
+ * before returning (see "faults").
+ * */
 // --- what is constant time here, and what is not --------------------------------
-//
-// The claims are about THE SOURCE (nobody measured the machine code; see
-// `ecdsasign.m31` for the same caveat and its reasons).
-//
-//   CONSTANT-TIME-STYLE (no branch, no memory index and no loop count depends
-//   on a secret value):
-//     - Montgomery multiplication modulo p and q (`multiply`): fixed loops over
-//       `width` limbs, the final "subtract the modulus if needed" a mask-select
-//       on the borrow.
-//     - the two exponentiations `c^dp mod p`, `c^dq mod q`: every exponent bit
-//       costs one squaring and one multiplication whether the bit is set or
-//       not, and the product is kept or dropped by mask. The bit count is the
-//       width of the modulus, a public number.
-//     - the derivation of `dp = d mod (p-1)` and `dq = d mod (q-1)` and the
-//       reductions of the message and of `m2` modulo p: bit-serial, one
-//       shift-and-conditionally-subtract per bit of the dividend.
-//     - the setup of each Montgomery context from a SECRET prime (`R mod p`,
-//       `R^2 mod p`, `-p^-1 mod 2^24`): repeated doubling with a masked
-//       subtraction and Newton's iteration with fixed rounds. This is the
-//       reason this module does not use `bignum.m31`, whose `make_modulus`
-//       branches on the modulus and is for public moduli only.
-//     - the CRT recombination `m = m2 + h*q`: schoolbook multiplication with
-//       fixed loop bounds.
-//
-//   NOT constant time, deliberately, because the value is public by then:
-//     - the PKCS#1 encoding of the digest (a public message);
-//     - the final check that the signature verifies under the public key.
-//
-//   One language fact this file is written around (as `ecdsasign.m31`): `>>` on
-//   a negative value branches on its sign, so nothing here shifts a value that
-//   can be negative; every limb sum is of non-negative terms below 2^50, so
-//   the overflow checks the language adds never fire for any input.
-//
+/*
+ * The claims are about THE SOURCE (nobody measured the machine code; see
+ * `ecdsasign.m31` for the same caveat and its reasons).
+ *
+ *   CONSTANT-TIME-STYLE (no branch, no memory index and no loop count depends
+ *   on a secret value):
+ *     - Montgomery multiplication modulo p and q (`multiply`): fixed loops over
+ *       `width` limbs, the final "subtract the modulus if needed" a mask-select
+ *       on the borrow.
+ *     - the two exponentiations `c^dp mod p`, `c^dq mod q`: every exponent bit
+ *       costs one squaring and one multiplication whether the bit is set or
+ *       not, and the product is kept or dropped by mask. The bit count is the
+ *       width of the modulus, a public number.
+ *     - the derivation of `dp = d mod (p-1)` and `dq = d mod (q-1)` and the
+ *       reductions of the message and of `m2` modulo p: bit-serial, one
+ *       shift-and-conditionally-subtract per bit of the dividend.
+ *     - the setup of each Montgomery context from a SECRET prime (`R mod p`,
+ *       `R^2 mod p`, `-p^-1 mod 2^24`): repeated doubling with a masked
+ *       subtraction and Newton's iteration with fixed rounds. This is the
+ *       reason this module does not use `bignum.m31`, whose `make_modulus`
+ *       branches on the modulus and is for public moduli only.
+ *     - the CRT recombination `m = m2 + h*q`: schoolbook multiplication with
+ *       fixed loop bounds.
+ *
+ *   NOT constant time, deliberately, because the value is public by then:
+ *     - the PKCS#1 encoding of the digest (a public message);
+ *     - the final check that the signature verifies under the public key.
+ *
+ *   One language fact this file is written around (as `ecdsasign.m31`): `>>` on
+ *   a negative value branches on its sign, so nothing here shifts a value that
+ *   can be negative; every limb sum is of non-negative terms below 2^50, so
+ *   the overflow checks the language adds never fire for any input.
+ * */
 // --- faults ------------------------------------------------------------------------
-//
-// A CRT signature computed with a corrupted half (a bit flip in `c^dp mod p`)
-// gives away a prime factor to anyone who sees it (Boneh-DeMillo-Lipton). So
-// the signature is verified with the public key before it is returned, and a
-// failing one is `Error.Fault` and not an output.
-//
+/*
+ * A CRT signature computed with a corrupted half (a bit flip in `c^dp mod p`)
+ * gives away a prime factor to anyone who sees it (Boneh-DeMillo-Lipton). So
+ * the signature is verified with the public key before it is returned, and a
+ * failing one is `Error.Fault` and not an output.
+ * */
 // --- what is not done ------------------------------------------------------------------
-//
-// No blinding: the message being signed is not attacker-chosen in SSH (it is
-// the session hash and the user name, which the server influences only
-// through the session hash), and the arithmetic above is the defence in
-// depth. No memory zeroisation: the runtime cannot do it (`sshkey.m31`'s
-// note). Keys under 2048 or over 4096 bits are refused, as in `rsa.m31`.
+/*
+ * No blinding: the message being signed is not attacker-chosen in SSH (it is
+ * the session hash and the user name, which the server influences only
+ * through the session hash), and the arithmetic above is the defence in
+ * depth. No memory zeroisation: the runtime cannot do it (`sshkey.m31`'s
+ * note). Keys under 2048 or over 4096 bits are refused, as in `rsa.m31`. */
 
 import crypto.bignum;
 import crypto.rsa;
@@ -76,8 +76,8 @@ pub enum Error {
     BadDigest;
     /// The modulus is too small to hold the encoding.
     TooSmall;
-    /// The signature did not verify under the public key: the key is
-    /// inconsistent or a fault corrupted the computation. Nothing is output.
+    /** The signature did not verify under the public key: the key is
+     * inconsistent or a fault corrupted the computation. Nothing is output. */
     Fault;
 }
 
@@ -97,8 +97,8 @@ pub str Error.to_str() {
 
 // --- limb arithmetic, fixed width ---------------------------------------------------
 
-// A modulus (a prime, here) and what Montgomery multiplication needs of it,
-// all derived without branching on its value.
+/* A modulus (a prime, here) and what Montgomery multiplication needs of it,
+ * all derived without branching on its value. */
 type Context {
     int width;
     Array<int> modulus;
@@ -109,8 +109,8 @@ type Context {
     Array<int> radix_squared;
 }
 
-// CIOS Montgomery multiplication: `left * right * R^-1 mod modulus` for inputs
-// below the modulus.
+/* CIOS Montgomery multiplication: `left * right * R^-1 mod modulus` for inputs
+ * below the modulus. */
 Array<int> Context.multiply(Array<int> left, Array<int> right) {
     Array<int> work = [0; width + 2];
     for (int row in 0 .. width) {
@@ -140,9 +140,9 @@ Array<int> Context.multiply(Array<int> left, Array<int> right) {
     return select(work[width] | (1 - reduced.borrow), reduced.limbs, out, width);
 }
 
-// `base^exponent` for `base` in Montgomery form, over every bit of the
-// `exponent_width`-limb exponent, high to low; a squaring and a
-// multiplication per bit, the product kept by mask.
+/* `base^exponent` for `base` in Montgomery form, over every bit of the
+ * `exponent_width`-limb exponent, high to low; a squaring and a
+ * multiplication per bit, the product kept by mask. */
 Array<int> Context.power(Array<int> base, Array<int> exponent, int exponent_width) {
     Array<int> result = clone(one);
     int position = exponent_width * LIMB_BITS - 1;
@@ -185,9 +185,9 @@ Array<int> select(int condition, Array<int> left, Array<int> right, int width) {
     return out;
 }
 
-// `2 * value + bit` modulo `modulus`, for `value` below `modulus` and `bit`
-// 0 or 1: shift left one bit with the bit shifted in, subtract the modulus
-// once if that is needed (the result is below `2 * modulus`).
+/* `2 * value + bit` modulo `modulus`, for `value` below `modulus` and `bit`
+ * 0 or 1: shift left one bit with the bit shifted in, subtract the modulus
+ * once if that is needed (the result is below `2 * modulus`). */
 Array<int> shift_in(Array<int> value, int bit, Array<int> modulus, int width) {
     Array<int> doubled = [0; width];
     int carry = bit;
@@ -200,8 +200,8 @@ Array<int> shift_in(Array<int> value, int bit, Array<int> modulus, int width) {
     return select(carry | (1 - reduced.borrow), reduced.limbs, doubled, width);
 }
 
-// `value mod modulus` for a value of `value_width` limbs, bit by bit from the
-// top. `modulus` has `width` limbs.
+/* `value mod modulus` for a value of `value_width` limbs, bit by bit from the
+ * top. `modulus` has `width` limbs. */
 Array<int> reduce(Array<int> value, int value_width, Array<int> modulus, int width) {
     Array<int> remainder = [0; width];
     int position = value_width * LIMB_BITS - 1;
@@ -225,8 +225,8 @@ int negative_inverse_of(int low_limb) {
 }
 
 Context make_context(Array<int> modulus, int width) {
-    // 1, doubled 24*width times, is R mod modulus; doubled 24*width more,
-    // R^2 mod modulus. Each doubling is `shift_in` with a zero bit.
+    /* 1, doubled 24*width times, is R mod modulus; doubled 24*width more,
+     * R^2 mod modulus. Each doubling is `shift_in` with a zero bit. */
     Array<int> value = [0; width];
     value[0] = 1;
     for (int step in 0 .. width * LIMB_BITS) {
@@ -298,8 +298,8 @@ Array<int> widen(Array<int> value, int value_width, int width) {
 
 // --- the key -------------------------------------------------------------------------
 
-/// A private key in CRT form. The factors, the CRT coefficient and the
-/// exponent are private fields; the type has no `to_str`.
+/** A private key in CRT form. The factors, the CRT coefficient and the
+ * exponent are private fields; the type has no `to_str`. */
 pub type SigningKey {
     /// The modulus's length in octets.
     pub int modulus_size;
@@ -362,13 +362,13 @@ bytes strip(bytes raw) {
     return raw.substr(start, raw.size());
 }
 
-/// The key with public modulus and exponent, private exponent, `iqmp`
-/// (`q^-1 mod p`), and the primes `p` and `q`, all big-endian (leading zeros allowed), or
-/// `None` if the sizes are wrong or the parts are not a consistent RSA key:
-/// the modulus must be 2048 to 4096 bits, `p` and `q` odd and of half the
-/// modulus's length, `p * q == n`, `iqmp * q == 1 mod p`, and the key must
-/// sign and verify. (`None` is never more specific, and says nothing about
-/// the values.)
+/** The key with public modulus and exponent, private exponent, `iqmp`
+ * (`q^-1 mod p`), and the primes `p` and `q`, all big-endian (leading zeros allowed), or
+ * `None` if the sizes are wrong or the parts are not a consistent RSA key:
+ * the modulus must be 2048 to 4096 bits, `p` and `q` odd and of half the
+ * modulus's length, `p * q == n`, `iqmp * q == 1 mod p`, and the key must
+ * sign and verify. (`None` is never more specific, and says nothing about
+ * the values.) */
 pub Option<SigningKey> parse_private(bytes modulus_in, bytes exponent_in, bytes private_in, bytes iqmp, bytes prime_p_in, bytes prime_q_in) {
     bytes n_bytes = strip(modulus_in);
     bytes p_bytes = strip(prime_p_in);
@@ -417,8 +417,8 @@ pub Option<SigningKey> parse_private(bytes modulus_in, bytes exponent_in, bytes 
     }
 }
 
-// Whether the `product_width`-limb `product` equals the `modulus_width`-limb
-// `modulus` (the product may be wider, with zero high limbs).
+/* Whether the `product_width`-limb `product` equals the `modulus_width`-limb
+ * `modulus` (the product may be wider, with zero high limbs). */
 bool is_product_equal(Array<int> product, int product_width, Array<int> modulus, int modulus_width) {
     for (int index in 0 .. product_width) {
         int want = 0;

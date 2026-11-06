@@ -1,66 +1,66 @@
-// Fixed-width unsigned big integers and prime-modulus Montgomery arithmetic:
-// the arithmetic under `ecdsa.m31`'s P-256 and P-384 verification, and the
-// piece TLS 1.3 certificate checking (X.509 signatures) needs first.
-//
-// API
+/* Fixed-width unsigned big integers and prime-modulus Montgomery arithmetic:
+ * the arithmetic under `ecdsa.m31`'s P-256 and P-384 verification, and the
+ * piece TLS 1.3 certificate checking (X.509 signatures) needs first.
+ *
+ * API */
 // ---
-//   Modulus modulus = bignum.make_modulus(prime_bytes);   // big-endian bytes of an odd modulus
-//   Array<int> one_mod = bignum.to_montgomery(modulus, bignum.from_bytes(raw, modulus.width));
-//   Array<int> product = bignum.montgomery_multiply(modulus, left, right);
-//   Array<int> plain = bignum.from_montgomery(modulus, product);
-//   Array<int> inverse = bignum.montgomery_inverse(modulus, value);   // prime modulus only
-//
+/*   Modulus modulus = bignum.make_modulus(prime_bytes);   // big-endian bytes of an odd modulus
+ *   Array<int> one_mod = bignum.to_montgomery(modulus, bignum.from_bytes(raw, modulus.width));
+ *   Array<int> product = bignum.montgomery_multiply(modulus, left, right);
+ *   Array<int> plain = bignum.from_montgomery(modulus, product);
+ *   Array<int> inverse = bignum.montgomery_inverse(modulus, value);   // prime modulus only
+ * */
 // --- NOT constant time, and why that is fine here ----------------------------
-//
-// **Every value this module is built to handle is public.** ECDSA
-// VERIFICATION runs on a public key, a message digest and a signature, none
-// of which is secret, so a timing difference in how long an operation takes
-// leaks nothing an attacker does not already have. This module therefore
-// branches on values freely (`compare`, the conditional subtract at the end of
-// every Montgomery multiply, the square-and-multiply exponent bits) and is
-// the opposite of `field25519.m31`, which is written line by line to avoid
-// exactly that. DO NOT USE THIS MODULE TO SIGN, to derive a key, to do a
-// Diffie-Hellman step, or on any other secret: it would leak that secret
-// through timing. A signing implementation needs a separate constant-time
-// field, written the way `field25519.m31` is.
-//
+/*
+ * **Every value this module is built to handle is public.** ECDSA
+ * VERIFICATION runs on a public key, a message digest and a signature, none
+ * of which is secret, so a timing difference in how long an operation takes
+ * leaks nothing an attacker does not already have. This module therefore
+ * branches on values freely (`compare`, the conditional subtract at the end of
+ * every Montgomery multiply, the square-and-multiply exponent bits) and is
+ * the opposite of `field25519.m31`, which is written line by line to avoid
+ * exactly that. DO NOT USE THIS MODULE TO SIGN, to derive a key, to do a
+ * Diffie-Hellman step, or on any other secret: it would leak that secret
+ * through timing. A signing implementation needs a separate constant-time
+ * field, written the way `field25519.m31` is.
+ * */
 // --- representation: 24-bit limbs, little-endian ------------------------------
-//
-// A value is an `Array<int>` of exactly `width` limbs,
-// `value = sum(limb[i] * 2^(24*i))`, every limb in `[0, 2^24)`. The width is a
-// property of the `Modulus` the value belongs to (`make_modulus` derives it
-// from the modulus's byte length: 32 bytes -> 11 limbs, 48 bytes -> 16), and
-// every function below takes values of that one width. A width-`w` value is
-// always fully normalized: no function leaves a limb outside `[0, 2^24)`.
-//
-// 24 bits because `int` is a signed 64-bit integer that TRAPS on overflow and
-// there is no unsigned type. A limb product is below `2^48`, and the sums a
-// Montgomery step forms (a limb, a product, a product, a carry) stay under
-// `2^50` -- thirteen bits of headroom below the `2^63` where a trap would
-// fire, so no operation here can trap on legal input. (A wider limb would
-// still fit, but 24 is the figure TLS's plan settled on, and it keeps a
-// `>> 24` and a `& 0xFFFFFF` exactly one limb.)
-//
+/*
+ * A value is an `Array<int>` of exactly `width` limbs,
+ * `value = sum(limb[i] * 2^(24*i))`, every limb in `[0, 2^24)`. The width is a
+ * property of the `Modulus` the value belongs to (`make_modulus` derives it
+ * from the modulus's byte length: 32 bytes -> 11 limbs, 48 bytes -> 16), and
+ * every function below takes values of that one width. A width-`w` value is
+ * always fully normalized: no function leaves a limb outside `[0, 2^24)`.
+ *
+ * 24 bits because `int` is a signed 64-bit integer that TRAPS on overflow and
+ * there is no unsigned type. A limb product is below `2^48`, and the sums a
+ * Montgomery step forms (a limb, a product, a product, a carry) stay under
+ * `2^50` -- thirteen bits of headroom below the `2^63` where a trap would
+ * fire, so no operation here can trap on legal input. (A wider limb would
+ * still fit, but 24 is the figure TLS's plan settled on, and it keeps a
+ * `>> 24` and a `& 0xFFFFFF` exactly one limb.)
+ * */
 // --- Montgomery form ------------------------------------------------------------
-//
-// With `R = 2^(24*width)`, the Montgomery form of `x` is `x*R mod modulus`.
-// `montgomery_multiply(a, b)` returns `a*b*R^-1 mod modulus`, so on two
-// Montgomery forms it returns the Montgomery form of the product, and the
-// reduction needs no division. `mod_add` / `mod_subtract` are
-// representation-agnostic: they work on plain values and Montgomery forms
-// alike. A plain value `x` multiplied by a Montgomery form `y*R` gives the
-// plain product `x*y` directly, which `ecdsa.m31` uses to avoid converting
-// the scalars it multiplies by an inverse.
-//
-// A modulus must be odd (the Montgomery inverse `-modulus^-1 mod 2^24` does
-// not exist otherwise) and greater than 1.
+/*
+ * With `R = 2^(24*width)`, the Montgomery form of `x` is `x*R mod modulus`.
+ * `montgomery_multiply(a, b)` returns `a*b*R^-1 mod modulus`, so on two
+ * Montgomery forms it returns the Montgomery form of the product, and the
+ * reduction needs no division. `mod_add` / `mod_subtract` are
+ * representation-agnostic: they work on plain values and Montgomery forms
+ * alike. A plain value `x` multiplied by a Montgomery form `y*R` gives the
+ * plain product `x*y` directly, which `ecdsa.m31` uses to avoid converting
+ * the scalars it multiplies by an inverse.
+ *
+ * A modulus must be odd (the Montgomery inverse `-modulus^-1 mod 2^24` does
+ * not exist otherwise) and greater than 1. */
 
 const int LIMB_BITS = 24;
 const int LIMB_MASK = 0xFFFFFF;
 const int LIMB_RADIX = 0x1000000;
 
-/// An odd modulus together with everything Montgomery multiplication needs
-/// that depends only on the modulus, computed once by `make_modulus`.
+/** An odd modulus together with everything Montgomery multiplication needs
+ * that depends only on the modulus, computed once by `make_modulus`. */
 pub type Modulus {
     pub int width;
     pub Array<int> value;
@@ -84,8 +84,8 @@ pub Array<int> from_small(int width, int value) {
     return out;
 }
 
-/// The `width`-limb value that `raw` (big-endian, any leading zeros) encodes.
-/// `raw` must fit: `raw.size() <= 3 * width`, or a limb index traps.
+/** The `width`-limb value that `raw` (big-endian, any leading zeros) encodes.
+ * `raw` must fit: `raw.size() <= 3 * width`, or a limb index traps. */
 pub Array<int> from_bytes(bytes raw, int width) {
     Array<int> out = [0; width];
     int count = raw.size();
@@ -97,9 +97,9 @@ pub Array<int> from_bytes(bytes raw, int width) {
     return out;
 }
 
-/// `value` as exactly `byte_count` big-endian bytes. The value must be less
-/// than `2^(8*byte_count)`; bits above that are silently dropped, so the
-/// caller (always a field or scalar with a known size) is responsible.
+/** `value` as exactly `byte_count` big-endian bytes. The value must be less
+ * than `2^(8*byte_count)`; bits above that are silently dropped, so the
+ * caller (always a field or scalar with a known size) is responsible. */
 pub bytes to_bytes(Array<int> value, int byte_count) {
     bytes out = [0; byte_count];
     for (int index in 0 .. byte_count) {
@@ -163,9 +163,9 @@ pub int bit_length(Array<int> value) {
     return 0;
 }
 
-// `left - right` modulo `2^(24*width)`. Exact when `left >= right`, and the
-// correct wrap-around when the caller knows a carry out of `left` was
-// dropped (see `mod_add`).
+/* `left - right` modulo `2^(24*width)`. Exact when `left >= right`, and the
+ * correct wrap-around when the caller knows a carry out of `left` was
+ * dropped (see `mod_add`). */
 pub Array<int> subtract_limbs(Array<int> left, Array<int> right) {
     int width = left.size();
     Array<int> out = [0; width];
@@ -183,9 +183,9 @@ pub Array<int> subtract_limbs(Array<int> left, Array<int> right) {
     return out;
 }
 
-// `left + right` reduced once by `modulus_value`; both inputs must already be
-// below it. Shared by `mod_add` and by `make_modulus` before a `Modulus`
-// exists to hold the value.
+/* `left + right` reduced once by `modulus_value`; both inputs must already be
+ * below it. Shared by `mod_add` and by `make_modulus` before a `Modulus`
+ * exists to hold the value. */
 Array<int> add_limbs_mod(Array<int> modulus_value, Array<int> left, Array<int> right) {
     int width = modulus_value.size();
     Array<int> out = [0; width];
@@ -227,8 +227,8 @@ pub Array<int> mod_subtract(Modulus modulus, Array<int> left, Array<int> right) 
     return out;
 }
 
-// `left + right` modulo `2^(24*width)`, dropping the carry out: the borrowed
-// bit `mod_subtract` owes goes back in as the `+ modulus` that wraps it.
+/* `left + right` modulo `2^(24*width)`, dropping the carry out: the borrowed
+ * bit `mod_subtract` owes goes back in as the `+ modulus` that wraps it. */
 pub Array<int> add_limbs_wrapping(Array<int> left, Array<int> right) {
     int width = left.size();
     Array<int> out = [0; width];
@@ -241,9 +241,9 @@ pub Array<int> add_limbs_wrapping(Array<int> left, Array<int> right) {
     return out;
 }
 
-/// `value - modulus` when `value >= modulus`, else `value`: reduces a value
-/// known to be below `2 * modulus` (a hash truncated to the order's bit
-/// length, or a field element about to be compared with the order).
+/** `value - modulus` when `value >= modulus`, else `value`: reduces a value
+ * known to be below `2 * modulus` (a hash truncated to the order's bit
+ * length, or a field element about to be compared with the order). */
 pub Array<int> reduce_once(Modulus modulus, Array<int> value) {
     if (compare(value, modulus.value) >= 0) {
         return subtract_limbs(value, modulus.value);
@@ -253,10 +253,10 @@ pub Array<int> reduce_once(Modulus modulus, Array<int> value) {
 
 // --- the modulus ------------------------------------------------------------------
 
-// `-value^-1 mod 2^24` for an odd `value`, by Newton's iteration: starting
-// from `x = value` (correct to 3 bits, since an odd square is 1 mod 8),
-// `x = x * (2 - value * x)` doubles the number of correct bits each round.
-// Every product is masked to a limb first so it stays below `2^48`.
+/* `-value^-1 mod 2^24` for an odd `value`, by Newton's iteration: starting
+ * from `x = value` (correct to 3 bits, since an odd square is 1 mod 8),
+ * `x = x * (2 - value * x)` doubles the number of correct bits each round.
+ * Every product is masked to a limb first so it stays below `2^48`. */
 int negative_inverse_of(int low_limb) {
     int inverse = low_limb;
     for (int round in 0 .. 5) {
@@ -267,15 +267,15 @@ int negative_inverse_of(int low_limb) {
     return LIMB_RADIX - inverse & LIMB_MASK;
 }
 
-/// Everything Montgomery multiplication needs for the odd modulus whose
-/// big-endian bytes are `raw`. The limb width follows from `raw.size()`, so a
-/// 32-byte prime (P-256) gets 11 limbs and a 48-byte one (P-384) gets 16, and
-/// leading zero bytes are not stripped -- they pick the width.
-///
-/// `R mod modulus` and `R^2 mod modulus` come from doubling 1 modulo the
-/// modulus `24*width` and `48*width` times: no division routine is needed,
-/// and the cost (a few hundred modular doublings) is small beside one
-/// signature check.
+/** Everything Montgomery multiplication needs for the odd modulus whose
+ * big-endian bytes are `raw`. The limb width follows from `raw.size()`, so a
+ * 32-byte prime (P-256) gets 11 limbs and a 48-byte one (P-384) gets 16, and
+ * leading zero bytes are not stripped -- they pick the width.
+ *
+ * `R mod modulus` and `R^2 mod modulus` come from doubling 1 modulo the
+ * modulus `24*width` and `48*width` times: no division routine is needed,
+ * and the cost (a few hundred modular doublings) is small beside one
+ * signature check. */
 pub Modulus make_modulus(bytes raw) {
     int width = limbs_for_bytes(raw.size());
     Array<int> value = from_bytes(raw, width);
@@ -293,8 +293,8 @@ pub Modulus make_modulus(bytes raw) {
 
 // --- Montgomery arithmetic ---------------------------------------------------------
 
-/// `left * right * R^-1 mod modulus` (CIOS Montgomery multiplication). Both
-/// inputs must be below the modulus; the result is too.
+/** `left * right * R^-1 mod modulus` (CIOS Montgomery multiplication). Both
+ * inputs must be below the modulus; the result is too. */
 pub Array<int> montgomery_multiply(Modulus modulus, Array<int> left, Array<int> right) {
     int width = modulus.width;
     Array<int> value = modulus.value;
@@ -343,8 +343,8 @@ pub Array<int> montgomery_one(Modulus modulus) {
     return clone(modulus.one_montgomery);
 }
 
-/// `base^exponent` for a Montgomery-form `base` and a plain `exponent`, by
-/// left-to-right square-and-multiply. The exponent is a limb array of any width.
+/** `base^exponent` for a Montgomery-form `base` and a plain `exponent`, by
+ * left-to-right square-and-multiply. The exponent is a limb array of any width. */
 pub Array<int> montgomery_power(Modulus modulus, Array<int> base, Array<int> exponent) {
     Array<int> result = montgomery_one(modulus);
     int position = bit_length(exponent) - 1;
@@ -358,9 +358,9 @@ pub Array<int> montgomery_power(Modulus modulus, Array<int> base, Array<int> exp
     return result;
 }
 
-/// The multiplicative inverse of the Montgomery-form `value`, also in
-/// Montgomery form, by Fermat: `value^(modulus-2)`. The modulus must be
-/// prime and `value` nonzero; zero comes back as zero.
+/** The multiplicative inverse of the Montgomery-form `value`, also in
+ * Montgomery form, by Fermat: `value^(modulus-2)`. The modulus must be
+ * prime and `value` nonzero; zero comes back as zero. */
 pub Array<int> montgomery_inverse(Modulus modulus, Array<int> value) {
     return montgomery_power(modulus, value, modulus.inverse_exponent);
 }

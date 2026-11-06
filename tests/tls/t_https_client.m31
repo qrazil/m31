@@ -1,12 +1,12 @@
-// `https.fetch` over `https://`, driven from `test_https.sh`.
-//
-//   t_https_client <url> <system|ca file|pin:<64 hex digits>> [redirects] [method]
-//   t_https_client parse <url>
-//
-// `parse` prints what `http.parse_url` makes of the URL, with no network.
-//
-// Prints `status <code>`, `body <octets>` and the body's first line as
-// `text <line>` (clipped to 60 octets); or `error <Name>` (the `http.Error` variant) and exits 1.
+/* `https.fetch` over `https://`, driven from `test_https.sh`.
+ *
+ *   t_https_client <url> <system|ca file|pin:<64 hex digits>> [redirects] [method]
+ *   t_https_client parse <url>
+ *
+ * `parse` prints what `http.parse_url` makes of the URL, with no network.
+ *
+ * Prints `status <code>`, `body <octets>` and the body's first line as
+ * `text <line>` (clipped to 60 octets); or `error <Name>` (the `http.Error` variant) and exits 1. */
 
 import net.http;
 import net.https;

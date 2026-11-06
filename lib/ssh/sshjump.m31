@@ -1,32 +1,32 @@
-// Byte streams under an SSH connection that are not a TCP socket: through
-// another SSH server (`ProxyJump`), below, and a child process
-// (`ProxyCommand`, at the end).
-//
-// A byte stream through another SSH server: the transport under a
-// `ProxyJump` / `-J` hop. A `direct-tcpip` channel on an authenticated
-// connection to the jump host (`sshexec.direct_tcpip`) carries the raw bytes
-// of a TCP connection the jump host makes to the next hop, and this type
-// presents that channel as an `ssh.Wire`, so the next hop's SSH handshake,
-// authentication and session run over it unchanged -- the jump host sees
-// only ciphertext of the inner session, and the inner host key is checked by
-// the inner handshake against the inner host's `known_hosts` entry, not the
-// jump host's.
-//
-// API
+/* Byte streams under an SSH connection that are not a TCP socket: through
+ * another SSH server (`ProxyJump`), below, and a child process
+ * (`ProxyCommand`, at the end).
+ *
+ * A byte stream through another SSH server: the transport under a
+ * `ProxyJump` / `-J` hop. A `direct-tcpip` channel on an authenticated
+ * connection to the jump host (`sshexec.direct_tcpip`) carries the raw bytes
+ * of a TCP connection the jump host makes to the next hop, and this type
+ * presents that channel as an `ssh.Wire`, so the next hop's SSH handshake,
+ * authentication and session run over it unchanged -- the jump host sees
+ * only ciphertext of the inner session, and the inner host key is checked by
+ * the inner handshake against the inner host's `known_hosts` entry, not the
+ * jump host's.
+ *
+ * API */
 // ---
-//   sshjump.ChannelWire w = sshjump.open(transport, "inner.example", 22)?;
-//   ssh.connect_with_offer(w, check, offer)       // w is an ssh.Wire
-//
-// The wire owns the jump host's transport and channel; closing it hangs up
-// the channel and then the jump connection.
-//
-// `wait(timeout)` is exact: it is true only when bytes for the inner
-// connection are buffered or the jump socket yields some within the
-// timeout. Jump-host messages that carry none (window adjustments,
-// keepalive replies) are consumed on the way and do not make it true. That
-// is what lets an event loop `poll` the jump host's socket (`fileno`)
-// and still never block inside the inner transport's read for a packet
-// that is not coming.
+/*   sshjump.ChannelWire w = sshjump.open(transport, "inner.example", 22)?;
+ *   ssh.connect_with_offer(w, check, offer)       // w is an ssh.Wire
+ *
+ * The wire owns the jump host's transport and channel; closing it hangs up
+ * the channel and then the jump connection.
+ *
+ * `wait(timeout)` is exact: it is true only when bytes for the inner
+ * connection are buffered or the jump socket yields some within the
+ * timeout. Jump-host messages that carry none (window adjustments,
+ * keepalive replies) are consumed on the way and do not make it true. That
+ * is what lets an event loop `poll` the jump host's socket (`fileno`)
+ * and still never block inside the inner transport's read for a packet
+ * that is not coming. */
 
 import io;
 import os;
@@ -41,9 +41,9 @@ pub type ChannelWire {
     int timeout_ms = 0;
 }
 
-// Reads jump-host messages until some bytes for us are buffered, the
-// channel ends, or (with `is_blocking` false) the jump socket has nothing.
-// `Err` is the transport's failure.
+/* Reads jump-host messages until some bytes for us are buffered, the
+ * channel ends, or (with `is_blocking` false) the jump socket has nothing.
+ * `Err` is the transport's failure. */
 Result<void, io.Error> ChannelWire.pump_until_data(bool is_blocking) {
     while (!channel.has_pending() && !channel.is_eof()) {
         if (!is_blocking) {
@@ -58,8 +58,8 @@ Result<void, io.Error> ChannelWire.pump_until_data(bool is_blocking) {
                 }
             }
         }
-        // One packet, never more: an IGNORE from the jump host is consumed
-        // and the loop re-checks, instead of waiting for the next packet.
+        /* One packet, never more: an IGNORE from the jump host is consumed
+         * and the loop re-checks, instead of waiting for the next packet. */
         match (jump.recv_once()) {
             case Err(ssh.Error error): {
                 if (error.to_str() == ssh.Error.TimedOut.to_str()) {
@@ -117,8 +117,8 @@ pub Result<int, io.Error> ChannelWire.write(bytes data) {
     }
 }
 
-/// Closes the channel (waiting for the jump host's CLOSE) and then the jump
-/// connection.
+/** Closes the channel (waiting for the jump host's CLOSE) and then the jump
+ * connection. */
 pub Result<bool, io.Error> ChannelWire.close() {
     Result<void, sshexec.Error> closed = channel.close();
     Result<bool, ssh.Error> hung_up = jump.disconnect();
@@ -169,8 +169,8 @@ pub int ChannelWire.fileno() {
     return jump.descriptor();
 }
 
-/// Opens a connection to `host`:`port` through `jump` (an authenticated
-/// transport to the jump host). `Err` names the reason.
+/** Opens a connection to `host`:`port` through `jump` (an authenticated
+ * transport to the jump host). `Err` names the reason. */
 pub Result<ChannelWire, str> open(ssh.Transport jump, str host, int port) {
     match (sshexec.direct_tcpip(jump, host, port)) {
         case Ok(sshexec.Channel channel): {
@@ -183,37 +183,37 @@ pub Result<ChannelWire, str> open(ssh.Transport jump, str host, int port) {
 }
 
 // --- ProxyCommand ---------------------------------------------------------------
-//
-// `ProxyCommand`: the transport under an SSH connection is a child process's
-// standard input and output instead of a TCP socket, as with
-// `ProxyCommand nc %h %p` or `ProxyCommand cloudflared access ssh --hostname %h`.
-//
-// API
+/*
+ * `ProxyCommand`: the transport under an SSH connection is a child process's
+ * standard input and output instead of a TCP socket, as with
+ * `ProxyCommand nc %h %p` or `ProxyCommand cloudflared access ssh --hostname %h`.
+ *
+ * API */
 // ---
-//   sshjump.expand(command, host, port, user)  -> str          %h %p %r %%
-//   sshjump.start_command(command, host, port, user)   -> Result<ProcWire, str>
-//
-// The command runs as `sh -c command` (the way OpenSSH runs it), with the
-// connection's bytes on its standard input (ours to it) and standard output
-// (its to us). Its standard error is passed on to ours, as OpenSSH leaves it
-// attached to the terminal: it is drained whenever the connection is read or
-// waited on, and at the end. A `ProcWire` is an `ssh.Wire`; closing it closes
-// the child's pipes, ends the child (SIGTERM) and reaps it. A child that
-// exits is end-of-file to the reader, which the transport reports as the
-// connection closing.
-//
-// What it is not: a way to run a command with a shell injection through the
-// host name. `%h` and `%r` come from the user's own command line and
-// configuration, exactly as in OpenSSH, which does not quote them either;
-// write `ProxyCommand nc %h %p` with the same care as in OpenSSH.
+/*   sshjump.expand(command, host, port, user)  -> str          %h %p %r %%
+ *   sshjump.start_command(command, host, port, user)   -> Result<ProcWire, str>
+ *
+ * The command runs as `sh -c command` (the way OpenSSH runs it), with the
+ * connection's bytes on its standard input (ours to it) and standard output
+ * (its to us). Its standard error is passed on to ours, as OpenSSH leaves it
+ * attached to the terminal: it is drained whenever the connection is read or
+ * waited on, and at the end. A `ProcWire` is an `ssh.Wire`; closing it closes
+ * the child's pipes, ends the child (SIGTERM) and reaps it. A child that
+ * exits is end-of-file to the reader, which the transport reports as the
+ * connection closing.
+ *
+ * What it is not: a way to run a command with a shell injection through the
+ * host name. `%h` and `%r` come from the user's own command line and
+ * configuration, exactly as in OpenSSH, which does not quote them either;
+ * write `ProxyCommand nc %h %p` with the same care as in OpenSSH. */
 
 prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
 
 const int POLL_IN = 1;
 const int CHUNK = 4096;
 
-/// `%h` the host, `%p` the port, `%r` the remote user and `%%` a percent sign
-/// replaced in `command`; any other `%x` stays as written.
+/** `%h` the host, `%p` the port, `%r` the remote user and `%%` a percent sign
+ * replaced in `command`; any other `%x` stays as written. */
 pub str expand(str command, str host, int port, str user) {
     str out = "";
     int index = 0;
@@ -275,8 +275,8 @@ void ProcWire.drain_errors() {
     }
 }
 
-// Waits until standard output has bytes (or has ended), draining standard
-// error meanwhile. `wait_ms` negative waits for ever. True when readable.
+/* Waits until standard output has bytes (or has ended), draining standard
+ * error meanwhile. `wait_ms` negative waits for ever. True when readable. */
 bool ProcWire.is_ready(int wait_ms) {
     int waited = 0;
     while (true) {
@@ -365,8 +365,8 @@ pub Result<bool, net.Error> ProcWire.set_read_timeout(int timeout_milliseconds) 
     return Result<bool, net.Error>.Ok(true);
 }
 
-/// Whether a read would find bytes (or the end) within `timeout_milliseconds`
-/// (negative: for ever).
+/** Whether a read would find bytes (or the end) within `timeout_milliseconds`
+ * (negative: for ever). */
 pub Result<bool, net.Error> ProcWire.wait(int timeout_milliseconds) {
     return Result<bool, net.Error>.Ok(is_ready(timeout_milliseconds));
 }

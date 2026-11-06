@@ -1,8 +1,8 @@
-// Who holds it, for runtime/tests/heapwatch_test.sh: a cache that never lets
-// go of one session in four, each session holding a connection; and pairs of
-// nodes that hold each other through their lists of links, one pair in four
-// never released. Everything else dies young, so both sites learn a short
-// lifetime and the leaked objects become suspects. Runs until it is killed.
+/* Who holds it, for runtime/tests/heapwatch_test.sh: a cache that never lets
+ * go of one session in four, each session holding a connection; and pairs of
+ * nodes that hold each other through their lists of links, one pair in four
+ * never released. Everything else dies young, so both sites learn a short
+ * lifetime and the leaked objects become suspects. Runs until it is killed. */
 import timer;
 
 type Connection {

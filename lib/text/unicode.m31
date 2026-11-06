@@ -1,95 +1,95 @@
-// What a reader means by a character, and the tables that answer it: case
-// mapping, grapheme clusters, display width and normalisation.
-//
-// **Unicode 16.0.0.** Every table below is generated from the Unicode
-// Character Database, and the command that generated it is quoted above it.
-// `unicode.VERSION` is the version those files were, so a program can print
-// what it was built against.
-//
-// | | |
-// |---|---|
-// | `upper`, `lower`, `fold` | full case mapping, and a key for caseless comparison |
-// | `graphemes`, `grapheme_count` | UAX #29: what a reader counts as one character |
-// | `width` | how many terminal columns text takes |
-// | `nfc`, `nfd` | canonical normalisation, so `"é"` and `"e\u{301}"` can be compared |
-//
-// Three counts, each named for what it counts: `s.size()` is bytes,
-// `s.chars().size()` is code points, `unicode.grapheme_count(s)` is
-// characters as a reader means the word.
-//
+/* What a reader means by a character, and the tables that answer it: case
+ * mapping, grapheme clusters, display width and normalisation.
+ *
+ * **Unicode 16.0.0.** Every table below is generated from the Unicode
+ * Character Database, and the command that generated it is quoted above it.
+ * `unicode.VERSION` is the version those files were, so a program can print
+ * what it was built against.
+ *
+ * | | |
+ * |---|---|
+ * | `upper`, `lower`, `fold` | full case mapping, and a key for caseless comparison |
+ * | `graphemes`, `grapheme_count` | UAX #29: what a reader counts as one character |
+ * | `width` | how many terminal columns text takes |
+ * | `nfc`, `nfd` | canonical normalisation, so `"é"` and `"e\u{301}"` can be compared |
+ *
+ * Three counts, each named for what it counts: `s.size()` is bytes,
+ * `s.chars().size()` is code points, `unicode.grapheme_count(s)` is
+ * characters as a reader means the word.
+ * */
 // --- why this is a module and not a method ---------------------------------
-//
-// `s.to_upper()` and `s.to_lower()` stay **ASCII only**: `"école".to_upper()`
-// is `"éCOLE"`. This module's `unicode.upper(s)` is `"ÉCOLE"`. Both exist,
-// and the division is deliberate:
-//
-//   - A method on every `str` is a promise the language keeps everywhere,
-//     and the language is one binary with no data files. Full case mapping
-//     is ~28 KB of tables; putting it behind a method would put it in every
-//     program that uppercases an option name.
-//   - The ASCII rule is total and needs nothing: it is right for a protocol
-//     token, a header name, a file extension, a hex digit -- which is most
-//     of what a program uppercases, and all of what the standard library
-//     does. It is also the one mapping that is the same in every language.
-//   - Full case mapping is not a function from one character to one
-//     character (`ß` is `SS`, one code point becoming two), it depends on
-//     the rest of the string (a final sigma), and in three languages it
-//     depends on the human language the text is in. None of that belongs
-//     behind a name as innocent as `to_upper`.
-//
-// So: `str` answers the ASCII question, `unicode` answers the Unicode one,
-// and a reader of a call site can tell which was meant. Importing this
-// module is what costs the tables -- a program that does not import it emits
-// none of them, because a module's constants are emitted only when the
-// module is loaded.
-//
+/*
+ * `s.to_upper()` and `s.to_lower()` stay **ASCII only**: `"école".to_upper()`
+ * is `"éCOLE"`. This module's `unicode.upper(s)` is `"ÉCOLE"`. Both exist,
+ * and the division is deliberate:
+ *
+ *   - A method on every `str` is a promise the language keeps everywhere,
+ *     and the language is one binary with no data files. Full case mapping
+ *     is ~28 KB of tables; putting it behind a method would put it in every
+ *     program that uppercases an option name.
+ *   - The ASCII rule is total and needs nothing: it is right for a protocol
+ *     token, a header name, a file extension, a hex digit -- which is most
+ *     of what a program uppercases, and all of what the standard library
+ *     does. It is also the one mapping that is the same in every language.
+ *   - Full case mapping is not a function from one character to one
+ *     character (`ß` is `SS`, one code point becoming two), it depends on
+ *     the rest of the string (a final sigma), and in three languages it
+ *     depends on the human language the text is in. None of that belongs
+ *     behind a name as innocent as `to_upper`.
+ *
+ * So: `str` answers the ASCII question, `unicode` answers the Unicode one,
+ * and a reader of a call site can tell which was meant. Importing this
+ * module is what costs the tables -- a program that does not import it emits
+ * none of them, because a module's constants are emitted only when the
+ * module is loaded.
+ * */
 // --- no locale ---------------------------------------------------------------
-//
-// `SpecialCasing.txt` has sixteen conditional mappings. One is conditional on
-// the text alone -- the Greek final sigma, `Σ` at the end of a word lowercases
-// to `ς`, not `σ` -- and this module implements it, because the condition is
-// in the string and an implementation that ignored it would be wrong about
-// ordinary Greek. The other fifteen are conditional on a **language**:
-// Turkish and Azeri map `I` to `ı` and `i` to `İ`, and Lithuanian keeps a dot
-// above a lowercase i under an accent.
-//
-// Those are not implemented, and `upper`/`lower` take no locale, because a
-// locale is not a property of a `str`. The language has no locale type, no
-// notion of a current one, and a `str` carries no tag saying what language
-// its text is in -- so the only honest spelling would be an extra argument
-// on every call, which every call site would have to answer, almost always
-// with "none". A program that genuinely needs Turkish casing knows it does,
-// and can map `I` and `i` itself before calling: the two code points are
-// spelled out, in the open, in that program, rather than hidden behind a
-// flag that is wrong by default. Getting this wrong silently is the famous
-// bug (`"I".to_lower() == "i"` is false in Turkish), and it is worse when a
-// library guesses the locale from the environment, as C's `tolower` does.
-//
-// Turkic **case folding** (`CaseFolding.txt` status T) is dropped for the
-// same reason: `fold` is the default, language-independent folding, which is
-// what a caseless comparison of text of unknown origin wants.
-//
+/*
+ * `SpecialCasing.txt` has sixteen conditional mappings. One is conditional on
+ * the text alone -- the Greek final sigma, `Σ` at the end of a word lowercases
+ * to `ς`, not `σ` -- and this module implements it, because the condition is
+ * in the string and an implementation that ignored it would be wrong about
+ * ordinary Greek. The other fifteen are conditional on a **language**:
+ * Turkish and Azeri map `I` to `ı` and `i` to `İ`, and Lithuanian keeps a dot
+ * above a lowercase i under an accent.
+ *
+ * Those are not implemented, and `upper`/`lower` take no locale, because a
+ * locale is not a property of a `str`. The language has no locale type, no
+ * notion of a current one, and a `str` carries no tag saying what language
+ * its text is in -- so the only honest spelling would be an extra argument
+ * on every call, which every call site would have to answer, almost always
+ * with "none". A program that genuinely needs Turkish casing knows it does,
+ * and can map `I` and `i` itself before calling: the two code points are
+ * spelled out, in the open, in that program, rather than hidden behind a
+ * flag that is wrong by default. Getting this wrong silently is the famous
+ * bug (`"I".to_lower() == "i"` is false in Turkish), and it is worse when a
+ * library guesses the locale from the environment, as C's `tolower` does.
+ *
+ * Turkic **case folding** (`CaseFolding.txt` status T) is dropped for the
+ * same reason: `fold` is the default, language-independent folding, which is
+ * what a caseless comparison of text of unknown origin wants.
+ * */
 // --- the shape of the tables ------------------------------------------------
-//
-// Simple mapping is a list of runs, `(lo, hi, step, delta)`: every code point
-// from `lo` to `hi`, `step` apart, maps by adding `delta`. The step is what
-// makes it small -- Latin Extended-A is 256 alternating upper/lower pairs,
-// `0100 0102 0104 ...` all mapping by -1, which is one run with a step of 2
-// rather than 128 runs. 1,477 upper mappings come to 205 runs, and a lookup
-// is a binary search over them.
-//
-// A mapping that is not one-to-one -- `ß` to `SS` -- cannot be a delta, so it
-// is a second, smaller table looked up first: sorted keys, and the values
-// flattened into one array with an offset per key.
+/*
+ * Simple mapping is a list of runs, `(lo, hi, step, delta)`: every code point
+ * from `lo` to `hi`, `step` apart, maps by adding `delta`. The step is what
+ * makes it small -- Latin Extended-A is 256 alternating upper/lower pairs,
+ * `0100 0102 0104 ...` all mapping by -1, which is one run with a step of 2
+ * rather than 128 runs. 1,477 upper mappings come to 205 runs, and a lookup
+ * is a binary search over them.
+ *
+ * A mapping that is not one-to-one -- `ß` to `SS` -- cannot be a delta, so it
+ * is a second, smaller table looked up first: sorted keys, and the values
+ * flattened into one array with an offset per key. */
 
 /// The version of the Unicode Character Database these tables come from.
 pub const str VERSION = "16.0.0";
 
-/// `text` with every character replaced by its uppercase form.
-///
-/// Full mapping, so the result may be longer than the input in characters as
-/// well as in bytes: `unicode.upper("straße")` is `"STRASSE"`. Not
-/// locale-sensitive; see the module header.
+/** `text` with every character replaced by its uppercase form.
+ *
+ * Full mapping, so the result may be longer than the input in characters as
+ * well as in bytes: `unicode.upper("straße")` is `"STRASSE"`. Not
+ * locale-sensitive; see the module header. */
 pub str upper(str text) {
     List<int> out = [];
     for (int code_point in text.chars()) {
@@ -103,11 +103,11 @@ pub str upper(str text) {
     return str.from_chars(out);
 }
 
-/// `text` with every character replaced by its lowercase form.
-///
-/// A capital sigma at the end of a word becomes `ς` rather than `σ`, which
-/// is the one context-dependent rule this module implements (see the header);
-/// `unicode.lower("ΟΔΟΣ")` is `"οδος"`.
+/** `text` with every character replaced by its lowercase form.
+ *
+ * A capital sigma at the end of a word becomes `ς` rather than `σ`, which
+ * is the one context-dependent rule this module implements (see the header);
+ * `unicode.lower("ΟΔΟΣ")` is `"οδος"`. */
 pub str lower(str text) {
     List<int> cps = text.chars();
     List<int> out = [];
@@ -128,15 +128,15 @@ pub str lower(str text) {
     return str.from_chars(out);
 }
 
-/// `text` folded for caseless comparison: `unicode.fold(a) == unicode.fold(b)`
-/// is the caseless equality of `a` and `b`.
-///
-/// This is Unicode's full, default case folding (`CaseFolding.txt`, statuses
-/// C and F), which is *not* the same thing as lowercasing: it maps `ß` to
-/// `ss` and `ς` to `σ` so that the pairs compare equal, and it is defined to
-/// be stable under itself. The result is not text to show anyone -- it is a
-/// key. Folding does not normalise, so `"é"` and `"e\u{301}"` still differ;
-/// that is `fold(nfc(s))`, in that order, and neither is a collation.
+/** `text` folded for caseless comparison: `unicode.fold(a) == unicode.fold(b)`
+ * is the caseless equality of `a` and `b`.
+ *
+ * This is Unicode's full, default case folding (`CaseFolding.txt`, statuses
+ * C and F), which is *not* the same thing as lowercasing: it maps `ß` to
+ * `ss` and `ς` to `σ` so that the pairs compare equal, and it is defined to
+ * be stable under itself. The result is not text to show anyone -- it is a
+ * key. Folding does not normalise, so `"é"` and `"e\u{301}"` still differ;
+ * that is `fold(nfc(s))`, in that order, and neither is a collation. */
 pub str fold(str text) {
     List<int> out = [];
     for (int code_point in text.chars()) {
@@ -152,11 +152,11 @@ pub str fold(str text) {
 
 // --- the lookups -------------------------------------------------------------
 
-/// What to add to `code_point` to map it, or 0 if this table leaves it alone.
-///
-/// A binary search over `(lo, hi, step, delta)` runs of four. A table is a
-/// module constant, so it is static data in the emitted program and this is
-/// four bounds-checked loads a step.
+/** What to add to `code_point` to map it, or 0 if this table leaves it alone.
+ *
+ * A binary search over `(lo, hi, step, delta)` runs of four. A table is a
+ * module constant, so it is static data in the emitted program and this is
+ * four bounds-checked loads a step. */
 int run_delta(Array<int> runs, int code_point) {
     int low = 0;
     int high = runs.size() / 4 - 1;
@@ -226,13 +226,13 @@ const int CAPITAL_SIGMA = 931;
 /// U+03C2 GREEK SMALL LETTER FINAL SIGMA.
 const int FINAL_SIGMA = 962;
 
-/// Is the sigma at `cps[i]` at the end of a word?
-///
-/// UAX #21's `Final_Sigma` condition, word for word: it is preceded by a
-/// cased character, and not followed by one -- looking through characters
-/// that carry no case of their own (accents, the apostrophe in `ΜΑΪΟΣ'`) in
-/// both directions. `"ΣΣ"` lowercases to `"σς"`: the first sigma has nothing
-/// cased before it, the second has nothing cased after it.
+/** Is the sigma at `cps[i]` at the end of a word?
+ *
+ * UAX #21's `Final_Sigma` condition, word for word: it is preceded by a
+ * cased character, and not followed by one -- looking through characters
+ * that carry no case of their own (accents, the apostrophe in `ΜΑΪΟΣ'`) in
+ * both directions. `"ΣΣ"` lowercases to `"σς"`: the first sigma has nothing
+ * cased before it, the second has nothing cased after it. */
 bool is_final_sigma(List<int> cps, int sigma_index) {
     int before_index = sigma_index - 1;
     while (before_index >= 0 && is_in_ranges(CASE_IGNORABLE, cps[before_index])) {
@@ -250,23 +250,23 @@ bool is_final_sigma(List<int> cps, int sigma_index) {
 }
 
 // --- grapheme clusters ---------------------------------------------------------
-//
-// UAX #29's extended grapheme clusters: what a reader calls one character,
-// and what a text editor moves the cursor over. `size()` counts bytes,
-// `chars().size()` counts code points, `unicode.grapheme_count(s)` counts
-// these -- three counts, each named for what it counts.
-//
-// The rules are a small state machine over a class per code point, and the
-// class comes from GCB_RANGES. Everything with a name below is a rule of
-// UAX #29 §3.1.1, quoted where it is checked. The state the machine carries
-// is three counters, because three rules look further back than one
-// character: a run of regional indicators (a flag is two, so the third one
-// starts a new flag), an emoji joined by ZWJ, and an Indic consonant
-// conjunct.
+/*
+ * UAX #29's extended grapheme clusters: what a reader calls one character,
+ * and what a text editor moves the cursor over. `size()` counts bytes,
+ * `chars().size()` counts code points, `unicode.grapheme_count(s)` counts
+ * these -- three counts, each named for what it counts.
+ *
+ * The rules are a small state machine over a class per code point, and the
+ * class comes from GCB_RANGES. Everything with a name below is a rule of
+ * UAX #29 §3.1.1, quoted where it is checked. The state the machine carries
+ * is three counters, because three rules look further back than one
+ * character: a run of regional indicators (a flag is two, so the third one
+ * starts a new flag), an emoji joined by ZWJ, and an Indic consonant
+ * conjunct. */
 
-/// The grapheme clusters of `text`, in order: one element per character a
-/// reader would count. `unicode.graphemes("")` is empty, and joining the
-/// result with `""` gives `text` back.
+/** The grapheme clusters of `text`, in order: one element per character a
+ * reader would count. `unicode.graphemes("")` is empty, and joining the
+ * result with `""` gives `text` back. */
 pub List<str> graphemes(str text) {
     List<int> starts = cluster_starts(text);
     List<str> out = [];
@@ -276,32 +276,32 @@ pub List<str> graphemes(str text) {
     return out;
 }
 
-/// How many grapheme clusters `text` has, without building them.
-///
-/// `"👍🏽".size()` is 8, `"👍🏽".chars().size()` is 2, and this is 1.
+/** How many grapheme clusters `text` has, without building them.
+ *
+ * `"👍🏽".size()` is 8, `"👍🏽".chars().size()` is 2, and this is 1. */
 pub int grapheme_count(str text) {
     return cluster_starts(text).size() - 1;
 }
 
-/// The byte offset where each cluster begins, and `s.size()` last, so that
-/// consecutive offsets bracket a cluster. Empty text gives `[0]`, one
-/// offset and no clusters.
-///
-/// Offsets rather than strings because both callers want them: `graphemes`
-/// cuts the original bytes out with `substr` (which is why nothing is
-/// re-encoded, and why every offset is on a character boundary by
-/// construction), and `width` only measures.
+/** The byte offset where each cluster begins, and `s.size()` last, so that
+ * consecutive offsets bracket a cluster. Empty text gives `[0]`, one
+ * offset and no clusters.
+ *
+ * Offsets rather than strings because both callers want them: `graphemes`
+ * cuts the original bytes out with `substr` (which is why nothing is
+ * re-encoded, and why every offset is on a character boundary by
+ * construction), and `width` only measures. */
 List<int> cluster_starts(str text) {
     List<int> cps = text.chars();
     List<int> out = [0];
     int code_point_count = cps.size();
     int byte_offset = 0;
     int previous_class = 0;
-    // The three pieces of history the rules need. `indicator_run` is how many regional
-    // indicators run up to the character before the one being judged; `pic`
-    // is 1 after an emoji and any extending characters, 2 once a ZWJ has
-    // followed it; `cons` is 1 after an Indic consonant and any extenders,
-    // 2 once one of them was a linker.
+    /* The three pieces of history the rules need. `indicator_run` is how many regional
+     * indicators run up to the character before the one being judged; `pic`
+     * is 1 after an emoji and any extending characters, 2 once a ZWJ has
+     * followed it; `cons` is 1 after an Indic consonant and any extenders,
+     * 2 once one of them was a linker. */
     int indicator_run = 0;
     int pic = 0;
     int cons = 0;
@@ -346,16 +346,16 @@ List<int> cluster_starts(str text) {
     return out;
 }
 
-/// Is there a cluster boundary between `previous_class` and `current_class`?
-///
-/// The rules of UAX #29 §3.1.1 in their order, which matters: the first one
-/// that matches decides. GB1, GB2 (start and end of text) are the caller's,
-/// and GB999 -- break anywhere else -- is the last line.
+/** Is there a cluster boundary between `previous_class` and `current_class`?
+ *
+ * The rules of UAX #29 §3.1.1 in their order, which matters: the first one
+ * that matches decides. GB1, GB2 (start and end of text) are the caller's,
+ * and GB999 -- break anywhere else -- is the last line. */
 bool should_break(int previous_class, int current_class, int indicator_run, int pic, int cons) {
     int previous_break = previous_class & 15;
     int current_break = current_class & 15;
-    // GB3: CR LF is one cluster, and GB4/GB5: everything else parts around
-    // a control character, in both directions.
+    /* GB3: CR LF is one cluster, and GB4/GB5: everything else parts around
+     * a control character, in both directions. */
     if (previous_break == GCB_CR && current_break == GCB_LF) {
         return false;
     }
@@ -375,8 +375,8 @@ bool should_break(int previous_class, int current_class, int indicator_run, int 
     if ((previous_break == GCB_LVT || previous_break == GCB_T) && current_break == GCB_T) {
         return false;
     }
-    // GB9, GB9a, GB9b: an accent, a spacing mark or a joiner belongs to what
-    // it is attached to, and a prepending character to what follows it.
+    /* GB9, GB9a, GB9b: an accent, a spacing mark or a joiner belongs to what
+     * it is attached to, and a prepending character to what follows it. */
     if (current_break == GCB_EXTEND || current_break == GCB_ZWJ) {
         return false;
     }
@@ -386,8 +386,8 @@ bool should_break(int previous_class, int current_class, int indicator_run, int 
     if (previous_break == GCB_PREPEND) {
         return false;
     }
-    // GB9c: an Indic conjunct -- consonant, linker, consonant -- is one
-    // cluster, however many extending characters are in between.
+    /* GB9c: an Indic conjunct -- consonant, linker, consonant -- is one
+     * cluster, however many extending characters are in between. */
     if (cons == 2 && current_class >> 5 & 3 == INCB_CONSONANT) {
         return false;
     }
@@ -395,22 +395,22 @@ bool should_break(int previous_class, int current_class, int indicator_run, int 
     if (pic == 2 && (current_class & 16) != 0) {
         return false;
     }
-    // GB12, GB13: regional indicators pair up into flags, so a break falls
-    // between pairs and not inside one.
+    /* GB12, GB13: regional indicators pair up into flags, so a break falls
+     * between pairs and not inside one. */
     if (previous_break == GCB_REGIONAL_INDICATOR && current_break == GCB_REGIONAL_INDICATOR && indicator_run % 2 == 1) {
         return false;
     }
     return true;
 }
 
-/// The packed class of `code_point`: a Grapheme_Cluster_Break value in the low four
-/// bits, Extended_Pictographic in bit 4, and Indic_Conjunct_Break in bits
-/// 5 and 6.
+/** The packed class of `code_point`: a Grapheme_Cluster_Break value in the low four
+ * bits, Extended_Pictographic in bit 4, and Indic_Conjunct_Break in bits
+ * 5 and 6. */
 int class_of(int code_point) {
-    // The 11,172 Hangul syllables are arithmetic, not a table: they are laid
-    // out as (lead, vowel, trailing), and a syllable with no trailing jamo is
-    // LV, one with is LVT. That is 798 lines of GraphemeBreakProperty.txt
-    // this table does not carry.
+    /* The 11,172 Hangul syllables are arithmetic, not a table: they are laid
+     * out as (lead, vowel, trailing), and a syllable with no trailing jamo is
+     * LV, one with is LVT. That is 798 lines of GraphemeBreakProperty.txt
+     * this table does not carry. */
     if (code_point >= HANGUL_BASE && code_point < HANGUL_BASE + HANGUL_COUNT) {
         if ((code_point - HANGUL_BASE) % HANGUL_TRAILING == 0) {
             return GCB_LV;
@@ -433,8 +433,8 @@ int class_of(int code_point) {
     return GCB_OTHER;
 }
 
-/// How many bytes `code_point` takes in UTF-8. The four cases of §3.2a, in the same
-/// shape `__text.from_chars` encodes them.
+/** How many bytes `code_point` takes in UTF-8. The four cases of §3.2a, in the same
+ * shape `__text.from_chars` encodes them. */
 int utf8_length(int code_point) {
     if (code_point < 128) {
         return 1;
@@ -448,8 +448,8 @@ int utf8_length(int code_point) {
     return 4;
 }
 
-// The Grapheme_Cluster_Break values, in the order GCB_RANGES was generated
-// with: the low four bits of a packed class.
+/* The Grapheme_Cluster_Break values, in the order GCB_RANGES was generated
+ * with: the low four bits of a packed class. */
 const int GCB_OTHER = 0;
 const int GCB_CR = 1;
 const int GCB_LF = 2;
@@ -469,43 +469,43 @@ const int INCB_NONE = 0;
 const int INCB_LINKER = 1;
 const int INCB_CONSONANT = 2;
 const int INCB_EXTEND = 3;
-/// U+AC00, the first Hangul syllable, and the shape of the block: 19 leads
-/// times 21 vowels times 28 trailings (the first of which is "none").
+/** U+AC00, the first Hangul syllable, and the shape of the block: 19 leads
+ * times 21 vowels times 28 trailings (the first of which is "none"). */
 const int HANGUL_BASE = 44032;
 const int HANGUL_TRAILING = 28;
 const int HANGUL_COUNT = 11172;
 
 // --- display width --------------------------------------------------------------
-//
-// How many columns `s` takes in a terminal that draws text in a grid: an
-// East Asian wide or fullwidth character is two, a combining mark is none,
-// everything else is one. This is what a table of options, a progress bar or
-// a box drawing has to know, and `size()` is the wrong answer for all three
-// -- `args` pads its help table by `size()` today, so a non-ASCII option name
-// misaligns its column; that is for whoever changes `args`, not this module.
-//
-// **Width is per grapheme cluster, not per code point.** `👍🏽` is two code
-// points, each of them wide, and a terminal draws one glyph two columns
-// wide; summing per code point would say four. So the text is clustered
-// first (UAX #29, above) and each cluster is measured once, by its base
-// character.
-//
-// There is no standard that says what a terminal does -- EastAsianWidth.txt
-// is a property, not a promise -- and terminals disagree, most visibly about
-// emoji. The rules here are the ones the common terminals agree on:
-//
-//   - a cluster whose base is East Asian Wide or Fullwidth: 2 columns;
-//   - a cluster carrying U+FE0F, the emoji presentation selector: 2, which
-//     is what makes `1️⃣` two columns although `1` is one;
-//   - a pair of regional indicators -- a flag: 2, although each half is
-//     neutral on its own;
-//   - a cluster whose base is a combining mark, a format character or a
-//     control: 0;
-//   - everything else: 1.
-//
-// A control character is 0 rather than an error: this answers "how wide is
-// this text", and a program that cares whether its text has control characters
-// asks that separately.
+/*
+ * How many columns `s` takes in a terminal that draws text in a grid: an
+ * East Asian wide or fullwidth character is two, a combining mark is none,
+ * everything else is one. This is what a table of options, a progress bar or
+ * a box drawing has to know, and `size()` is the wrong answer for all three
+ * -- `args` pads its help table by `size()` today, so a non-ASCII option name
+ * misaligns its column; that is for whoever changes `args`, not this module.
+ *
+ * **Width is per grapheme cluster, not per code point.** `👍🏽` is two code
+ * points, each of them wide, and a terminal draws one glyph two columns
+ * wide; summing per code point would say four. So the text is clustered
+ * first (UAX #29, above) and each cluster is measured once, by its base
+ * character.
+ *
+ * There is no standard that says what a terminal does -- EastAsianWidth.txt
+ * is a property, not a promise -- and terminals disagree, most visibly about
+ * emoji. The rules here are the ones the common terminals agree on:
+ *
+ *   - a cluster whose base is East Asian Wide or Fullwidth: 2 columns;
+ *   - a cluster carrying U+FE0F, the emoji presentation selector: 2, which
+ *     is what makes `1️⃣` two columns although `1` is one;
+ *   - a pair of regional indicators -- a flag: 2, although each half is
+ *     neutral on its own;
+ *   - a cluster whose base is a combining mark, a format character or a
+ *     control: 0;
+ *   - everything else: 1.
+ *
+ * A control character is 0 rather than an error: this answers "how wide is
+ * this text", and a program that cares whether its text has control characters
+ * asks that separately. */
 
 /// The width of `text` in terminal columns.
 pub int width(str text) {
@@ -538,8 +538,8 @@ int cluster_width(str cluster) {
     return char_width(cps[0]);
 }
 
-/// The width of one code point: 0, 1 or 2, from WIDTH_RANGES, which holds
-/// only the code points that are not 1.
+/** The width of one code point: 0, 1 or 2, from WIDTH_RANGES, which holds
+ * only the code points that are not 1. */
 int char_width(int code_point) {
     int low = 0;
     int high = WIDTH_RANGES.size() / 3 - 1;
@@ -564,39 +564,39 @@ const int REGIONAL_INDICATOR_FIRST = 127462;
 const int REGIONAL_INDICATOR_LAST = 127487;
 
 // --- normalisation ---------------------------------------------------------------
-//
-// `"é"` can be one code point (U+00E9) or two (`e` and U+0301), and `==`
-// compares bytes, so the two spellings are different strings (reference
-// §3.2a). Normalisation is how a program asks whether they are the same
-// text: put both in the same form first.
-//
-//   - `nfd(s)` takes every character apart into its base and its marks, and
-//     puts the marks in Unicode's canonical order.
-//   - `nfc(s)` does that and then puts back together everything that has a
-//     single-character spelling. This is the form the web, filesystems and
-//     most text on disk are already in, and it is what a program should
-//     normalise to before comparing or storing text.
-//
-// Only the **canonical** forms. NFKC and NFKD -- the compatibility forms,
-// which turn `ﬁ` into `fi` and `①` into `1` -- are 3,832 more decompositions
-// and a different question: they discard distinctions on purpose, which is
-// right for a search index and wrong for text you will show again. Nothing
-// needs them yet.
-//
-// Normalisation is not case folding and neither is a collation: a caseless
-// comparison is `fold(nfc(a)) == fold(nfc(b))`, in that order, and sorting
-// text the way a dictionary does needs the Unicode Collation Algorithm,
-// which is a much larger table than any of these.
+/*
+ * `"é"` can be one code point (U+00E9) or two (`e` and U+0301), and `==`
+ * compares bytes, so the two spellings are different strings (reference
+ * §3.2a). Normalisation is how a program asks whether they are the same
+ * text: put both in the same form first.
+ *
+ *   - `nfd(s)` takes every character apart into its base and its marks, and
+ *     puts the marks in Unicode's canonical order.
+ *   - `nfc(s)` does that and then puts back together everything that has a
+ *     single-character spelling. This is the form the web, filesystems and
+ *     most text on disk are already in, and it is what a program should
+ *     normalise to before comparing or storing text.
+ *
+ * Only the **canonical** forms. NFKC and NFKD -- the compatibility forms,
+ * which turn `ﬁ` into `fi` and `①` into `1` -- are 3,832 more decompositions
+ * and a different question: they discard distinctions on purpose, which is
+ * right for a search index and wrong for text you will show again. Nothing
+ * needs them yet.
+ *
+ * Normalisation is not case folding and neither is a collation: a caseless
+ * comparison is `fold(nfc(a)) == fold(nfc(b))`, in that order, and sorting
+ * text the way a dictionary does needs the Unicode Collation Algorithm,
+ * which is a much larger table than any of these. */
 
 /// `text` in Normalization Form D: fully decomposed, marks in canonical order.
 pub str nfd(str text) {
     return str.from_chars(decomposed(text));
 }
 
-/// `text` in Normalization Form C: decomposed, then composed again.
-///
-/// `unicode.nfc("e\u{301}") == "\u{e9}"`, and `nfc` of text that is already
-/// in NFC -- which most text is -- gives it back unchanged.
+/** `text` in Normalization Form C: decomposed, then composed again.
+ *
+ * `unicode.nfc("e\u{301}") == "\u{e9}"`, and `nfc` of text that is already
+ * in NFC -- which most text is -- gives it back unchanged. */
 pub str nfc(str text) {
     return str.from_chars(composed(decomposed(text)));
 }
@@ -614,8 +614,8 @@ List<int> decomposed(str text) {
 /// Append the canonical decomposition of `code_point` to `out`.
 void decompose(List<int> out, int code_point) {
     if (code_point >= HANGUL_BASE && code_point < HANGUL_BASE + HANGUL_COUNT) {
-        // A syllable is (lead, vowel, trailing) in a fixed arithmetic
-        // layout, so 11,172 of them need no table at all.
+        /* A syllable is (lead, vowel, trailing) in a fixed arithmetic
+         * layout, so 11,172 of them need no table at all. */
         int syllable_offset = code_point - HANGUL_BASE;
         out.push(HANGUL_LEAD_BASE + syllable_offset / (HANGUL_VOWELS * HANGUL_TRAILING));
         out.push(HANGUL_VOWEL_BASE + syllable_offset / HANGUL_TRAILING % HANGUL_VOWELS);
@@ -634,12 +634,12 @@ void decompose(List<int> out, int code_point) {
     append_slice(out, DECOMP_TO, DECOMP_AT[decomposition_index], DECOMP_AT[decomposition_index + 1]);
 }
 
-/// Put every run of combining marks into canonical order, in place.
-///
-/// An insertion sort on the combining class, which is the algorithm the
-/// standard describes (D109) rather than a choice: it is stable, marks of
-/// equal class must keep their order, and a run is two or three characters
-/// in any real text.
+/** Put every run of combining marks into canonical order, in place.
+ *
+ * An insertion sort on the combining class, which is the algorithm the
+ * standard describes (D109) rather than a choice: it is stable, marks of
+ * equal class must keep their order, and a run is two or three characters
+ * in any real text. */
 void reorder(List<int> cps) {
     int code_point_count = cps.size();
     for (int i in 1 .. code_point_count) {
@@ -656,19 +656,19 @@ void reorder(List<int> cps) {
     }
 }
 
-/// Compose a decomposed, ordered sequence: the NFC half.
-///
-/// The standard's algorithm (D117): walk the characters, and combine each
-/// one into the last starter -- a character of combining class 0 -- unless
-/// something between them blocks it. A character is blocked when the one
-/// before it is a starter itself or carries a combining class at least as
-/// large, which is what keeps `q + U+0307 + U+0323` from composing the dot
-/// above onto the q past the dot below.
+/** Compose a decomposed, ordered sequence: the NFC half.
+ *
+ * The standard's algorithm (D117): walk the characters, and combine each
+ * one into the last starter -- a character of combining class 0 -- unless
+ * something between them blocks it. A character is blocked when the one
+ * before it is a starter itself or carries a combining class at least as
+ * large, which is what keeps `q + U+0307 + U+0323` from composing the dot
+ * above onto the q past the dot below. */
 List<int> composed(List<int> cps) {
     List<int> out = [];
     int starter = -1;
-    // The class of the last character put after the starter, or -1 if the
-    // next character follows the starter directly.
+    /* The class of the last character put after the starter, or -1 if the
+     * next character follows the starter directly. */
     int last = -1;
     int code_point_count = cps.size();
     for (int i in 0 .. code_point_count) {
@@ -694,8 +694,8 @@ List<int> composed(List<int> cps) {
 
 /// The single character `first_point` and `second_point` compose to, or -1.
 int composite(int first_point, int second_point) {
-    // Hangul, again arithmetic: lead + vowel makes a syllable, and a
-    // syllable with no trailing jamo plus one makes a fuller syllable.
+    /* Hangul, again arithmetic: lead + vowel makes a syllable, and a
+     * syllable with no trailing jamo plus one makes a fuller syllable. */
     if (first_point >= HANGUL_LEAD_BASE && first_point < HANGUL_LEAD_BASE + HANGUL_LEADS && second_point >= HANGUL_VOWEL_BASE && second_point < HANGUL_VOWEL_BASE + HANGUL_VOWELS) {
         int syllable_index = (first_point - HANGUL_LEAD_BASE) * HANGUL_VOWELS + (second_point - HANGUL_VOWEL_BASE);
         return HANGUL_BASE + syllable_index * HANGUL_TRAILING;
@@ -719,8 +719,8 @@ int composite(int first_point, int second_point) {
     return -1;
 }
 
-/// The canonical combining class of `code_point`: 0 for everything that is not a
-/// mark, which is why the table holds only what is not 0.
+/** The canonical combining class of `code_point`: 0 for everything that is not a
+ * mark, which is why the table holds only what is not 0. */
 int ccc(int code_point) {
     int low = 0;
     int high = CCC_RANGES.size() / 3 - 1;
@@ -738,10 +738,10 @@ int ccc(int code_point) {
     return 0;
 }
 
-/// The Hangul block, which the standard lays out as arithmetic: 19 leading
-/// jamo from U+1100, 21 vowels from U+1161, 27 trailing jamo from U+11A8
-/// (U+11A7, one below, stands for "none"), and a syllable at U+AC00 for
-/// every combination.
+/** The Hangul block, which the standard lays out as arithmetic: 19 leading
+ * jamo from U+1100, 21 vowels from U+1161, 27 trailing jamo from U+11A8
+ * (U+11A7, one below, stands for "none"), and a syllable at U+AC00 for
+ * every combination. */
 const int HANGUL_LEAD_BASE = 4352;
 const int HANGUL_VOWEL_BASE = 4449;
 const int HANGUL_TRAIL_BASE = 4519;
@@ -749,37 +749,37 @@ const int HANGUL_LEADS = 19;
 const int HANGUL_VOWELS = 21;
 
 // --- the tables ---------------------------------------------------------------
-//
-// Generated, not written. Every array below came out of
-//
-//     python3 gen.py case
-//
-// reading the Unicode Character Database 16.0.0 as installed at
-// /usr/share/unicode/ucd. The script is not in the repository (it is a
-// build-time tool for a file that changes once a Unicode version); what it
-// does to each table is written above that table, and the counts are its
-// output, so a regeneration that disagrees with them is a change to report.
-//
-// The run encoder both simple tables use, and the whole of the compression:
-// a code point maps by adding `delta`, runs of code points that share one
-// delta become one entry, and a run whose members are two apart -- the
-// alternating upper/lower pairs Latin Extended-A and Cyrillic are built from
-// -- becomes one entry with a step of 2 rather than one entry each.
-//
-//     def runs_of(m):                    # m: cp -> mapped cp, from the UCD
-//         cps = sorted(m); out = []; i = 0
-//         while i < len(cps):
-//             cp = cps[i]; d = m[cp] - cp; j = i; k = i
-//             while (j + 1 < len(cps) and cps[j+1] == cps[j] + 1
-//                    and m[cps[j+1]] - cps[j+1] == d): j += 1
-//             while (k + 1 < len(cps) and cps[k+1] == cps[k] + 2
-//                    and m[cps[k+1]] - cps[k+1] == d): k += 1
-//             if k > j: out.append([cp, cps[k], 2, d]); i = k + 1
-//             else:     out.append([cp, cps[j], 1, d]); i = j + 1
-//         return out
+/*
+ * Generated, not written. Every array below came out of
+ *
+ *     python3 gen.py case
+ *
+ * reading the Unicode Character Database 16.0.0 as installed at
+ * /usr/share/unicode/ucd. The script is not in the repository (it is a
+ * build-time tool for a file that changes once a Unicode version); what it
+ * does to each table is written above that table, and the counts are its
+ * output, so a regeneration that disagrees with them is a change to report.
+ *
+ * The run encoder both simple tables use, and the whole of the compression:
+ * a code point maps by adding `delta`, runs of code points that share one
+ * delta become one entry, and a run whose members are two apart -- the
+ * alternating upper/lower pairs Latin Extended-A and Cyrillic are built from
+ * -- becomes one entry with a step of 2 rather than one entry each.
+ *
+ *     def runs_of(m):                    # m: cp -> mapped cp, from the UCD
+ *         cps = sorted(m); out = []; i = 0
+ *         while i < len(cps):
+ *             cp = cps[i]; d = m[cp] - cp; j = i; k = i
+ *             while (j + 1 < len(cps) and cps[j+1] == cps[j] + 1
+ *                    and m[cps[j+1]] - cps[j+1] == d): j += 1
+ *             while (k + 1 < len(cps) and cps[k+1] == cps[k] + 2
+ *                    and m[cps[k+1]] - cps[k+1] == d): k += 1
+ *             if k > j: out.append([cp, cps[k], 2, d]); i = k + 1
+ *             else:     out.append([cp, cps[j], 1, d]); i = j + 1
+ *         return out */
 
-// Simple uppercase: UnicodeData.txt field 12, 1477 mappings in 205 runs of
-// (lo, hi, step, delta).
+/* Simple uppercase: UnicodeData.txt field 12, 1477 mappings in 205 runs of
+ * (lo, hi, step, delta). */
 const Array<int> UPPER_RUNS = [
     97, 122, 1, -32, 181, 181, 1, 743, 224, 246, 1, -32,
     248, 254, 1, -32, 255, 255, 1, 121, 257, 303, 2, -1,
@@ -919,8 +919,8 @@ const Array<int> LOWER_RUNS = [
     125184, 125217, 1, 34
 ];
 
-// Simple case folding: CaseFolding.txt statuses C and S, 1484 mappings in 210
-// runs. Status T, the Turkic forms, is left out on purpose.
+/* Simple case folding: CaseFolding.txt statuses C and S, 1484 mappings in 210
+ * runs. Status T, the Turkic forms, is left out on purpose. */
 const Array<int> FOLD_RUNS = [
     65, 90, 1, 32, 181, 181, 1, 775, 192, 214, 1, 32,
     216, 222, 1, 32, 256, 302, 2, 1, 306, 310, 2, 1,
@@ -994,11 +994,11 @@ const Array<int> FOLD_RUNS = [
     71840, 71871, 1, 32, 93760, 93791, 1, 32, 125184, 125217, 1, 34
 ];
 
-// The uppercase mappings that are not one code point to one: SpecialCasing.txt
-// field 3, 102 of them, every line whose condition field is empty and whose
-// mapping differs from the simple one -- `00DF` (ß) to `0053 0053`, the
-// ligatures, the Greek iota subscripts. Sorted keys; the characters they map
-// to are in SPECIAL_UPPER_TO.
+/* The uppercase mappings that are not one code point to one: SpecialCasing.txt
+ * field 3, 102 of them, every line whose condition field is empty and whose
+ * mapping differs from the simple one -- `00DF` (ß) to `0053 0053`, the
+ * ligatures, the Greek iota subscripts. Sorted keys; the characters they map
+ * to are in SPECIAL_UPPER_TO. */
 const Array<int> SPECIAL_UPPER_FROM = [
     223, 329, 496, 912, 944, 1415, 7830, 7831, 7832, 7833, 7834, 8016,
     8018, 8020, 8022, 8064, 8065, 8066, 8067, 8068, 8069, 8070, 8071, 8072,
@@ -1046,9 +1046,9 @@ const Array<int> SPECIAL_UPPER_TO = [
     1358, 1350, 1348, 1341
 ];
 
-// The same for lowercase (SpecialCasing.txt field 1): 1 entry, `0130` (the
-// Turkish dotted capital I), whose lowercase is `i` plus a combining dot above
-// in every language. The locale-conditional lines are not here; see the header.
+/* The same for lowercase (SpecialCasing.txt field 1): 1 entry, `0130` (the
+ * Turkish dotted capital I), whose lowercase is `i` plus a combining dot above
+ * in every language. The locale-conditional lines are not here; see the header. */
 const Array<int> SPECIAL_LOWER_FROM = [
     304
 ];
@@ -1062,8 +1062,8 @@ const Array<int> SPECIAL_LOWER_TO = [
     105, 775
 ];
 
-// Full case folding: CaseFolding.txt status F, 104 entries that fold to more
-// than one character, looked up before FOLD_RUNS.
+/* Full case folding: CaseFolding.txt status F, 104 entries that fold to more
+ * than one character, looked up before FOLD_RUNS. */
 const Array<int> FOLD_FULL_FROM = [
     223, 304, 329, 496, 912, 944, 1415, 7830, 7831, 7832, 7833, 7834,
     7838, 8016, 8018, 8020, 8022, 8064, 8065, 8066, 8067, 8068, 8069, 8070,
@@ -1111,9 +1111,9 @@ const Array<int> FOLD_FULL_TO = [
     1396, 1381, 1396, 1387, 1406, 1398, 1396, 1389
 ];
 
-// Cased = DerivedCoreProperties.txt, 159 ranges of (lo, hi). With
-// CASE_IGNORABLE this is all the final-sigma rule needs; neither is used
-// anywhere else.
+/* Cased = DerivedCoreProperties.txt, 159 ranges of (lo, hi). With
+ * CASE_IGNORABLE this is all the final-sigma rule needs; neither is used
+ * anywhere else. */
 const Array<int> CASED = [
     65, 90, 97, 122, 170, 170, 181, 181, 186, 186, 192, 214,
     216, 246, 248, 442, 444, 447, 452, 659, 661, 696, 704, 705,
@@ -1144,8 +1144,8 @@ const Array<int> CASED = [
     127280, 127305, 127312, 127337, 127344, 127369
 ];
 
-// Case_Ignorable = DerivedCoreProperties.txt, 452 ranges of (lo, hi): the
-// characters the final-sigma rule looks through.
+/* Case_Ignorable = DerivedCoreProperties.txt, 452 ranges of (lo, hi): the
+ * characters the final-sigma rule looks through. */
 const Array<int> CASE_IGNORABLE = [
     39, 39, 46, 46, 58, 58, 94, 94, 96, 96, 168, 168,
     173, 173, 175, 175, 180, 180, 183, 184, 688, 879, 884, 885,
@@ -1226,24 +1226,24 @@ const Array<int> CASE_IGNORABLE = [
 ];
 
 // --- the tables ---------------------------------------------------------------
-//
-// Generated, not written. Every array below came out of
-//
-//     python3 gen.py graphemes
-//
-// reading the Unicode Character Database 16.0.0 as installed at
-// /usr/share/unicode/ucd. The script is not in the repository (it is a
-// build-time tool for a file that changes once a Unicode version); what it
-// does to each table is written above that table, and the counts are its
-// output, so a regeneration that disagrees with them is a change to report.
-// The class of every code point UAX #29 gives one, as 683 ranges of
-// (lo, hi, class): Grapheme_Cluster_Break from auxiliary/GraphemeBreakProperty.txt
-// in the low four bits, Extended_Pictographic from emoji/emoji-data.txt in bit
-// 4, and Indic_Conjunct_Break from DerivedCoreProperties.txt in bits 5 and 6 --
-// one search rather than three, since the rules need all three of them. Class
-// 0 (Other, not pictographic, no conjunct break) is the default and is not in
-// the table, and neither are the 11,172 Hangul syllables, whose LV and LVT are
-// computed.
+/*
+ * Generated, not written. Every array below came out of
+ *
+ *     python3 gen.py graphemes
+ *
+ * reading the Unicode Character Database 16.0.0 as installed at
+ * /usr/share/unicode/ucd. The script is not in the repository (it is a
+ * build-time tool for a file that changes once a Unicode version); what it
+ * does to each table is written above that table, and the counts are its
+ * output, so a regeneration that disagrees with them is a change to report.
+ * The class of every code point UAX #29 gives one, as 683 ranges of
+ * (lo, hi, class): Grapheme_Cluster_Break from auxiliary/GraphemeBreakProperty.txt
+ * in the low four bits, Extended_Pictographic from emoji/emoji-data.txt in bit
+ * 4, and Indic_Conjunct_Break from DerivedCoreProperties.txt in bits 5 and 6 --
+ * one search rather than three, since the rules need all three of them. Class
+ * 0 (Other, not pictographic, no conjunct break) is the default and is not in
+ * the table, and neither are the 11,172 Hangul syllables, whose LV and LVT are
+ * computed. */
 const Array<int> GCB_RANGES = [
     0, 9, 3, 10, 10, 2, 11, 12, 3, 13, 13, 1,
     14, 31, 3, 127, 159, 3, 169, 169, 16, 173, 173, 3,
@@ -1419,23 +1419,23 @@ const Array<int> GCB_RANGES = [
 ];
 
 // --- the tables ---------------------------------------------------------------
-//
-// Generated, not written. Every array below came out of
-//
-//     python3 gen.py width
-//
-// reading the Unicode Character Database 16.0.0 as installed at
-// /usr/share/unicode/ucd. The script is not in the repository (it is a
-// build-time tool for a file that changes once a Unicode version); what it
-// does to each table is written above that table, and the counts are its
-// output, so a regeneration that disagrees with them is a change to report.
-// Terminal columns per code point, 494 ranges of (lo, hi, width). Width 1 is
-// the default and is not in the table, so an entry says either 2 -- East Asian
-// Wide or Fullwidth in EastAsianWidth.txt, plus the CJK and ideographic blocks
-// UAX #11 gives that default to when they are unassigned -- or 0, for a
-// combining mark (Mn, Me), a format character (Cf, except U+00AD SOFT HYPHEN,
-// which prints), a control or a surrogate, and for the Hangul jamo that compose
-// into a preceding syllable.
+/*
+ * Generated, not written. Every array below came out of
+ *
+ *     python3 gen.py width
+ *
+ * reading the Unicode Character Database 16.0.0 as installed at
+ * /usr/share/unicode/ucd. The script is not in the repository (it is a
+ * build-time tool for a file that changes once a Unicode version); what it
+ * does to each table is written above that table, and the counts are its
+ * output, so a regeneration that disagrees with them is a change to report.
+ * Terminal columns per code point, 494 ranges of (lo, hi, width). Width 1 is
+ * the default and is not in the table, so an entry says either 2 -- East Asian
+ * Wide or Fullwidth in EastAsianWidth.txt, plus the CJK and ideographic blocks
+ * UAX #11 gives that default to when they are unassigned -- or 0, for a
+ * combining mark (Mn, Me), a format character (Cf, except U+00AD SOFT HYPHEN,
+ * which prints), a control or a surrogate, and for the Hangul jamo that compose
+ * into a preceding syllable. */
 const Array<int> WIDTH_RANGES = [
     0, 31, 0, 127, 159, 0, 768, 879, 0, 1155, 1161, 0,
     1425, 1469, 0, 1471, 1471, 0, 1473, 1474, 0, 1476, 1477, 0,
@@ -1564,19 +1564,19 @@ const Array<int> WIDTH_RANGES = [
 ];
 
 // --- the tables ---------------------------------------------------------------
-//
-// Generated, not written. Every array below came out of
-//
-//     python3 gen.py norm
-//
-// reading the Unicode Character Database 16.0.0 as installed at
-// /usr/share/unicode/ucd. The script is not in the repository (it is a
-// build-time tool for a file that changes once a Unicode version); what it
-// does to each table is written above that table, and the counts are its
-// output, so a regeneration that disagrees with them is a change to report.
-// Canonical_Combining_Class: UnicodeData.txt field 3, 934 code points with a
-// non-zero class in 393 ranges of (lo, hi, class). Zero is the default and is
-// not in the table.
+/*
+ * Generated, not written. Every array below came out of
+ *
+ *     python3 gen.py norm
+ *
+ * reading the Unicode Character Database 16.0.0 as installed at
+ * /usr/share/unicode/ucd. The script is not in the repository (it is a
+ * build-time tool for a file that changes once a Unicode version); what it
+ * does to each table is written above that table, and the counts are its
+ * output, so a regeneration that disagrees with them is a change to report.
+ * Canonical_Combining_Class: UnicodeData.txt field 3, 934 code points with a
+ * non-zero class in 393 ranges of (lo, hi, class). Zero is the default and is
+ * not in the table. */
 const Array<int> CCC_RANGES = [
     768, 788, 230, 789, 789, 232, 790, 793, 220, 794, 794, 232,
     795, 795, 216, 796, 800, 220, 801, 802, 202, 803, 806, 220,
@@ -1679,12 +1679,12 @@ const Array<int> CCC_RANGES = [
     125258, 125258, 7
 ];
 
-// Canonical decomposition: UnicodeData.txt field 5, the entries without a
-// <tag>, 2081 of them, **fully expanded** -- a decomposition whose parts
-// decompose again was expanded here rather than in a loop at run time, so
-// 3450 code points come out of 2081. Compatibility decompositions (the tagged
-// entries, NFKC/NFKD) are not here. Hangul is arithmetic, not a table:
-// 11,172 syllables that would otherwise be the largest thing in this file.
+/* Canonical decomposition: UnicodeData.txt field 5, the entries without a
+ * <tag>, 2081 of them, **fully expanded** -- a decomposition whose parts
+ * decompose again was expanded here rather than in a loop at run time, so
+ * 3450 code points come out of 2081. Compatibility decompositions (the tagged
+ * entries, NFKC/NFKD) are not here. Hangul is arithmetic, not a table:
+ * 11,172 syllables that would otherwise be the largest thing in this file. */
 const Array<int> DECOMP_FROM = [
     192, 193, 194, 195, 196, 197, 199, 200, 201, 202, 203, 204,
     205, 206, 207, 209, 210, 211, 212, 213, 214, 217, 218, 219,
@@ -2331,10 +2331,10 @@ const Array<int> DECOMP_TO = [
     40702, 40709, 40719, 40726, 40763, 173568
 ];
 
-// Primary composites, the inverse of DECOMP for NFC: the 961 two-character
-// canonical decompositions that are not in DerivedNormalizationProps.txt's
-// Full_Composition_Exclusion, keyed by `first << 21 | second` -- two code
-// points fit in 42 bits, so the key is one sorted int to binary-search.
+/* Primary composites, the inverse of DECOMP for NFC: the 961 two-character
+ * canonical decompositions that are not in DerivedNormalizationProps.txt's
+ * Full_Composition_Exclusion, keyed by `first << 21 | second` -- two code
+ * points fit in 42 bits, so the key is one sorted int to binary-search. */
 const Array<int> COMPOSE_KEYS = [
     125829944, 127927096, 130024248, 136315648, 136315649, 136315650, 136315651, 136315652, 136315654, 136315655, 136315656, 136315657,
     136315658, 136315660, 136315663, 136315665, 136315683, 136315685, 136315688, 138412807, 138412835, 138412849, 140509953, 140509954,

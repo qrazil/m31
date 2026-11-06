@@ -1,18 +1,18 @@
-// `lib/ssh.m31`'s wire-format functions, self-checked: every round trip and
-// every named `Error` path, needing no external oracle -- the same style
-// `t_chacha20poly1305.m31`'s own length-grid round trip and tamper checks
-// use (that file's own comment: "needs no oracle for either"). `test.sh`
-// runs this and checks it exits 0; a `trap` here means one of these checks
-// failed. `t_ssh_wire.m31` is the sibling file that DOES need an oracle
-// (the exchange hash and key derivation, checked against independent
-// `hashlib` math in `oracle_ssh_wire.py`).
+/* `lib/ssh.m31`'s wire-format functions, self-checked: every round trip and
+ * every named `Error` path, needing no external oracle -- the same style
+ * `t_chacha20poly1305.m31`'s own length-grid round trip and tamper checks
+ * use (that file's own comment: "needs no oracle for either"). `test.sh`
+ * runs this and checks it exits 0; a `trap` here means one of these checks
+ * failed. `t_ssh_wire.m31` is the sibling file that DOES need an oracle
+ * (the exchange hash and key derivation, checked against independent
+ * `hashlib` math in `oracle_ssh_wire.py`). */
 import ssh;
 import random;
 
-// A top-level `int` is local to the program body (it is not a module
-// constant, and a function cannot see it), so `check` takes and returns the
-// running count rather than closing over one -- every call site reads
-// `checks = check(checks, ..., ...)`.
+/* A top-level `int` is local to the program body (it is not a module
+ * constant, and a function cannot see it), so `check` takes and returns the
+ * running count rather than closing over one -- every call site reads
+ * `checks = check(checks, ..., ...)`. */
 int check(int passed_count, bool is_ok, str label) {
     if (!is_ok) {
         trap("check failed: " + label);
@@ -20,10 +20,10 @@ int check(int passed_count, bool is_ok, str label) {
     return passed_count + 1;
 }
 
-// `Error` has no `eq` (nothing in this codebase compares an error enum with
-// `==` -- it is always `match`), so a discriminant collapses the 13-arm
-// match this file would otherwise need to repeat at every error-path check
-// down to a plain `int ==`.
+/* `Error` has no `eq` (nothing in this codebase compares an error enum with
+ * `==` -- it is always `match`), so a discriminant collapses the 13-arm
+ * match this file would otherwise need to repeat at every error-path check
+ * down to a plain `int ==`. */
 int error_code(ssh.Error error) {
     match (error) {
         case BadVersion: {
@@ -212,10 +212,10 @@ bytes one_name = [];
 one_name.push(20);
 one_name.extend(rng.octets(16));
 List<str> empty = [];
-// Each fixture below swaps exactly one list in this client's own layout for
-// a wrong algorithm, so only one of the three checks can ever fire. The
-// five lists and five trailing bytes after the cipher pair never change
-// across any of the three, so they are built once.
+/* Each fixture below swaps exactly one list in this client's own layout for
+ * a wrong algorithm, so only one of the three checks can ever fire. The
+ * five lists and five trailing bytes after the cipher pair never change
+ * across any of the three, so they are built once. */
 bytes mac_comp_lang_tail = [];
 mac_comp_lang_tail.extend(ssh.encode_name_list(empty));
 mac_comp_lang_tail.extend(ssh.encode_name_list(empty));

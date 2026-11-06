@@ -1,158 +1,158 @@
-// The command line, parsed. Written in this language on nothing at all -- the
-// one primitive below is how a declaration mistake traps. A port of Oro's
-// `args`, with Oro's grammar exactly.
-//
-// API
+/* The command line, parsed. Written in this language on nothing at all -- the
+ * one primitive below is how a declaration mistake traps. A port of Oro's
+ * `args`, with Oro's grammar exactly.
+ *
+ * API */
 // ---
-//   args.Parser p = args.Parser(prog, summary: "")
-//
-//   p.flag(name, short:, help:)                                 a switch
-//   p.value(name, short:, help:, placeholder:, default:)        one str
-//   p.values(name, short:, help:, placeholder:)                 greedy list
-//   p.integer(name, short:, help:, placeholder:, default:)      one int
-//   p.number(name, short:, help:, placeholder:, default:)       one float
-//
-//   p.positional(name, help:, placeholder:)        must be given
-//   p.optional(name, default, help:, placeholder:) may be left out
-//   p.tail(name, help:, placeholder:)              zero or more
-//
-//   p.command(word, summary, short:)   -> args.Parser, that command's own
-//
-//   p.usage()        -> str, the one `usage:` line
-//   p.help()         -> str, the whole help text, generated
-//   p.parse(argv)    -> Result<args.Parsed, args.UsageError>
-//
-//   r.flag(name)       -> bool
-//   r.value(name)      -> Option<str>      the text, or the default, or None
-//   r.values(name)     -> List<str>
-//   r.integer(name)    -> Option<int>
-//   r.number(name)     -> Option<float>
-//   r.positional(name) -> str
-//   r.optional(name)   -> str              the text, or the default
-//   r.tail(name)       -> List<str>
-//   r.given(name)      -> bool             was it on the command line at all?
-//   r.help()           -> Option<str>      the help `--help` asked for
-//   r.commands()       -> List<args.Parsed>, the commands typed, in order
-//   c.word()           -> str              which command, "" at the top
-//
+/*   args.Parser p = args.Parser(prog, summary: "")
+ *
+ *   p.flag(name, short:, help:)                                 a switch
+ *   p.value(name, short:, help:, placeholder:, default:)        one str
+ *   p.values(name, short:, help:, placeholder:)                 greedy list
+ *   p.integer(name, short:, help:, placeholder:, default:)      one int
+ *   p.number(name, short:, help:, placeholder:, default:)       one float
+ *
+ *   p.positional(name, help:, placeholder:)        must be given
+ *   p.optional(name, default, help:, placeholder:) may be left out
+ *   p.tail(name, help:, placeholder:)              zero or more
+ *
+ *   p.command(word, summary, short:)   -> args.Parser, that command's own
+ *
+ *   p.usage()        -> str, the one `usage:` line
+ *   p.help()         -> str, the whole help text, generated
+ *   p.parse(argv)    -> Result<args.Parsed, args.UsageError>
+ *
+ *   r.flag(name)       -> bool
+ *   r.value(name)      -> Option<str>      the text, or the default, or None
+ *   r.values(name)     -> List<str>
+ *   r.integer(name)    -> Option<int>
+ *   r.number(name)     -> Option<float>
+ *   r.positional(name) -> str
+ *   r.optional(name)   -> str              the text, or the default
+ *   r.tail(name)       -> List<str>
+ *   r.given(name)      -> bool             was it on the command line at all?
+ *   r.help()           -> Option<str>      the help `--help` asked for
+ *   r.commands()       -> List<args.Parsed>, the commands typed, in order
+ *   c.word()           -> str              which command, "" at the top
+ * */
 // --- what this port adds to Oro's `args` ----------------------------------------
-//
-// All of it additive; none of it changes a form or a message of the grammar.
-//
-//   p.version = "1.2.3"       `--version` is answered like `--help`: anywhere,
-//                             before validation (`r.version()`); `version` is a
-//                             reserved option name, as `help` is
-//   p.epilog = "..."          text printed after the options table
-//   p.completions()           adds `--completions SHELL` (bash, zsh, fish),
-//                             answered before validation (`r.completions()`);
-//                             `p.completion(shell)` is the same, as a Result
-//   p.integer(..., min:, max:) a range: `'--port' needs a whole number from 1
-//                             to 65535, and got '70000'`
-//   p.parse_or_exit(argv, status) parse, then do what every program does the
-//                             same way: print --help/--version/--completions
-//                             and exit 0, or print the usage error and exit
-//                             `status`; `p.fail(message, status)` is the same
-//                             for a mistake only the program can see
-//   args.migrate(prog, argv, pairs)  old spellings of a released program,
-//                             rewritten with a one-line warning, for one release
-//
-// A mistyped option or command also names the closest one by EDIT DISTANCE
-// (swapped neighbours count as one) when no unique prefix matches; it is only
-// ever a suggestion, never accepted.
-//
-// `os.arguments()` is not read here: a parser is handed the tokens, without the
-// program's own name, which is what makes one testable from a corpus program
-// that has no command line of its own.
-//
+/*
+ * All of it additive; none of it changes a form or a message of the grammar.
+ *
+ *   p.version = "1.2.3"       `--version` is answered like `--help`: anywhere,
+ *                             before validation (`r.version()`); `version` is a
+ *                             reserved option name, as `help` is
+ *   p.epilog = "..."          text printed after the options table
+ *   p.completions()           adds `--completions SHELL` (bash, zsh, fish),
+ *                             answered before validation (`r.completions()`);
+ *                             `p.completion(shell)` is the same, as a Result
+ *   p.integer(..., min:, max:) a range: `'--port' needs a whole number from 1
+ *                             to 65535, and got '70000'`
+ *   p.parse_or_exit(argv, status) parse, then do what every program does the
+ *                             same way: print --help/--version/--completions
+ *                             and exit 0, or print the usage error and exit
+ *                             `status`; `p.fail(message, status)` is the same
+ *                             for a mistake only the program can see
+ *   args.migrate(prog, argv, pairs)  old spellings of a released program,
+ *                             rewritten with a one-line warning, for one release
+ *
+ * A mistyped option or command also names the closest one by EDIT DISTANCE
+ * (swapped neighbours count as one) when no unique prefix matches; it is only
+ * ever a suggestion, never accepted.
+ *
+ * `os.arguments()` is not read here: a parser is handed the tokens, without the
+ * program's own name, which is what makes one testable from a corpus program
+ * that has no command line of its own.
+ * */
 // --- the grammar: one dash commands, two dashes options -----------------------
-//
-// A token's first character says what it is, and nothing else has to:
-//
-//   -word     a COMMAND          the verb: -addrepo, -grant, -serve
-//   --word    an OPTION          named, and belongs to the command on its left
-//   word      DATA               an operand of the option or command on its left
-//
-//     orogit -addrepo site --public -grant site alice write
-//
-// It exists because the conventional grammar -- a bare word for the command --
-// cannot say whether the word after `grant site alice` is a fourth operand or
-// a second command without forbidding data to collide with command names.
-// With the dash the question never arises, and a repository may be called
-// `serve`.
-//
-// Several commands may appear on one line and run in the order typed; the
-// same one may appear twice. Options attach leftwards: before any command
-// they belong to the program, after one to that command. There is no third
-// level -- `p.command` returns a parser whose own `command` traps -- so the
-// tree is two deep by construction.
-//
-// Data is anything that does not begin with a dash, with the exceptions every
-// unix machine already agrees on: `-` alone is data (stdin), `-5` and `-1.5`
-// are data (a sign), and `--opt=value` carries a value that itself begins
-// with a dash. A value taken from the NEXT token never begins with a dash, or
-// a forgotten value would silently eat the following command.
-//
-// A lone `--` is refused: data is data because of how it is spelled, not
-// where it sits, so there is nothing for "end of options" to mark.
-//
-// Help is `--help` and only `--help`. `-h` would be a command called `h` under
-// this grammar, and a short form would take `h` from every `--host`; `-h`,
-// `-help`, `--h` and a bare `help` each get an error naming `--help`.
-//
-// Short options do not cluster (`--abc` is refused and rewritten as
-// `--a --b --c`), and an abbreviation is never accepted -- only suggested --
-// because a parser that accepts a prefix changes the meaning of existing
-// command lines the day a new option is declared.
-//
-// `values` takes every operand up to the next dash. `--tag a --tag b` is
-// refused: the dash already ends the clause, so the greedy form needs no
-// second spelling.
-//
-// An option is always optional; a value the command cannot run without is a
-// positional. `parse` validates the whole line before returning anything, so
-// a typo in the third command is found before the first one has run. `--help`
-// anywhere wins before any validation, and answers with the help of the
-// parser it belongs to: `prog -serve --help` is `-serve`'s.
-//
-// This module prints nothing and never exits. A bad command line is an
-// `Err(UsageError)`; a mistake in the program's own declarations (a repeated
-// name, a reserved `--help`, a command inside a command) traps, because no
-// command line can cause or fix it.
-//
+/*
+ * A token's first character says what it is, and nothing else has to:
+ *
+ *   -word     a COMMAND          the verb: -addrepo, -grant, -serve
+ *   --word    an OPTION          named, and belongs to the command on its left
+ *   word      DATA               an operand of the option or command on its left
+ *
+ *     orogit -addrepo site --public -grant site alice write
+ *
+ * It exists because the conventional grammar -- a bare word for the command --
+ * cannot say whether the word after `grant site alice` is a fourth operand or
+ * a second command without forbidding data to collide with command names.
+ * With the dash the question never arises, and a repository may be called
+ * `serve`.
+ *
+ * Several commands may appear on one line and run in the order typed; the
+ * same one may appear twice. Options attach leftwards: before any command
+ * they belong to the program, after one to that command. There is no third
+ * level -- `p.command` returns a parser whose own `command` traps -- so the
+ * tree is two deep by construction.
+ *
+ * Data is anything that does not begin with a dash, with the exceptions every
+ * unix machine already agrees on: `-` alone is data (stdin), `-5` and `-1.5`
+ * are data (a sign), and `--opt=value` carries a value that itself begins
+ * with a dash. A value taken from the NEXT token never begins with a dash, or
+ * a forgotten value would silently eat the following command.
+ *
+ * A lone `--` is refused: data is data because of how it is spelled, not
+ * where it sits, so there is nothing for "end of options" to mark.
+ *
+ * Help is `--help` and only `--help`. `-h` would be a command called `h` under
+ * this grammar, and a short form would take `h` from every `--host`; `-h`,
+ * `-help`, `--h` and a bare `help` each get an error naming `--help`.
+ *
+ * Short options do not cluster (`--abc` is refused and rewritten as
+ * `--a --b --c`), and an abbreviation is never accepted -- only suggested --
+ * because a parser that accepts a prefix changes the meaning of existing
+ * command lines the day a new option is declared.
+ *
+ * `values` takes every operand up to the next dash. `--tag a --tag b` is
+ * refused: the dash already ends the clause, so the greedy form needs no
+ * second spelling.
+ *
+ * An option is always optional; a value the command cannot run without is a
+ * positional. `parse` validates the whole line before returning anything, so
+ * a typo in the third command is found before the first one has run. `--help`
+ * anywhere wins before any validation, and answers with the help of the
+ * parser it belongs to: `prog -serve --help` is `-serve`'s.
+ *
+ * This module prints nothing and never exits. A bad command line is an
+ * `Err(UsageError)`; a mistake in the program's own declarations (a repeated
+ * name, a reserved `--help`, a command inside a command) traps, because no
+ * command line can cause or fix it.
+ * */
 // --- where this differs from Oro, and why --------------------------------------
-//
-// Results are read with one typed accessor per declaration method -- the
-// name you declared with is the name you ask with -- instead of Oro's single
-// `r.get(name)`, because there is no dynamic typing to answer "whatever it
-// was". Asking with the wrong accessor, or for a name never declared, traps.
-//
-// `int` and `float` are keywords here, so those two declaration methods are
-// `integer` and `number` -- the same words their error messages always used
-// ("needs a whole number", "needs a number").
-//
-// A default is written as the text a user would type: `default: "80"` on an
-// `integer`, `default: "7.5"` on a `number`. There is no "int or nothing"
-// parameter type, and the help table prints the default as written. An
-// integer or number default that does not parse traps at declaration. The
-// empty string means "no default", so a `value` whose default is "" answers
-// None when absent rather than Some("").
-//
-// `short:`, `placeholder:` and `default:` use "" for "not given", where Oro
-// uses null.
-//
-// `r.word()` is "" at the top level, where Oro answers null: dispatch is
-// `if (c.word() == "serve")`, and "" can never be a command's word.
-//
-// A `Parser`'s declarations and everything in a `Parsed` are private fields,
-// so the only way to change a parser is a declaring method that checks what
-// it is given, and the only way to make a `Parsed` is `parse`.
+/*
+ * Results are read with one typed accessor per declaration method -- the
+ * name you declared with is the name you ask with -- instead of Oro's single
+ * `r.get(name)`, because there is no dynamic typing to answer "whatever it
+ * was". Asking with the wrong accessor, or for a name never declared, traps.
+ *
+ * `int` and `float` are keywords here, so those two declaration methods are
+ * `integer` and `number` -- the same words their error messages always used
+ * ("needs a whole number", "needs a number").
+ *
+ * A default is written as the text a user would type: `default: "80"` on an
+ * `integer`, `default: "7.5"` on a `number`. There is no "int or nothing"
+ * parameter type, and the help table prints the default as written. An
+ * integer or number default that does not parse traps at declaration. The
+ * empty string means "no default", so a `value` whose default is "" answers
+ * None when absent rather than Some("").
+ *
+ * `short:`, `placeholder:` and `default:` use "" for "not given", where Oro
+ * uses null.
+ *
+ * `r.word()` is "" at the top level, where Oro answers null: dispatch is
+ * `if (c.word() == "serve")`, and "" can never be a command's word.
+ *
+ * A `Parser`'s declarations and everything in a `Parsed` are private fields,
+ * so the only way to change a parser is a declaring method that checks what
+ * it is given, and the only way to make a `Parsed` is `parse`. */
 import io;
 import os;
 import text;
 
-/// A bad command line, and only that. Print it, print `p.usage()`, and exit
-/// with whatever status your program uses for usage errors: that is the
-/// caller's decision, not this module's.
+/** A bad command line, and only that. Print it, print `p.usage()`, and exit
+ * with whatever status your program uses for usage errors: that is the
+ * caller's decision, not this module's. */
 pub type UsageError {
     str message;
 }
@@ -161,33 +161,33 @@ pub str UsageError.to_str() {
     return message;
 }
 
-/// The parser for one program, or for one of its commands.
-///
-///     args.Parser p = args.Parser("mktag", summary: "write a tag file");
-///     p.flag("quiet", short: "q", help: "say nothing on success");
-///     p.integer("width", default: "80", help: "wrap at this column");
-///     p.positional("out", help: "the file to write");
-///
-/// `prog` is the name the usage line starts with and is required: the name a
-/// program is invoked as is rarely the name it should call itself in a
-/// message.
-///
-/// `prog` and `summary` are the two public fields: what construction takes,
-/// and what the usage line and help read, whenever they are asked. Every
-/// other field is the declarations, private so that only the declaring
-/// methods -- which check each one -- can add to them.
+/** The parser for one program, or for one of its commands.
+ *
+ *     args.Parser p = args.Parser("mktag", summary: "write a tag file");
+ *     p.flag("quiet", short: "q", help: "say nothing on success");
+ *     p.integer("width", default: "80", help: "wrap at this column");
+ *     p.positional("out", help: "the file to write");
+ *
+ * `prog` is the name the usage line starts with and is required: the name a
+ * program is invoked as is rarely the name it should call itself in a
+ * message.
+ *
+ * `prog` and `summary` are the two public fields: what construction takes,
+ * and what the usage line and help read, whenever they are asked. Every
+ * other field is the declarations, private so that only the declaring
+ * methods -- which check each one -- can add to them. */
 pub type Parser {
     pub str prog;
     pub str summary = "";
-    /// Set it and `--version` is recognised like `--help`: anywhere on the
-    /// line, before any validation, answering `prog VERSION`.
+    /** Set it and `--version` is recognised like `--help`: anywhere on the
+     * line, before any validation, answering `prog VERSION`. */
     pub str version = "";
     /// Printed after the options table: exit status, environment, examples.
     pub str epilog = "";
     bool is_command = false;
     bool has_completions = false;
-    // `shorts` maps a letter to an option's long name; `cmd_shorts` maps a
-    // letter to a command word.
+    /* `shorts` maps a letter to an option's long name; `cmd_shorts` maps a
+     * letter to a command word. */
     List<Opt> opts = [];
     Map<str, str> shorts = {};
     List<Pos> position = [];
@@ -202,21 +202,21 @@ pub void Parser.flag(str name, str short = "", str help = "") {
     declare(this, name, short, help, "", "", "flag");
 }
 
-/// One value, as a str. `default` is what `r.value` answers when it is left
-/// out; without one, it answers None.
+/** One value, as a str. `default` is what `r.value` answers when it is left
+ * out; without one, it answers None. */
 pub void Parser.value(str name, str short = "", str help = "", str placeholder = "", str default = "") {
     declare(this, name, short, help, placeholder, default, "value");
 }
 
-/// Every operand up to the next dash, in the order given. Absent is an empty
-/// list; given with no operands is a usage error, because an empty list is
-/// what leaving it out already means.
+/** Every operand up to the next dash, in the order given. Absent is an empty
+ * list; given with no operands is a usage error, because an empty list is
+ * what leaving it out already means. */
 pub void Parser.values(str name, str short = "", str help = "", str placeholder = "") {
     declare(this, name, short, help, placeholder, "", "values");
 }
 
-/// One value, which must be a whole number. `default` is written as it would
-/// be typed: `default: "80"`.
+/** One value, which must be a whole number. `default` is written as it would
+ * be typed: `default: "80"`. */
 pub void Parser.integer(str name, str short = "", str help = "", str placeholder = "", str default = "", str min = "", str max = "") {
     if (default != "" && default.parse_int().is_none()) {
         trap("integer(): --" + name + " default: '" + default + "' is not a whole number");
@@ -230,8 +230,8 @@ pub void Parser.integer(str name, str short = "", str help = "", str placeholder
     added.max = max;
 }
 
-/// One value, which must be a number; a whole number is accepted and
-/// widened, because a reader who types `--cfg 7` has not made a mistake.
+/** One value, which must be a number; a whole number is accepted and
+ * widened, because a reader who types `--cfg 7` has not made a mistake. */
 pub void Parser.number(str name, str short = "", str help = "", str placeholder = "", str default = "") {
     if (default != "" && default.parse_float().is_none()) {
         trap("number(): --" + name + " default: '" + default + "' is not a number");
@@ -244,9 +244,9 @@ pub void Parser.positional(str name, str help = "", str placeholder = "") {
     declare_position(this, name, help, placeholder, "", "positional");
 }
 
-/// A positional that may be left out. The default is positional, not
-/// `default:`: for a positional the default IS the operand when it is absent,
-/// and a caller who leaves it out has not said what that means.
+/** A positional that may be left out. The default is positional, not
+ * `default:`: for a positional the default IS the operand when it is absent,
+ * and a caller who leaves it out has not said what that means. */
 pub void Parser.optional(str name, str fallback, str help = "", str placeholder = "") {
     declare_position(this, name, help, placeholder, fallback, "optional");
 }
@@ -256,19 +256,19 @@ pub void Parser.tail(str name, str help = "", str placeholder = "") {
     declare_position(this, name, help, placeholder, "", "tail");
 }
 
-/// One command: the word typed after a dash, one line about it, and the
-/// parser it is given -- the only declaration that returns anything, because
-/// it creates rather than modifies.
-///
-///     args.Parser add = p.command("addrepo", "create a bare repository", short: "a");
-///     add.positional("name");
+/** One command: the word typed after a dash, one line about it, and the
+ * parser it is given -- the only declaration that returns anything, because
+ * it creates rather than modifies.
+ *
+ *     args.Parser add = p.command("addrepo", "create a bare repository", short: "a");
+ *     add.positional("name"); */
 pub Parser Parser.command(str word, str about, str short = "") {
     return add_command(this, word, about, short);
 }
 
-/// Adds `--completions SHELL` (bash, zsh or fish): a value option like any
-/// other, answered like `--help`. The script is generated from this parser's
-/// own table; read it with `r.completions()`.
+/** Adds `--completions SHELL` (bash, zsh or fish): a value option like any
+ * other, answered like `--help`. The script is generated from this parser's
+ * own table; read it with `r.completions()`. */
 pub void Parser.completions() {
     if (is_command) {
         trap("completions(): declare it on the program's parser, not on a command");
@@ -278,33 +278,33 @@ pub void Parser.completions() {
 }
 
 // --- the generated text --------------------------------------------------------
-/// The one `usage:` line. `[options]` stands in for the table rather than
-/// spelling every option out.
+/** The one `usage:` line. `[options]` stands in for the table rather than
+ * spelling every option out. */
 pub str Parser.usage() {
     return usage_line(this);
 }
 
-/// The whole help text: the usage line, the summary, then a table of the
-/// commands, the arguments and the options, in declaration order. No trailing
-/// newline.
+/** The whole help text: the usage line, the summary, then a table of the
+ * commands, the arguments and the options, in declaration order. No trailing
+ * newline. */
 pub str Parser.help() {
     return help_text(this);
 }
 
 // --- parsing -------------------------------------------------------------------
-/// Parse `argv` -- the arguments WITHOUT the program's name. The whole line is
-/// validated before anything is returned.
+/** Parse `argv` -- the arguments WITHOUT the program's name. The whole line is
+ * validated before anything is returned. */
 pub Result<Parsed, UsageError> Parser.parse(List<str> argv) {
     return parse_line(this, argv);
 }
 
 // --- the convenience around parse ---------------------------------------------------
-/// `parse`, plus what every program writes the same way: `--help`,
-/// `--version` and `--completions` print to standard output and exit 0; a
-/// usage error prints `prog: message`, the usage line and a pointer to
-/// `--help` to standard error and exits `status`. This is OUTSIDE the
-/// module's core contract (which prints nothing and never exits); a program
-/// that wants another stream, prefix or status calls `parse`.
+/** `parse`, plus what every program writes the same way: `--help`,
+ * `--version` and `--completions` print to standard output and exit 0; a
+ * usage error prints `prog: message`, the usage line and a pointer to
+ * `--help` to standard error and exits `status`. This is OUTSIDE the
+ * module's core contract (which prints nothing and never exits); a program
+ * that wants another stream, prefix or status calls `parse`. */
 pub Parsed Parser.parse_or_exit(List<str> argv, int status = 2) {
     match (parse(argv)) {
         case Err(UsageError error): {
@@ -341,13 +341,13 @@ pub Parsed Parser.parse_or_exit(List<str> argv, int status = 2) {
             return parsed;
         }
     }
-    // Unreachable: the error arm exits. Here because `os.exit` does not end a
-    // block the way `return` does.
+    /* Unreachable: the error arm exits. Here because `os.exit` does not end a
+     * block the way `return` does. */
     return Parsed(this, "", {}, {}, {}, [], []);
 }
 
-/// Report a mistake of the command line that only the program can see
-/// (`--index needs --root`) the way the parser reports its own, and exit.
+/** Report a mistake of the command line that only the program can see
+ * (`--index needs --root`) the way the parser reports its own, and exit. */
 pub void Parser.fail(str message, int status = 2) {
     io.eprint(prog + ": " + message);
     io.eprint(usage_line(this));
@@ -360,8 +360,8 @@ pub Result<str, str> Parser.completion(str shell) {
     return completion_text(this, shell);
 }
 
-/// What `parse` answers, and what each command on the line answers. Built
-/// only by `parse`.
+/** What `parse` answers, and what each command on the line answers. Built
+ * only by `parse`. */
 pub type Parsed {
     Parser parser;
     str cmd_word;
@@ -419,8 +419,8 @@ pub Option<float> Parsed.number(str name) {
     }
 }
 
-/// A positional that had to be given. (After `--help` nothing had to be, and
-/// it is "".)
+/** A positional that had to be given. (After `--help` nothing had to be, and
+ * it is "".) */
 pub str Parsed.positional(str name) {
     Pos operand = want_position(parser, name, "positional");
     return texts.get(name).or(operand.default);
@@ -438,8 +438,8 @@ pub List<str> Parsed.tail(str name) {
     return list_or_empty(lists, name);
 }
 
-/// Was `name` on the command line at all? The only way to tell an absent
-/// option from one given its own default value.
+/** Was `name` on the command line at all? The only way to tell an absent
+ * option from one given its own default value. */
 pub bool Parsed.is_given(str name) {
     if (find_opt(parser, name).is_none() && find_position(parser, name).is_none()) {
         trap("given(): '" + name + "' is not a declared argument of " + parser.prog);
@@ -447,8 +447,8 @@ pub bool Parsed.is_given(str name) {
     return marks.contains(name);
 }
 
-/// The help text `--help` asked for, or None. It is the help of whichever
-/// parser the `--help` belonged to.
+/** The help text `--help` asked for, or None. It is the help of whichever
+ * parser the `--help` belonged to. */
 pub Option<str> Parsed.help() {
     if (asked.size() == 0) {
         return Option<str>.None;
@@ -456,8 +456,8 @@ pub Option<str> Parsed.help() {
     return Option<str>.Some(asked[0]);
 }
 
-/// `prog 1.2.3` when `--version` was asked (the parser's `version:` field is
-/// set), or None. Like the help it wins before validation.
+/** `prog 1.2.3` when `--version` was asked (the parser's `version:` field is
+ * set), or None. Like the help it wins before validation. */
 pub Option<str> Parsed.version() {
     if (version_line == "") {
         return Option<str>.None;
@@ -473,9 +473,9 @@ pub Option<str> Parsed.completions() {
     return Option<str>.Some(script);
 }
 
-/// The commands on the line, in the order typed, each its own result. A
-/// parser that declares no commands traps rather than answering an empty
-/// list that could be mistaken for "none given".
+/** The commands on the line, in the order typed, each its own result. A
+ * parser that declares no commands traps rather than answering an empty
+ * list that could be mistaken for "none given". */
 pub List<Parsed> Parsed.commands() {
     if (parser.words.size() == 0) {
         trap("commands(): " + parser.prog + " has no commands -- declare them with p.command(word, summary)");
@@ -483,14 +483,14 @@ pub List<Parsed> Parsed.commands() {
     return cmds;
 }
 
-/// Which command this result is, as the word without its dash; "" for the
-/// top-level result.
+/** Which command this result is, as the word without its dash; "" for the
+ * top-level result. */
 pub str Parsed.word() {
     return cmd_word;
 }
 
-// One declared option. `kind` is the declaration method's name: "flag",
-// "value", "values", "integer" or "number". `placeholder` is resolved.
+/* One declared option. `kind` is the declaration method's name: "flag",
+ * "value", "values", "integer" or "number". `placeholder` is resolved. */
 type Opt {
     str name;
     str short;
@@ -511,8 +511,8 @@ type Pos {
     str kind;
 }
 
-// One stretch of the command line: the program's own tokens, or one
-// command's, with the parser that declared them. `word` is "" for the first.
+/* One stretch of the command line: the program's own tokens, or one
+ * command's, with the parser that declared them. `word` is "" for the first. */
 type Clause {
     Parser parser;
     str word;
@@ -520,8 +520,8 @@ type Clause {
 }
 
 // --- the private half ----------------------------------------------------------
-// Record one option, checking everything that can only be wrong in the
-// program. These trap: nothing a user types can reach them.
+/* Record one option, checking everything that can only be wrong in the
+ * program. These trap: nothing a user types can reach them. */
 void declare(Parser parser, str name, str short, str help, str placeholder, str default, str kind) {
     if (name == "" || name.starts_with("-") || name.contains(" ") || name.contains("=")) {
         trap(kind + "(): '" + name + "' is not a usable option name -- write it as you would type it after the dashes, e.g. 'skip-missing' for --skip-missing");
@@ -560,9 +560,9 @@ void declare(Parser parser, str name, str short, str help, str placeholder, str 
     }
 }
 
-// Record one positional. The order they are declared in is the order they
-// are read in, and two of the three orders a reader could write are
-// unparseable, so each is refused where it is written.
+/* Record one positional. The order they are declared in is the order they
+ * are read in, and two of the three orders a reader could write are
+ * unparseable, so each is refused where it is written. */
 void declare_position(Parser parser, str name, str help, str placeholder, str default, str kind) {
     if (name == "") {
         trap(kind + "(): a positional needs a name");
@@ -650,8 +650,8 @@ str usage_line(Parser parser) {
     return parts.join(" ");
 }
 
-// One column width for every row in the document, so the three sections
-// line up with each other and not just with themselves.
+/* One column width for every row in the document, so the three sections
+ * line up with each other and not just with themselves. */
 str help_text(Parser parser) {
     int width = columns(help_column());
     if (parser.version != "") {
@@ -692,8 +692,8 @@ str help_text(Parser parser) {
         lines.push(row("     --version", width, "print the version and exit"));
     }
     for (Opt option in parser.opts) {
-        // A flag has no default and a greedy option's absence is an empty
-        // list by definition, so neither prints one.
+        /* A flag has no default and a greedy option's absence is an empty
+         * list by definition, so neither prints one. */
         str shown_default = option.default;
         if (option.kind == "flag" || option.kind == "values") {
             shown_default = "";
@@ -714,28 +714,28 @@ int wider(int width, str column) {
     return width;
 }
 
-// How wide `content` is in the help table: its code points, not its bytes. By
-// bytes, `--größe` counted two columns more than it takes and every row
-// beside it was padded short. One code point is still not always one column
-// on a terminal -- a CJK character or most emoji take two, a combining
-// accent none -- and getting that right needs the Unicode width tables,
-// which this module does not carry. Such a name misaligns its rows by that
-// difference; everything else lines up.
-//
-// `text.pad_right`, which fills the column, measures the same way, so the
-// width computed here and the padding that reaches it cannot disagree.
+/* How wide `content` is in the help table: its code points, not its bytes. By
+ * bytes, `--größe` counted two columns more than it takes and every row
+ * beside it was padded short. One code point is still not always one column
+ * on a terminal -- a CJK character or most emoji take two, a combining
+ * accent none -- and getting that right needs the Unicode width tables,
+ * which this module does not carry. Such a name misaligns its rows by that
+ * difference; everything else lines up.
+ *
+ * `text.pad_right`, which fills the column, measures the same way, so the
+ * width computed here and the padding that reaches it cannot disagree. */
 int columns(str content) {
     return content.chars().size();
 }
 
-// The left column of the always-there help row, so nothing may disagree
-// about what it says.
+/* The left column of the always-there help row, so nothing may disagree
+ * about what it says. */
 str help_column() {
     return "     --help";
 }
 
-// `--n, --count N`, or `     --host HOST` for one with no short spelling, so
-// the long names stay in one column.
+/* `--n, --count N`, or `     --host HOST` for one with no short spelling, so
+ * the long names stay in one column. */
 str opt_column(Opt option) {
     str left = "     ";
     if (option.short != "") {
@@ -780,10 +780,10 @@ str row(str left, int width, str description) {
     return "  " + text.pad_right(left, width) + "  " + description;
 }
 
-// A description with its generated tail, `(default 80)`. The default is
-// printed by the module rather than written into the help text, because a
-// hand-written copy of the number is the one that goes stale. An empty
-// default has nothing to print.
+/* A description with its generated tail, `(default 80)`. The default is
+ * printed by the module rather than written into the help text, because a
+ * hand-written copy of the number is the one that goes stale. An empty
+ * default has nothing to print. */
 str described(str help, str default) {
     if (default == "") {
         return help;
@@ -796,20 +796,20 @@ str described(str help, str default) {
 
 // --- the parse -----------------------------------------------------------------
 Result<Parsed, UsageError> parse_line(Parser parser, List<str> argv) {
-    // Split the line at the commands first, so every clause is parsed by the
-    // parser that declared it and nothing has to guess.
+    /* Split the line at the commands first, so every clause is parsed by the
+     * parser that declared it and nothing has to guess. */
     List<Clause> clauses = split_line(parser, argv)?;
-    // `--help` anywhere wins, before any validation: a command line asking
-    // what the arguments are cannot also be required to get them right. The
-    // first one on the line is the one answered.
+    /* `--help` anywhere wins, before any validation: a command line asking
+     * what the arguments are cannot also be required to get them right. The
+     * first one on the line is the one answered. */
     for (Clause clause in clauses) {
         if (clause.tokens.contains("--help")) {
             return Result<Parsed, UsageError>.Ok(Parsed(parser, "", {}, {}, {}, [help_text(clause.parser)], []));
         }
     }
-    // `--version` and `--completions SHELL` are answers like `--help`: they
-    // win before any validation, so they work on a line that is otherwise
-    // missing its operands.
+    /* `--version` and `--completions SHELL` are answers like `--help`: they
+     * win before any validation, so they work on a line that is otherwise
+     * missing its operands. */
     for (Clause clause in clauses) {
         if (parser.version != "" && clause.tokens.contains("--version")) {
             Parsed answered = Parsed(parser, "", {}, {}, {}, [], []);
@@ -853,9 +853,9 @@ Result<Parsed, UsageError> parse_line(Parser parser, List<str> argv) {
     return Result<Parsed, UsageError>.Ok(Parsed(parser, "", top.texts, top.lists, top.marks, [], commands));
 }
 
-// Cut `argv` into clauses at the `-command` tokens. The command words are
-// resolved here, so an unknown one is refused before any of its operands
-// are looked at.
+/* Cut `argv` into clauses at the `-command` tokens. The command words are
+ * resolved here, so an unknown one is refused before any of its operands
+ * are looked at. */
 Result<List<Clause>, UsageError> split_line(Parser parser, List<str> argv) {
     List<Clause> clauses = [Clause(parser, "", [])];
     for (str token in argv) {
@@ -864,10 +864,10 @@ Result<List<Clause>, UsageError> split_line(Parser parser, List<str> argv) {
             return refuse_split("'--' has no meaning here -- data is data because it does not start with a dash, so nothing has to be marked off");
         }
         if (kind != "command") {
-            // A command typed without its dash reaches the program as data,
-            // where a program with commands can never want it. Say which
-            // spelling was meant, before an option of that command is read
-            // as one of ours.
+            /* A command typed without its dash reaches the program as data,
+             * where a program with commands can never want it. Say which
+             * spelling was meant, before an option of that command is read
+             * as one of ours. */
             if (parser.words.size() > 0 && clauses.size() == 1 && parser.words.contains(token)) {
                 return refuse_split("'" + token + "' is a command, so it is written with a dash: '-" + token + "'");
             }
@@ -884,8 +884,8 @@ Result<List<Clause>, UsageError> split_line(Parser parser, List<str> argv) {
 // The command word a `-token` names, refusing an unknown one.
 Result<str, UsageError> command_for(Parser parser, str token) {
     str body = token.substr(1, token.size());
-    // `-h` and `-help` are the one wrong guess everyone makes once: under
-    // this grammar they are commands, and help is an option.
+    /* `-h` and `-help` are the one wrong guess everyone makes once: under
+     * this grammar they are commands, and help is an option. */
     if ((body == "h" || body == "help") && !parser.words.contains(body)) {
         return refuse_word("'" + token + "' would be a command here, and there is none called '" + body + "' -- help is an option, so write '--help'");
     }
@@ -923,8 +923,8 @@ str command_list(Parser parser) {
     return spelled.join(", ");
 }
 
-// Parse one clause's tokens -- the options and operands of a single command,
-// or of the program itself. The `-command` tokens are already gone.
+/* Parse one clause's tokens -- the options and operands of a single command,
+ * or of the program itself. The `-command` tokens are already gone. */
 Result<Parsed, UsageError> parse_clause(Parser parser, List<str> tokens, str word) {
     Parsed parsed = Parsed(parser, word, {}, {}, {}, [], []);
     List<str> positionals = [];
@@ -937,8 +937,8 @@ Result<Parsed, UsageError> parse_clause(Parser parser, List<str> tokens, str wor
             positionals.push(token);
             continue;
         }
-        // An option. `spelled` is what the user typed, minus any `=value`,
-        // so every message below quotes their spelling and not the other one.
+        /* An option. `spelled` is what the user typed, minus any `=value`,
+         * so every message below quotes their spelling and not the other one. */
         str name = token.substr(2, token.size());
         bool has_inline = false;
         str inline = "";
@@ -961,9 +961,9 @@ Result<Parsed, UsageError> parse_clause(Parser parser, List<str> tokens, str wor
                     name = long;
                 }
                 case None: {
-                    // `h` is an ordinary letter here and a program may
-                    // declare it for `--host`; it is only worth a word of its
-                    // own when nobody has.
+                    /* `h` is an ordinary letter here and a program may
+                     * declare it for `--host`; it is only worth a word of its
+                     * own when nobody has. */
                     if (name == "h") {
                         return refuse("'" + token + "' is not an option -- help has one spelling, and it is '--help'");
                     }
@@ -971,8 +971,8 @@ Result<Parsed, UsageError> parse_clause(Parser parser, List<str> tokens, str wor
                 }
             }
         } else if (find_opt(parser, name).is_none()) {
-            // A cluster is the one wrong guess worth naming: `--abc` when
-            // `--a`, `--b` and `--c` are all declared is plainly three.
+            /* A cluster is the one wrong guess worth naming: `--abc` when
+             * `--a`, `--b` and `--c` are all declared is plainly three. */
             if (is_cluster(name, parser.shorts)) {
                 return refuse(cluster_refusal(token, name));
             }
@@ -1022,8 +1022,8 @@ Result<Parsed, UsageError> parse_clause(Parser parser, List<str> tokens, str wor
         if (parsed.marks.contains(name)) {
             return refuse("'" + spelled + "' was given more than once and takes a single value");
         }
-        // The conversion is checked here, the only place that still knows
-        // which option the text came from.
+        /* The conversion is checked here, the only place that still knows
+         * which option the text came from. */
         if (opt.kind == "integer" && raw.parse_int().is_none()) {
             return refuse("'" + spelled + "' needs a whole number, and got '" + raw + "'");
         }
@@ -1073,15 +1073,15 @@ Result<bool, UsageError> bind(Parser parser, List<str> positionals, Parsed parse
     }
     if (next_index < positionals.size()) {
         str extra = positionals[next_index];
-        // The other half of the muscle-memory error: a command typed without
-        // its dash arrives here as data.
+        /* The other half of the muscle-memory error: a command typed without
+         * its dash arrives here as data. */
         if (parser.words.contains(extra)) {
             return refuse_bind("'" + extra + "' is a command, so it is written with a dash: '-" + extra + "'");
         }
         if (parser.position.size() == 0) {
-            // `prog help` is the third spelling someone reaches for, after
-            // `-h` and `-help`. Only where no operand could be meant: a
-            // program that takes filenames may be handed one called `help`.
+            /* `prog help` is the third spelling someone reaches for, after
+             * `-h` and `-help`. Only where no operand could be meant: a
+             * program that takes filenames may be handed one called `help`. */
             if (extra == "help") {
                 return refuse_bind("'help' is an option here, not a command -- write '--help' (or '" + parser.prog + " -<command> --help' for one command's)");
             }
@@ -1092,8 +1092,8 @@ Result<bool, UsageError> bind(Parser parser, List<str> positionals, Parsed parse
     return Result<bool, UsageError>.Ok(true);
 }
 
-// What a token is, by its first characters and nothing else: `-` and a
-// negative number are data, and a lone `--` is neither.
+/* What a token is, by its first characters and nothing else: `-` and a
+ * negative number are data, and a lone `--` is neither. */
 str token_kind(str token) {
     if (!token.starts_with("-") || token == "-") {
         return "data";
@@ -1104,9 +1104,9 @@ str token_kind(str token) {
     if (token.starts_with("--")) {
         return "option";
     }
-    // A sign, not a command: `-5`, `-1.5`, `-.5`. Byte 1 is compared as a
-    // byte because the token is whatever was typed: in `-é` it is the first
-    // half of a character, where substr(1, 2) would trap.
+    /* A sign, not a command: `-5`, `-1.5`, `-.5`. Byte 1 is compared as a
+     * byte because the token is whatever was typed: in `-é` it is the first
+     * half of a character, where substr(1, 2) would trap. */
     int second_byte = token.byte_at(1);
     if (second_byte >= '0' && second_byte <= '9' || second_byte == '.') {
         return "data";
@@ -1114,10 +1114,10 @@ str token_kind(str token) {
     return "command";
 }
 
-// Is `name` plainly a run-together cluster of declared short options? Only if
-// every letter is one, which is what makes the rewrite safe to suggest.
-// A letter is a character, not a byte, so `--éa` is read as two letters:
-// cutting it byte by byte would trap inside the é.
+/* Is `name` plainly a run-together cluster of declared short options? Only if
+ * every letter is one, which is what makes the rewrite safe to suggest.
+ * A letter is a character, not a byte, so `--éa` is read as two letters:
+ * cutting it byte by byte would trap inside the é. */
 bool is_cluster(str name, Map<str, str> shorts) {
     List<int> letters = name.chars();
     if (letters.size() < 2) {
@@ -1139,8 +1139,8 @@ str cluster_refusal(str token, str name) {
     return "'" + token + "': short options do not cluster -- write '" + spread.join(" ") + "'";
 }
 
-// The unknown-option message, with one guess when there is exactly one.
-// `help` is in the pool because it is an option like any other here.
+/* The unknown-option message, with one guess when there is exactly one.
+ * `help` is in the pool because it is an option like any other here. */
 str unknown_option(str spelled, Parser parser) {
     List<str> names = ["help"];
     if (parser.version != "") {
@@ -1159,13 +1159,13 @@ str unknown_option(str spelled, Parser parser) {
     }
 }
 
-// The one candidate `given` was plainly meant to be, or None.
-//
-// Two cheap rules, and no edit distance: separators are ignored, so
-// `--lastoutput` finds `--last-output`; and one word that starts with the
-// other is a match, which catches an abbreviation and one character too
-// many. A guess is offered only when exactly one candidate matches, because
-// a message that guesses wrong costs more than one that does not guess.
+/* The one candidate `given` was plainly meant to be, or None.
+ *
+ * Two cheap rules, and no edit distance: separators are ignored, so
+ * `--lastoutput` finds `--last-output`; and one word that starts with the
+ * other is a match, which catches an abbreviation and one character too
+ * many. A guess is offered only when exactly one candidate matches, because
+ * a message that guesses wrong costs more than one that does not guess. */
 Option<str> nearest(str given, List<str> names) {
     List<str> hits = [];
     str flat = flatten(given);
@@ -1181,8 +1181,8 @@ Option<str> nearest(str given, List<str> names) {
     if (hits.size() > 1) {
         return Option<str>.None;
     }
-    // No prefix or separator match: a typo. The closest by edit distance, if
-    // it is close enough to be one. Still only a suggestion, never accepted.
+    /* No prefix or separator match: a typo. The closest by edit distance, if
+     * it is close enough to be one. Still only a suggestion, never accepted. */
     int limit = 1;
     int size = given.chars().size();
     if (size > 4) {
@@ -1206,8 +1206,8 @@ Option<str> nearest(str given, List<str> names) {
     return Option<str>.None;
 }
 
-// Edit distance in code points: insert, delete, replace, or swap two
-// neighbours (the commonest typo: `--prot`).
+/* Edit distance in code points: insert, delete, replace, or swap two
+ * neighbours (the commonest typo: `--prot`). */
 int distance(str first, str second) {
     List<int> left = first.chars();
     List<int> right = second.chars();
@@ -1265,9 +1265,9 @@ Option<Pos> find_position(Parser parser, str name) {
     return Option<Pos>.None;
 }
 
-// The option `name`, declared with `kind` ("" for any). Asking for a name
-// that was never declared, or with the wrong accessor, is a bug in the
-// program -- the command line cannot invent a name -- so it traps.
+/* The option `name`, declared with `kind` ("" for any). Asking for a name
+ * that was never declared, or with the wrong accessor, is a bug in the
+ * program -- the command line cannot invent a name -- so it traps. */
 Opt want_opt(Parser parser, str name, str kind) {
     match (find_opt(parser, name)) {
         case Some(Opt option): {
@@ -1338,12 +1338,12 @@ Result<bool, UsageError> refuse_bind(str message) {
     return Result<bool, UsageError>.Err(UsageError(message));
 }
 
-/// Old spellings of a released program, accepted for one release: every token
-/// of `argv` that is `old` (or `old=value`) is replaced by `new`, with one line
-/// on standard error. `pairs` is `[old, new, old, new, ...]`. An old spelling
-/// ending in `+` also matches with its value attached (`-p+` matches `-p22`,
-/// which becomes `--port 22`). A rewrite is the only thing this does: the
-/// grammar itself never accepts a second spelling.
+/** Old spellings of a released program, accepted for one release: every token
+ * of `argv` that is `old` (or `old=value`) is replaced by `new`, with one line
+ * on standard error. `pairs` is `[old, new, old, new, ...]`. An old spelling
+ * ending in `+` also matches with its value attached (`-p+` matches `-p22`,
+ * which becomes `--port 22`). A rewrite is the only thing this does: the
+ * grammar itself never accepts a second spelling. */
 pub List<str> migrate(str prog, List<str> argv, List<str> pairs) {
     List<str> out = [];
     for (str token in argv) {
@@ -1380,10 +1380,10 @@ pub List<str> migrate(str prog, List<str> argv, List<str> pairs) {
     return out;
 }
 
-/// Is this line in the OpenSSH/POSIX style an old program used to read: any
-/// single-dash word that is not a number (`-p`, `-tt`) or a bare `--`? Under
-/// this grammar a single dash is a command, so a program with no commands can
-/// tell, and read such a line with its old parser for one release.
+/** Is this line in the OpenSSH/POSIX style an old program used to read: any
+ * single-dash word that is not a number (`-p`, `-tt`) or a bare `--`? Under
+ * this grammar a single dash is a command, so a program with no commands can
+ * tell, and read such a line with its old parser for one release. */
 pub bool is_old_style(List<str> argv) {
     for (str word in argv) {
         if (word == "--") {
@@ -1413,8 +1413,8 @@ Result<str, str> completion_text(Parser parser, str shell) {
     return Result<str, str>.Err("unknown shell");
 }
 
-// What a shell completes for one parser: every option (`--out`, `--o`, `--help`)
-// and, for a parser with commands, every command (`-serve`, `-s`).
+/* What a shell completes for one parser: every option (`--out`, `--o`, `--help`)
+ * and, for a parser with commands, every command (`-serve`, `-s`). */
 List<str> completion_words(Parser parser, bool is_root) {
     List<str> shown = [];
     for (int i in 0 .. parser.words.size()) {
@@ -1543,8 +1543,8 @@ str completion_zsh(Parser parser) {
     return lines.join("\n");
 }
 
-// `'-serve:run the server' '--out:where to write'` for one parser; the root's
-// commands are offered everywhere, since several commands share a line.
+/* `'-serve:run the server' '--out:where to write'` for one parser; the root's
+ * commands are offered everywhere, since several commands share a line. */
 str zsh_choices(Parser here, Parser root, bool is_root) {
     List<str> items = [];
     for (int i in 0 .. root.words.size()) {
@@ -1567,8 +1567,8 @@ str fish_text(str raw) {
     return text.replace(text.replace(raw, "\\", "\\\\"), "'", "\\'");
 }
 
-// fish: a single-dash word is an old-style option (`-o`), which is what a
-// command is here; `-l` is a double-dash one.
+/* fish: a single-dash word is an old-style option (`-o`), which is what a
+ * command is here; `-l` is a double-dash one. */
 str completion_fish(Parser parser) {
     List<str> lines = ["# fish completion for " + parser.prog + " (generated by `" + parser.prog + " --completions fish`)"];
     str base = "complete -c " + parser.prog;

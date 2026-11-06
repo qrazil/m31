@@ -1,7 +1,7 @@
-// Allocation-heavy with little else: a struct, a string and a two-element
-// List made and freed on every iteration -- the worst case for heap watch,
-// whose build sees every allocation and every release (docs/heap-watch-
-// design.md, "Cost").
+/* Allocation-heavy with little else: a struct, a string and a two-element
+ * List made and freed on every iteration -- the worst case for heap watch,
+ * whose build sees every allocation and every release (docs/heap-watch-
+ * design.md, "Cost"). */
 type Pair {
     int left;
     str right;

@@ -1,9 +1,9 @@
-// Binary trees: allocate a lot, free a lot, touch little. The classic shape
-// for comparing memory management, and the one where reference counting is
-// most exposed -- every node is counted up and down, and freed the moment
-// its last reference goes rather than whenever a collector next runs.
-//
-// There is no null, so a tree is an enum: a Leaf, or a Branch of two trees.
+/* Binary trees: allocate a lot, free a lot, touch little. The classic shape
+ * for comparing memory management, and the one where reference counting is
+ * most exposed -- every node is counted up and down, and freed the moment
+ * its last reference goes rather than whenever a collector next runs.
+ *
+ * There is no null, so a tree is an enum: a Leaf, or a Branch of two trees. */
 enum Tree {
     Leaf;
     Branch(Tree, Tree);

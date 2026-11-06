@@ -1,6 +1,6 @@
-// `lib/ssh/sshagent.m31`'s message builders and parsers, including every
-// proper prefix of a valid answer and hostile counts and lengths: none may
-// trap, and none may be accepted. The live agent is `test_m31ssh.sh`'s job.
+/* `lib/ssh/sshagent.m31`'s message builders and parsers, including every
+ * proper prefix of a valid answer and hostile counts and lengths: none may
+ * trap, and none may be accepted. The live agent is `test_m31ssh.sh`'s job. */
 import ssh;
 import ssh.sshagent;
 

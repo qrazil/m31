@@ -1,67 +1,67 @@
-// Child processes with their standard streams: run one and collect what it
-// said, or start one and talk to it while it runs.
-//
-// API
+/* Child processes with their standard streams: run one and collect what it
+ * said, or start one and talk to it while it runs.
+ *
+ * API */
 // ---
-//   proc.run(argv, input:, cwd:, env:, timeout_ms:, should_check:, is_quiet:)
-//                              -> Result<Completed, Error>
-//   proc.start(argv, cwd:, env:)   -> Result<Proc, Error>
-//   proc.start_pty(argv, rows:, columns:, cwd:, env:)  -> Result<Pty, Error>
-//
-//   Completed                  .status .returncode .is_truncated .stdout .stderr; c.is_success()
-//   Proc                       .pid .stdin .stdout .stderr
-//   p.wait()                   -> Result<os.ExitStatus, Error>   parks only the caller
-//   p.kill(signal)             -> Result<bool, Error>            false: already gone
-//   p.take_stdin(), p.take_stdout(), p.take_stderr()   -> Pipe   to move into a thread
-//
-//   Pty                        .pid .master; pty.resize(rows, columns), .wait(), .kill(signal)
-//   Pipe                       an io.Stream over one end of a pipe, or a terminal master
-//   pipe.read(n), .read_all(), .read_until(delim, limit)          the stream protocol
-//   pipe.write(b), .write_some(b), .close()
-//   pipe.set_deadline_ns(t)    reads and writes give up at monotonic time t
-//   pipe.fileno(), pipe.has_buffered()   to poll it alongside other descriptors
-//
-//   proc.Error                 enum: why a process could not be run or went wrong
-//   e.to_str(), proc.from_errno(n), proc.error_of(io_error)
-//   proc.SIGHUP, SIGINT, SIGKILL, SIGTERM     the common signal numbers
-//
-// **`run` is for the answer, `start` is for the conversation.** `run` starts
-// the program, feeds it `input`, collects everything it writes to standard
-// output and standard error (at most 64 MiB of each, with `is_truncated` saying
-// so), waits for it, and returns. `start` returns at once with the three
-// pipes and the pid; what flows through them, and when, is the caller's.
-//
-// **`argv` is a list of separate strings, handed straight to `execve`.**
-// There is no shell: no quoting to get wrong, no word splitting, no
-// expansion, so a file name from outside the program cannot become a flag or
-// a second command. Want a shell? `["sh", "-c", text]`, and own it. A program
-// name that is empty or contains whitespace is refused (`InvalidArgument`):
-// `["git status"]` is a mistake, not a program called "git status". The
-// program is looked for on `$PATH` when it has no `/`, as `execvp` does
-// (the child's `PATH`: see `start`).
-//
-// **The three pipes are ordinary `io` streams.** `io.copy(p.stdout, file)`,
-// `io.read_line_of(p.stdout, 4096)` and `read_until` work unchanged. They are
-// non-blocking and every wait goes through the reactor, so a read that has
-// nothing yet or a write into a full pipe parks only the green thread that
-// made it (docs/concurrency-decision.md). **Nothing is buffered without
-// bound**: a `Pipe` holds at most one 64 KiB read, and the kernel's pipe
-// buffer is the only other queue, which is the backpressure -- a producer
-// faster than its consumer waits, in constant memory, however much flows.
-//
-// **Only 0, 1 and 2 reach the child, and only as chosen.** Every other
-// descriptor this process has is close-on-exec, and the child's end of each
-// pipe is closed here after the start. The child also starts with SIGPIPE at
-// its default and no signals blocked, whatever this process had.
-//
-// **`wait` after draining.** A child that fills a pipe nobody reads blocks, so
-// `wait` before reading everything can wait for ever, as with every
-// subprocess API. A `Proc` that is dropped without `wait` kills its child
-// (SIGKILL) and reaps it, so none is left running or a zombie.
-//
-// What is deliberately not here: a shell, process groups and sessions, and a
-// way to pass an extra descriptor. docs/proc-decision.md
-// says why and what each would take.
+/*   proc.run(argv, input:, cwd:, env:, timeout_ms:, should_check:, is_quiet:)
+ *                              -> Result<Completed, Error>
+ *   proc.start(argv, cwd:, env:)   -> Result<Proc, Error>
+ *   proc.start_pty(argv, rows:, columns:, cwd:, env:)  -> Result<Pty, Error>
+ *
+ *   Completed                  .status .returncode .is_truncated .stdout .stderr; c.is_success()
+ *   Proc                       .pid .stdin .stdout .stderr
+ *   p.wait()                   -> Result<os.ExitStatus, Error>   parks only the caller
+ *   p.kill(signal)             -> Result<bool, Error>            false: already gone
+ *   p.take_stdin(), p.take_stdout(), p.take_stderr()   -> Pipe   to move into a thread
+ *
+ *   Pty                        .pid .master; pty.resize(rows, columns), .wait(), .kill(signal)
+ *   Pipe                       an io.Stream over one end of a pipe, or a terminal master
+ *   pipe.read(n), .read_all(), .read_until(delim, limit)          the stream protocol
+ *   pipe.write(b), .write_some(b), .close()
+ *   pipe.set_deadline_ns(t)    reads and writes give up at monotonic time t
+ *   pipe.fileno(), pipe.has_buffered()   to poll it alongside other descriptors
+ *
+ *   proc.Error                 enum: why a process could not be run or went wrong
+ *   e.to_str(), proc.from_errno(n), proc.error_of(io_error)
+ *   proc.SIGHUP, SIGINT, SIGKILL, SIGTERM     the common signal numbers
+ *
+ * **`run` is for the answer, `start` is for the conversation.** `run` starts
+ * the program, feeds it `input`, collects everything it writes to standard
+ * output and standard error (at most 64 MiB of each, with `is_truncated` saying
+ * so), waits for it, and returns. `start` returns at once with the three
+ * pipes and the pid; what flows through them, and when, is the caller's.
+ *
+ * **`argv` is a list of separate strings, handed straight to `execve`.**
+ * There is no shell: no quoting to get wrong, no word splitting, no
+ * expansion, so a file name from outside the program cannot become a flag or
+ * a second command. Want a shell? `["sh", "-c", text]`, and own it. A program
+ * name that is empty or contains whitespace is refused (`InvalidArgument`):
+ * `["git status"]` is a mistake, not a program called "git status". The
+ * program is looked for on `$PATH` when it has no `/`, as `execvp` does
+ * (the child's `PATH`: see `start`).
+ *
+ * **The three pipes are ordinary `io` streams.** `io.copy(p.stdout, file)`,
+ * `io.read_line_of(p.stdout, 4096)` and `read_until` work unchanged. They are
+ * non-blocking and every wait goes through the reactor, so a read that has
+ * nothing yet or a write into a full pipe parks only the green thread that
+ * made it (docs/concurrency-decision.md). **Nothing is buffered without
+ * bound**: a `Pipe` holds at most one 64 KiB read, and the kernel's pipe
+ * buffer is the only other queue, which is the backpressure -- a producer
+ * faster than its consumer waits, in constant memory, however much flows.
+ *
+ * **Only 0, 1 and 2 reach the child, and only as chosen.** Every other
+ * descriptor this process has is close-on-exec, and the child's end of each
+ * pipe is closed here after the start. The child also starts with SIGPIPE at
+ * its default and no signals blocked, whatever this process had.
+ *
+ * **`wait` after draining.** A child that fills a pipe nobody reads blocks, so
+ * `wait` before reading everything can wait for ever, as with every
+ * subprocess API. A `Proc` that is dropped without `wait` kills its child
+ * (SIGKILL) and reaps it, so none is left running or a zombie.
+ *
+ * What is deliberately not here: a shell, process groups and sessions, and a
+ * way to pass an extra descriptor. docs/proc-decision.md
+ * says why and what each would take. */
 
 import io;
 import os;
@@ -77,22 +77,22 @@ prim int __wait_io_timeout(int descriptor, int events, int timeout_ms);
 prim int __clock_monotonic();
 // Pushes the read end and then the write end of a new close-on-exec pipe.
 prim int __pipe(List<int> out);
-// The child's environment is `env_list` ("NAME=value" entries) when
-// `has_env` is 1, this process's own when 0; `cwd` "" inherits; a
-// descriptor of -1 inherits. The pid, or -errno.
+/* The child's environment is `env_list` ("NAME=value" entries) when
+ * `has_env` is 1, this process's own when 0; `cwd` "" inherits; a
+ * descriptor of -1 inherits. The pid, or -errno. */
 prim int __proc_start_fds(List<str> argv, List<str> env_list, int has_env, str cwd, int stdin_fd, int stdout_fd, int stderr_fd);
 prim int __proc_wait(int pid);
-// As __proc_start_fds, but all three streams on the pseudo-terminal slave
-// named `slave_path`, in a new session of its own.
+/* As __proc_start_fds, but all three streams on the pseudo-terminal slave
+ * named `slave_path`, in a new session of its own. */
 prim int __proc_start_pty(List<str> argv, List<str> env_list, int has_env, str cwd, str slave_path);
-// Pushes the master descriptor and writes the slave's NUL-terminated name
-// into `path` (a bytes of the size the name may have).
+/* Pushes the master descriptor and writes the slave's NUL-terminated name
+ * into `path` (a bytes of the size the name may have). */
 prim int __pty_open(List<int> out, bytes path);
 prim int __set_winsize(int descriptor, int rows, int columns);
 prim int __kill(int pid, int signal);
 
-// The layer's constants, as numbers (docs/sys-layer.md): the events
-// `__wait_io` takes, the descriptor flag the reactor needs, and errnos.
+/* The layer's constants, as numbers (docs/sys-layer.md): the events
+ * `__wait_io` takes, the descriptor flag the reactor needs, and errnos. */
 const int IO_READABLE = 1;
 const int IO_WRITABLE = 2;
 const int SO_NONBLOCK = 7;
@@ -103,8 +103,8 @@ const int EPERM = 1;
 const int ESRCH = 3;
 const int EPIPE = 32;
 const int ETIMEDOUT = 110;
-// What `run` keeps of one stream before it only drains and discards: Oro's
-// bound, and the reason `start` exists for output that does not fit.
+/* What `run` keeps of one stream before it only drains and discards: Oro's
+ * bound, and the reason `start` exists for output that does not fit. */
 const int CAPTURE_LIMIT = 67108864;
 /// Linux signal numbers, the same on every host (docs/sys-layer.md).
 pub const int SIGHUP = 1;
@@ -112,11 +112,11 @@ pub const int SIGINT = 2;
 pub const int SIGKILL = 9;
 pub const int SIGTERM = 15;
 
-/// Why a process could not be run, or what went wrong with it.
-///
-/// Payload-free (docs/errors-decision.md): the variants are what a caller
-/// branches on, and the operating system's number is not worth a payload.
-/// `from_errno` is where each one comes from.
+/** Why a process could not be run, or what went wrong with it.
+ *
+ * Payload-free (docs/errors-decision.md): the variants are what a caller
+ * branches on, and the operating system's number is not worth a payload.
+ * `from_errno` is where each one comes from. */
 pub enum Error {
     /// The program, or the working directory, is not there.
     NotFound;
@@ -126,19 +126,19 @@ pub enum Error {
     NotExecutable;
     /// The working directory is not a directory.
     NotADirectory;
-    /// The arguments are refused: no program, whitespace in its name, a NUL
-    /// in an argument, a bad environment name, a signal that does not exist.
+    /** The arguments are refused: no program, whitespace in its name, a NUL
+     * in an argument, a bad environment name, a signal that does not exist. */
     InvalidArgument;
     /// Out of processes, memory or descriptors.
     ResourceLimit;
-    /// The child closed its standard input (or exited) and a write was
-    /// still coming: the pipe's `EPIPE`.
+    /** The child closed its standard input (or exited) and a write was
+     * still coming: the pipe's `EPIPE`. */
     BrokenPipe;
     /// A deadline passed before the process finished.
     TimedOut;
-    /// `run` with `should_check` true: the process ran and did not succeed -- a
-    /// nonzero exit, or killed by a signal. `should_check: false` gives the output
-    /// of such a process back, and its `status` says which.
+    /** `run` with `should_check` true: the process ran and did not succeed -- a
+     * nonzero exit, or killed by a signal. `should_check: false` gives the output
+     * of such a process back, and its `status` says which. */
     NonZeroExit;
     /// Any other failure of the operating system.
     Io;
@@ -180,8 +180,8 @@ pub str Error.to_str() {
     }
 }
 
-/// The `Error` for a Linux errno number -- positive, as errno is written; a
-/// primitive's `r < 0` is `from_errno(-r)`.
+/** The `Error` for a Linux errno number -- positive, as errno is written; a
+ * primitive's `r < 0` is `from_errno(-r)`. */
 pub Error from_errno(int error_number) {
     if (error_number == 2) {
         return Error.NotFound;
@@ -210,15 +210,15 @@ pub Error from_errno(int error_number) {
     return Error.Io;
 }
 
-/// The `Error` for what a `Pipe` method failed with: a write after the child
-/// stopped reading is `BrokenPipe`, a passed deadline is `TimedOut`, and
-/// anything else is whatever the number says.
+/** The `Error` for what a `Pipe` method failed with: a write after the child
+ * stopped reading is `BrokenPipe`, a passed deadline is `TimedOut`, and
+ * anything else is whatever the number says. */
 pub Error error_of(io.Error error) {
     return from_errno(errno_of(error));
 }
 
-// The errno an `io.Error` came from (`io.from_errno`'s inverse); EIO for
-// the one that has none.
+/* The errno an `io.Error` came from (`io.from_errno`'s inverse); EIO for
+ * the one that has none. */
 int errno_of(io.Error error) {
     match (error) {
         case NotFound: {
@@ -249,33 +249,33 @@ int errno_of(io.Error error) {
 }
 
 // --- pipes ---------------------------------------------------------------
-/// One end of a pipe to a child: what the child writes, or what it reads.
-///
-/// **It is an `io.Stream`**: `read`, `read_all`, `read_until`, `write` and
-/// `close` with a `File`'s signatures and meanings, plus `write_some`, so
-/// everything written against the protocol takes a child's pipe. A read
-/// returns an empty `bytes` at the end, which is the child closing that
-/// stream or exiting. Only the half this end is has any use: a write to a
-/// reading end, or a read from a writing end, traps (the `io` convention).
-///
-/// **A failed read keeps what it had**, as everywhere (`io.Stream`), and a
-/// write that fails has written an unknown amount: a write after the child
-/// is gone is `Other(32)` (EPIPE), which `proc.error_of` calls `BrokenPipe`;
-/// this process ignores SIGPIPE when the first child is started.
-///
-/// **A `Pipe` closes itself when its last reference goes**, silently;
-/// `close()` is how a program sees the error, and how a child's standard
-/// input is closed so that it reads end-of-file.
-///
-/// A `Pipe` that is moved to another thread (`spawn feed(p.take_stdin(), ..)`
-/// -- the value must be a local, so bind it first) is closed by the thread
-/// that lets go of it.
+/** One end of a pipe to a child: what the child writes, or what it reads.
+ *
+ * **It is an `io.Stream`**: `read`, `read_all`, `read_until`, `write` and
+ * `close` with a `File`'s signatures and meanings, plus `write_some`, so
+ * everything written against the protocol takes a child's pipe. A read
+ * returns an empty `bytes` at the end, which is the child closing that
+ * stream or exiting. Only the half this end is has any use: a write to a
+ * reading end, or a read from a writing end, traps (the `io` convention).
+ *
+ * **A failed read keeps what it had**, as everywhere (`io.Stream`), and a
+ * write that fails has written an unknown amount: a write after the child
+ * is gone is `Other(32)` (EPIPE), which `proc.error_of` calls `BrokenPipe`;
+ * this process ignores SIGPIPE when the first child is started.
+ *
+ * **A `Pipe` closes itself when its last reference goes**, silently;
+ * `close()` is how a program sees the error, and how a child's standard
+ * input is closed so that it reads end-of-file.
+ *
+ * A `Pipe` that is moved to another thread (`spawn feed(p.take_stdin(), ..)`
+ * -- the value must be a local, so bind it first) is closed by the thread
+ * that lets go of it. */
 pub type Pipe {
     int descriptor;
     bool is_readable;
     bool is_writable;
-    // A pseudo-terminal master, which Linux reports as EIO, not end-of-file,
-    // once every process holding the slave is gone.
+    /* A pseudo-terminal master, which Linux reports as EIO, not end-of-file,
+     * once every process holding the slave is gone. */
     bool is_terminal = false;
     bool is_live = true;
     // buffer[position .. end] has arrived and not been handed out.
@@ -286,9 +286,9 @@ pub type Pipe {
     int deadline_ns = 0;
 }
 
-/// The descriptor under this pipe (-1 once closed), for a caller that
-/// `poll`s several descriptors itself. Do not read or write it directly: the
-/// pipe keeps a buffer, see `has_buffered`.
+/** The descriptor under this pipe (-1 once closed), for a caller that
+ * `poll`s several descriptors itself. Do not read or write it directly: the
+ * pipe keeps a buffer, see `has_buffered`. */
 pub int Pipe.fileno() {
     if (!is_live) {
         return -1;
@@ -296,17 +296,17 @@ pub int Pipe.fileno() {
     return descriptor;
 }
 
-/// Whether bytes have arrived and not been handed out yet: a poll on
-/// `fileno` does not see them, so a poller asks this first.
+/** Whether bytes have arrived and not been handed out yet: a poll on
+ * `fileno` does not see them, so a poller asks this first. */
 pub bool Pipe.has_buffered() {
     return is_live && position < end;
 }
 
-/// Give up on waiting for this pipe at monotonic time `when_ns`
-/// (`timer.monotonic_ns()` plus a duration); 0 clears it. A read or write
-/// that would have to wait past it fails with `Other(110)` (ETIMEDOUT),
-/// `TimedOut` through `proc.error_of`, and a read fails having consumed
-/// nothing, as the `io.Stream` rule says.
+/** Give up on waiting for this pipe at monotonic time `when_ns`
+ * (`timer.monotonic_ns()` plus a duration); 0 clears it. A read or write
+ * that would have to wait past it fails with `Other(110)` (ETIMEDOUT),
+ * `TimedOut` through `proc.error_of`, and a read fails having consumed
+ * nothing, as the `io.Stream` rule says. */
 pub void Pipe.set_deadline_ns(int when_ns) {
     if (when_ns < 0) {
         trap("set_deadline_ns: a time cannot be negative");
@@ -314,11 +314,11 @@ pub void Pipe.set_deadline_ns(int when_ns) {
     deadline_ns = when_ns;
 }
 
-/// Between 1 and `max_bytes` bytes, or an empty `bytes` at the end.
-///
-/// `max_bytes` is a maximum, and the answer is what has arrived: code that
-/// needs everything calls `read_all`. Below 1 it traps, so that an empty
-/// result has one meaning.
+/** Between 1 and `max_bytes` bytes, or an empty `bytes` at the end.
+ *
+ * `max_bytes` is a maximum, and the answer is what has arrived: code that
+ * needs everything calls `read_all`. Below 1 it traps, so that an empty
+ * result has one meaning. */
 pub Result<bytes, io.Error> Pipe.read(int max_bytes) {
     if (max_bytes < 1) {
         trap("read(" + max_bytes.to_str() + "): read at least one byte; read_all() reads everything");
@@ -344,9 +344,9 @@ pub Result<bytes, io.Error> Pipe.read(int max_bytes) {
     return Result<bytes, io.Error>.Ok(out);
 }
 
-/// Everything until the child closes this stream. A child that never does
-/// never returns from here; a deadline bounds it, and a failure keeps what
-/// had arrived.
+/** Everything until the child closes this stream. A child that never does
+ * never returns from here; a deadline bounds it, and a failure keeps what
+ * had arrived. */
 pub Result<bytes, io.Error> Pipe.read_all() {
     check_readable();
     bytes out = [];
@@ -365,9 +365,9 @@ pub Result<bytes, io.Error> Pipe.read_all() {
     return Result<bytes, io.Error>.Ok(out);
 }
 
-/// Bytes up to and including the first `delim`, reading no more than
-/// `limit` of them: `io.File.read_until`'s three outcomes, told apart the
-/// same way. An empty `delim` or a `limit` below 1 traps.
+/** Bytes up to and including the first `delim`, reading no more than
+ * `limit` of them: `io.File.read_until`'s three outcomes, told apart the
+ * same way. An empty `delim` or a `limit` below 1 traps. */
 pub Result<bytes, io.Error> Pipe.read_until(bytes delim, int limit) {
     if (delim.size() == 0) {
         trap("read_until: the delimiter is empty");
@@ -394,9 +394,9 @@ pub Result<bytes, io.Error> Pipe.read_until(bytes delim, int limit) {
     return Result<bytes, io.Error>.Ok(out);
 }
 
-/// Write all of `data`, returning its size. A full pipe parks this green
-/// thread until the child reads; `Err` means an unknown prefix was written
-/// and the pipe should be closed (`write_some` keeps count).
+/** Write all of `data`, returning its size. A full pipe parks this green
+ * thread until the child reads; `Err` means an unknown prefix was written
+ * and the pipe should be closed (`write_some` keeps count). */
 pub Result<int, io.Error> Pipe.write(bytes data) {
     check_writable();
     int off = 0;
@@ -420,8 +420,8 @@ pub Result<int, io.Error> Pipe.write(bytes data) {
     return Result<int, io.Error>.Ok(off);
 }
 
-/// One attempt: how many bytes the pipe took, at least 1. `Err` means
-/// nothing was written. An empty `data` is 0.
+/** One attempt: how many bytes the pipe took, at least 1. `Err` means
+ * nothing was written. An empty `data` is 0. */
 pub Result<int, io.Error> Pipe.write_some(bytes data) {
     check_writable();
     if (data.size() == 0) {
@@ -446,8 +446,8 @@ pub Result<int, io.Error> Pipe.write_some(bytes data) {
     }
 }
 
-/// Close this end. Closing twice is not an error; any other use of a closed
-/// pipe traps. Closing a child's standard input is how it reads the end.
+/** Close this end. Closing twice is not an error; any other use of a closed
+ * pipe traps. Closing a child's standard input is how it reads the end. */
 pub Result<bool, io.Error> Pipe.close() {
     return release();
 }
@@ -490,16 +490,16 @@ void Pipe.check_writable() {
     }
 }
 
-// Park until the descriptor is ready for `events` or the deadline passes.
-// Ok when it is ready, or when it is worth looking again; Err(ETIMEDOUT)
-// when the deadline ran out.
-//
-// A pipe with no deadline waits without a bound, as a socket does. A
-// terminal master and any pipe with a deadline wait in bounded slices, and
-// a descriptor the reactor refuses to watch (answered EPERM -- macOS's
-// kqueue and some terminal devices) is polled every 10 ms instead of being
-// waited on, so that the one thing the reactor cannot do slows a read down
-// rather than stopping it.
+/* Park until the descriptor is ready for `events` or the deadline passes.
+ * Ok when it is ready, or when it is worth looking again; Err(ETIMEDOUT)
+ * when the deadline ran out.
+ *
+ * A pipe with no deadline waits without a bound, as a socket does. A
+ * terminal master and any pipe with a deadline wait in bounded slices, and
+ * a descriptor the reactor refuses to watch (answered EPERM -- macOS's
+ * kqueue and some terminal devices) is polled every 10 ms instead of being
+ * waited on, so that the one thing the reactor cannot do slows a read down
+ * rather than stopping it. */
 Result<bool, io.Error> Pipe.wait_ready(int events) {
     if (deadline_ns <= 0 && !is_terminal) {
         int ignored = __wait_io(descriptor, events);
@@ -532,8 +532,8 @@ Result<bool, io.Error> Pipe.wait_ready(int events) {
     return Result<bool, io.Error>.Ok(true);
 }
 
-// Refill an empty buffer: the bytes now buffered, 0 at the end. `buffer` is
-// replaced, not reused, so an idle pipe holds only what has arrived.
+/* Refill an empty buffer: the bytes now buffered, 0 at the end. `buffer` is
+ * replaced, not reused, so an idle pipe holds only what has arrived. */
 Result<int, io.Error> Pipe.fill() {
     bytes next = [];
     while (true) {
@@ -559,8 +559,8 @@ Result<int, io.Error> Pipe.fill() {
     }
 }
 
-// `fill`, except that a failure first puts `held` back in front of the
-// stream (the io.Stream rule: a failed read consumes nothing).
+/* `fill`, except that a failure first puts `held` back in front of the
+ * stream (the io.Stream rule: a failed read consumes nothing). */
 Result<int, io.Error> Pipe.fill_keeping(bytes held) {
     match (fill()) {
         case Ok(int buffered_count): {
@@ -577,29 +577,29 @@ Result<int, io.Error> Pipe.fill_keeping(bytes held) {
     }
 }
 
-// A pipe end that is already closed: what `take_stdin` leaves behind, so a
-// taken stream is a closed one and not a hole.
+/* A pipe end that is already closed: what `take_stdin` leaves behind, so a
+ * taken stream is a closed one and not a hole. */
 Pipe closed_pipe() {
     return Pipe(-1, false, false, is_live: false);
 }
 
 // --- a running process ---------------------------------------------------
-/// A child process and its three streams.
-///
-/// `stdin` is a writing `Pipe`, `stdout` and `stderr` reading ones. **They
-/// are separate**: nothing merges standard error into standard output (run
-/// `["sh", "-c", "cmd 2>&1"]` for that), so a child can be read to the end
-/// on one without the other getting in the way -- but a child that fills the
-/// one nobody is reading blocks, so a program that does not need standard
-/// error closes it (`p.stderr.close()`, the child then gets EPIPE on its
-/// writes) or reads it on another thread.
-///
-/// `take_stdin`, `take_stdout` and `take_stderr` hand a stream out for
-/// `start`: a value can only be moved to a thread from a local, and a field
-/// is not one. The field is left holding a closed pipe.
-///
-/// **Dropping a `Proc` that was not waited for kills the child with SIGKILL
-/// and reaps it**, so there is no process left running and no zombie.
+/** A child process and its three streams.
+ *
+ * `stdin` is a writing `Pipe`, `stdout` and `stderr` reading ones. **They
+ * are separate**: nothing merges standard error into standard output (run
+ * `["sh", "-c", "cmd 2>&1"]` for that), so a child can be read to the end
+ * on one without the other getting in the way -- but a child that fills the
+ * one nobody is reading blocks, so a program that does not need standard
+ * error closes it (`p.stderr.close()`, the child then gets EPIPE on its
+ * writes) or reads it on another thread.
+ *
+ * `take_stdin`, `take_stdout` and `take_stderr` hand a stream out for
+ * `start`: a value can only be moved to a thread from a local, and a field
+ * is not one. The field is left holding a closed pipe.
+ *
+ * **Dropping a `Proc` that was not waited for kills the child with SIGKILL
+ * and reaps it**, so there is no process left running and no zombie. */
 pub type Proc {
     pub int pid;
     pub Pipe stdin;
@@ -630,14 +630,14 @@ pub Pipe Proc.take_stderr() {
     return taken;
 }
 
-/// Wait for the child to end and say how: exited with a code, or killed by
-/// a signal (`os.ExitStatus`, the type `os.run` answers with).
-///
-/// **Only the calling green thread waits.** The wait itself is a blocking
-/// system call, and the runtime's blocking-call handoff moves the carrier's
-/// other threads away while it lasts (docs/concurrency-decision.md), so the
-/// rest of the program goes on; but a child that is still producing output
-/// nobody reads will not end -- drain first. Waiting again answers the same.
+/** Wait for the child to end and say how: exited with a code, or killed by
+ * a signal (`os.ExitStatus`, the type `os.run` answers with).
+ *
+ * **Only the calling green thread waits.** The wait itself is a blocking
+ * system call, and the runtime's blocking-call handoff moves the carrier's
+ * other threads away while it lasts (docs/concurrency-decision.md), so the
+ * rest of the program goes on; but a child that is still producing output
+ * nobody reads will not end -- drain first. Waiting again answers the same. */
 pub Result<os.ExitStatus, Error> Proc.wait() {
     if (is_reaped) {
         return Result<os.ExitStatus, Error>.Ok(status);
@@ -651,13 +651,13 @@ pub Result<os.ExitStatus, Error> Proc.wait() {
     return Result<os.ExitStatus, Error>.Ok(status);
 }
 
-/// Send the child signal number `signal` (`proc.SIGTERM`, `proc.SIGKILL`,
-/// any Linux number; 0 asks only whether it is there).
-///
-/// `Ok(false)` is "nothing to signal": the child has already been waited
-/// for, which is also the one case where the pid could belong to somebody
-/// else, so it is never signalled then. A child that has ended but is not
-/// yet waited for is signalled harmlessly.
+/** Send the child signal number `signal` (`proc.SIGTERM`, `proc.SIGKILL`,
+ * any Linux number; 0 asks only whether it is there).
+ *
+ * `Ok(false)` is "nothing to signal": the child has already been waited
+ * for, which is also the one case where the pid could belong to somebody
+ * else, so it is never signalled then. A child that has ended but is not
+ * yet waited for is signalled harmlessly. */
 pub Result<bool, Error> Proc.kill(int signal) {
     if (is_reaped) {
         return Result<bool, Error>.Ok(false);
@@ -672,9 +672,9 @@ pub Result<bool, Error> Proc.kill(int signal) {
     return Result<bool, Error>.Ok(true);
 }
 
-// The destructor: kill and reap a child that was never waited for. SIGKILL
-// cannot be caught, so the wait is short; the pipes are closed after, as the
-// fields are released.
+/* The destructor: kill and reap a child that was never waited for. SIGKILL
+ * cannot be caught, so the wait is short; the pipes are closed after, as the
+ * fields are released. */
 void Proc.drop() {
     if (!is_reaped) {
         int ignored_kill = __kill(pid, 9);
@@ -715,10 +715,10 @@ Result<bool, Error> check_argv(List<str> argv) {
     return Result<bool, Error>.Ok(true);
 }
 
-// The child's environment as "NAME=value" entries, names sorted so that one
-// map is always one list. A name that is empty or holds `=` is refused: it
-// could not be told apart from another entry, which is the kind of quiet
-// change this module is there to prevent.
+/* The child's environment as "NAME=value" entries, names sorted so that one
+ * map is always one list. A name that is empty or holds `=` is refused: it
+ * could not be told apart from another entry, which is the kind of quiet
+ * change this module is there to prevent. */
 Result<List<str>, Error> environment_list(Map<str, str> table) {
     List<str> names = table.keys();
     names.sort();
@@ -752,11 +752,11 @@ Result<Proc, Error> launch(List<str> argv, str cwd, Option<Map<str, str>> env) {
         case None: {
         }
     }
-    // A write to a child that has gone must be an error value, not a signal
-    // that ends this process. Idempotent.
+    /* A write to a child that has gone must be an error value, not a signal
+     * that ends this process. Idempotent. */
     int ignored = __ignore_sigpipe();
-    // [read end, write end] of each: the child reads in[0], writes out[1]
-    // and err[1]; this process keeps in[1], out[0] and err[0].
+    /* [read end, write end] of each: the child reads in[0], writes out[1]
+     * and err[1]; this process keeps in[1], out[0] and err[0]. */
     List<int> standard_in = [];
     List<int> standard_out = [];
     List<int> standard_error = [];
@@ -775,9 +775,9 @@ Result<Proc, Error> launch(List<str> argv, str cwd, Option<Map<str, str>> env) {
         close_all(standard_out);
         return Result<Proc, Error>.Err(from_errno(-made));
     }
-    // This process's ends are polled by the reactor, so they must not block
-    // the carrier; the child's ends stay blocking (a separate open file
-    // description each, so setting one leaves the other alone).
+    /* This process's ends are polled by the reactor, so they must not block
+     * the carrier; the child's ends stay blocking (a separate open file
+     * description each, so setting one leaves the other alone). */
     int flagged = __setsockopt(standard_in[1], SO_NONBLOCK, 1);
     if (flagged == 0) {
         flagged = __setsockopt(standard_out[0], SO_NONBLOCK, 1);
@@ -792,9 +792,9 @@ Result<Proc, Error> launch(List<str> argv, str cwd, Option<Map<str, str>> env) {
         return Result<Proc, Error>.Err(from_errno(-flagged));
     }
     int pid = __proc_start_fds(argv, env_list, has_env, cwd, standard_in[0], standard_out[1], standard_error[1]);
-    // The child has its own copies now (or never existed): these three are
-    // the child's side and are of no use here, and keeping them open would
-    // stop the end-of-file from ever arriving.
+    /* The child has its own copies now (or never existed): these three are
+     * the child's side and are of no use here, and keeping them open would
+     * stop the end-of-file from ever arriving. */
     int closed = __close(standard_in[0]);
     closed = __close(standard_out[1]);
     closed = __close(standard_error[1]);
@@ -816,49 +816,49 @@ void close_all(List<int> descriptors) {
     }
 }
 
-/// Start `argv` as a child process with its three standard streams on pipes,
-/// and return at once.
-///
-/// `cwd` is the child's working directory ("" is this process's own); `env`
-/// **replaces** the environment rather than merging into it, so
-/// `env: {"FOO": "x"}` runs with `FOO` and nothing else, `PATH` included.
-/// A program with no `/` is looked for on the CHILD's `PATH` -- the one in
-/// `env`, or `/bin:/usr/bin` when it has none, as Python does -- so a
-/// replaced environment that must still find `git` in `/usr/local/bin`
-/// carries a `PATH`. Merging is written out from `os.env_map()`. `Err` means the process never started: the
-/// program or directory is not there (`NotFound`), may not be used
-/// (`PermissionDenied`), is not executable (`NotExecutable`), or the
-/// arguments are refused (`InvalidArgument`).
+/** Start `argv` as a child process with its three standard streams on pipes,
+ * and return at once.
+ *
+ * `cwd` is the child's working directory ("" is this process's own); `env`
+ * **replaces** the environment rather than merging into it, so
+ * `env: {"FOO": "x"}` runs with `FOO` and nothing else, `PATH` included.
+ * A program with no `/` is looked for on the CHILD's `PATH` -- the one in
+ * `env`, or `/bin:/usr/bin` when it has none, as Python does -- so a
+ * replaced environment that must still find `git` in `/usr/local/bin`
+ * carries a `PATH`. Merging is written out from `os.env_map()`. `Err` means the process never started: the
+ * program or directory is not there (`NotFound`), may not be used
+ * (`PermissionDenied`), is not executable (`NotExecutable`), or the
+ * arguments are refused (`InvalidArgument`). */
 pub Result<Proc, Error> start(List<str> argv, str cwd = "", Option<Map<str, str>> env = Option<Map<str, str>>.None) {
     return launch(argv, cwd, env);
 }
 
 // --- a child on a pseudo-terminal ------------------------------------------
-/// A child process whose standard input, output and error are one terminal,
-/// and the master end of that terminal.
-///
-/// **What it is for**: a program that behaves differently on a terminal --
-/// line editing, colours, paging, a REPL, `ssh`, `top` -- or that needs one
-/// to run at all. Under pipes (`start`) such a program sees `isatty` false.
-///
-/// **`master` is the whole conversation**, one `Pipe` that is both readable
-/// and writable: what the program prints is read from it, and what is
-/// written to it is the keyboard. The line discipline is the terminal's, not
-/// this library's: typed characters are echoed back into the output, `\n`
-/// comes out as `\r\n`, `^C` (byte 3) written to the master interrupts the
-/// child's foreground group, and `^D` is its end of file. A program that
-/// wants raw bytes puts the terminal in raw mode itself (`stty raw -echo`).
-/// Standard output and standard error are **one stream** here, as on any
-/// terminal.
-///
-/// The end of the stream is the child (and everything that inherited the
-/// terminal) going away: `read` then answers an empty `bytes` on every host,
-/// where Linux's descriptor says EIO.
-///
-/// **The child has a session and a controlling terminal of its own**, so
-/// `tty` names it, `/dev/tty` opens, and signals from the line discipline
-/// reach it and not this process. Dropping a `Pty` that was not waited for
-/// kills the child and reaps it, as for a `Proc`.
+/** A child process whose standard input, output and error are one terminal,
+ * and the master end of that terminal.
+ *
+ * **What it is for**: a program that behaves differently on a terminal --
+ * line editing, colours, paging, a REPL, `ssh`, `top` -- or that needs one
+ * to run at all. Under pipes (`start`) such a program sees `isatty` false.
+ *
+ * **`master` is the whole conversation**, one `Pipe` that is both readable
+ * and writable: what the program prints is read from it, and what is
+ * written to it is the keyboard. The line discipline is the terminal's, not
+ * this library's: typed characters are echoed back into the output, `\n`
+ * comes out as `\r\n`, `^C` (byte 3) written to the master interrupts the
+ * child's foreground group, and `^D` is its end of file. A program that
+ * wants raw bytes puts the terminal in raw mode itself (`stty raw -echo`).
+ * Standard output and standard error are **one stream** here, as on any
+ * terminal.
+ *
+ * The end of the stream is the child (and everything that inherited the
+ * terminal) going away: `read` then answers an empty `bytes` on every host,
+ * where Linux's descriptor says EIO.
+ *
+ * **The child has a session and a controlling terminal of its own**, so
+ * `tty` names it, `/dev/tty` opens, and signals from the line discipline
+ * reach it and not this process. Dropping a `Pty` that was not waited for
+ * kills the child and reaps it, as for a `Proc`. */
 pub type Pty {
     pub int pid;
     pub Pipe master;
@@ -873,8 +873,8 @@ pub Pipe Pty.take_master() {
     return taken;
 }
 
-/// Tell the terminal it is now `rows` by `columns`. The child's foreground
-/// group is sent SIGWINCH by the kernel, which is how a program redraws.
+/** Tell the terminal it is now `rows` by `columns`. The child's foreground
+ * group is sent SIGWINCH by the kernel, which is how a program redraws. */
 pub Result<bool, Error> Pty.resize(int rows, int columns) {
     if (rows < 1 || rows > 65535 || columns < 1 || columns > 65535) {
         return Result<bool, Error>.Err(Error.InvalidArgument);
@@ -889,8 +889,8 @@ pub Result<bool, Error> Pty.resize(int rows, int columns) {
     return Result<bool, Error>.Ok(true);
 }
 
-/// Wait for the child to end: `Proc.wait`'s contract, parking only the
-/// calling thread, and answering the same for every later call.
+/** Wait for the child to end: `Proc.wait`'s contract, parking only the
+ * calling thread, and answering the same for every later call. */
 pub Result<os.ExitStatus, Error> Pty.wait() {
     if (is_reaped) {
         return Result<os.ExitStatus, Error>.Ok(status);
@@ -926,11 +926,11 @@ void Pty.drop() {
     }
 }
 
-/// Start `argv` on a new pseudo-terminal of `rows` by `columns` character cells
-/// (the default is the classic 24 by 80). `cwd` and `env` are `start`'s.
-///
-/// `Err(InvalidArgument)` for a size outside 1 to 65535. The size can be
-/// changed later with `resize`.
+/** Start `argv` on a new pseudo-terminal of `rows` by `columns` character cells
+ * (the default is the classic 24 by 80). `cwd` and `env` are `start`'s.
+ *
+ * `Err(InvalidArgument)` for a size outside 1 to 65535. The size can be
+ * changed later with `resize`. */
 pub Result<Pty, Error> start_pty(List<str> argv, int rows = 24, int columns = 80, str cwd = "", Option<Map<str, str>> env = Option<Map<str, str>>.None) {
     if (rows < 1 || rows > 65535 || columns < 1 || columns > 65535) {
         return Result<Pty, Error>.Err(Error.InvalidArgument);
@@ -974,9 +974,9 @@ pub Result<Pty, Error> start_pty(List<str> argv, int rows = 24, int columns = 80
                 int closed = __close(master);
                 return Result<Pty, Error>.Err(from_errno(-pid));
             }
-            // Once more with the slave open: macOS forgets a size set on a
-            // master whose slave had never been opened, when the child
-            // opens it. Harmless elsewhere.
+            /* Once more with the slave open: macOS forgets a size set on a
+             * master whose slave had never been opened, when the child
+             * opens it. Harmless elsewhere. */
             int sized_again = __set_winsize(master, rows, columns);
             Pipe end = Pipe(master, true, true, is_terminal: true);
             return Result<Pty, Error>.Ok(Pty(pid, end));
@@ -989,14 +989,14 @@ pub Result<Pty, Error> start_pty(List<str> argv, int rows = 24, int columns = 80
 }
 
 // --- run: the whole conversation -------------------------------------------
-/// What `run` collected from a process that ran to its end.
-///
-/// `returncode` is Python's: the exit code, or minus the signal number that
-/// killed it; `status` is the same fact as an `os.ExitStatus`, which a
-/// `match` can be exhaustive over, and `is_success()` is "exited 0".
-/// `is_truncated` says that
-/// one of the streams went past 64 MiB: what is here is its first 64 MiB, the
-/// rest was read and thrown away so that the child did not block.
+/** What `run` collected from a process that ran to its end.
+ *
+ * `returncode` is Python's: the exit code, or minus the signal number that
+ * killed it; `status` is the same fact as an `os.ExitStatus`, which a
+ * `match` can be exhaustive over, and `is_success()` is "exited 0".
+ * `is_truncated` says that
+ * one of the streams went past 64 MiB: what is here is its first 64 MiB, the
+ * rest was read and thrown away so that the child did not block. */
 pub type Completed {
     pub os.ExitStatus status;
     pub int returncode;
@@ -1019,9 +1019,9 @@ type Drained {
     int failure;
 }
 
-// Feed `data` to the child and close its input. A child that stops reading
-// is not a failure of the run (Python's `communicate` ignores EPIPE too);
-// anything else is reported.
+/* Feed `data` to the child and close its input. A child that stops reading
+ * is not a failure of the run (Python's `communicate` ignores EPIPE too);
+ * anything else is reported. */
 void feed(Pipe sink, bytes data, Chan<Drained> results) {
     int failure = 0;
     if (data.size() > 0) {
@@ -1040,13 +1040,13 @@ void feed(Pipe sink, bytes data, Chan<Drained> results) {
     send(results, Drained(0, [], false, failure));
 }
 
-// Read one stream to its end, keeping the first CAPTURE_LIMIT bytes and
-// writing everything to `echo` (this process's own stdout or stderr) when
-// that is not 0.
+/* Read one stream to its end, keeping the first CAPTURE_LIMIT bytes and
+ * writing everything to `echo` (this process's own stdout or stderr) when
+ * that is not 0. */
 void drain(Pipe source, int which, int echo, Chan<Drained> results) {
-    // The bytes live in the report from the start: it is the one thing that
-    // crosses to the other thread, and a value may only be moved once
-    // nothing else on this side refers to it.
+    /* The bytes live in the report from the start: it is the one thing that
+     * crosses to the other thread, and a value may only be moved once
+     * nothing else on this side refers to it. */
     Drained report = Drained(which, [], false, 0);
     io.File terminal = io.stdout();
     if (echo == 2) {
@@ -1081,16 +1081,16 @@ void drain(Pipe source, int which, int echo, Chan<Drained> results) {
     send(results, report);
 }
 
-// Kills `pid` when `deadline_ns` passes unless `gate` says it was reaped
-// first. `gate` holds one token: 0 while the child is unreaped, 1 once it
-// is, and this thread leaves 2 behind when it has sent the signal. The
-// token is taken and put back around every look, so the reaper's update
-// and this thread's decision cannot interleave -- the pid is never signalled
-// after the wait that released it was recorded.
-//
-// It wakes every 50 ms rather than sleeping to the deadline so that a run
-// whose child finished at once does not keep the program alive for the whole
-// timeout: the program waits for every spawned thread before it exits.
+/* Kills `pid` when `deadline_ns` passes unless `gate` says it was reaped
+ * first. `gate` holds one token: 0 while the child is unreaped, 1 once it
+ * is, and this thread leaves 2 behind when it has sent the signal. The
+ * token is taken and put back around every look, so the reaper's update
+ * and this thread's decision cannot interleave -- the pid is never signalled
+ * after the wait that released it was recorded.
+ *
+ * It wakes every 50 ms rather than sleeping to the deadline so that a run
+ * whose child finished at once does not keep the program alive for the whole
+ * timeout: the program waits for every spawned thread before it exits. */
 void watchdog(int pid, int deadline_ns, Chan<int> gate) {
     while (true) {
         int state = recv(gate);
@@ -1113,31 +1113,31 @@ void watchdog(int pid, int deadline_ns, Chan<int> gate) {
     }
 }
 
-/// Run `argv` to its end and return what it wrote.
-///
-/// `input` is written to the child's standard input, which is then closed so
-/// that it reads end-of-file; nothing given means an input that is already
-/// at its end, never the terminal. It is written **concurrently** with
-/// reading the output, so an input far larger than the pipe buffer does not
-/// deadlock against a child that writes as it reads. Standard output and
-/// standard error are collected separately, up to 64 MiB each
-/// (`is_truncated`); **they are also echoed live** to this process's own
-/// unless `is_quiet`.
-///
-/// `should_check` (the default) makes a process that did not exit with 0 an `Err`
-/// of `NonZeroExit` -- a signal included -- and discards its output; pass
-/// `should_check: false` to get the `Completed` of a failing process and decide
-/// from `status`. `timeout_ms` above 0 bounds the whole run: when it passes
-/// the child is killed (SIGKILL), reaped, and the result is `Err(TimedOut)`.
-/// What the others mean is `start`'s.
-///
-/// **The output of a run is whole in memory** (a `bytes` is one allocation);
-/// for output that does not fit, `start` and `io.copy` move it in constant
-/// space. The stream threads need to be able to finish: a child that closes
-/// its output and then keeps running is waited for here until it ends, or
-/// the timeout kills it. Grandchildren that inherit the pipes keep the
-/// streams open past the child's own end until `timeout_ms` or their own
-/// exit, as with `subprocess.run`.
+/** Run `argv` to its end and return what it wrote.
+ *
+ * `input` is written to the child's standard input, which is then closed so
+ * that it reads end-of-file; nothing given means an input that is already
+ * at its end, never the terminal. It is written **concurrently** with
+ * reading the output, so an input far larger than the pipe buffer does not
+ * deadlock against a child that writes as it reads. Standard output and
+ * standard error are collected separately, up to 64 MiB each
+ * (`is_truncated`); **they are also echoed live** to this process's own
+ * unless `is_quiet`.
+ *
+ * `should_check` (the default) makes a process that did not exit with 0 an `Err`
+ * of `NonZeroExit` -- a signal included -- and discards its output; pass
+ * `should_check: false` to get the `Completed` of a failing process and decide
+ * from `status`. `timeout_ms` above 0 bounds the whole run: when it passes
+ * the child is killed (SIGKILL), reaped, and the result is `Err(TimedOut)`.
+ * What the others mean is `start`'s.
+ *
+ * **The output of a run is whole in memory** (a `bytes` is one allocation);
+ * for output that does not fit, `start` and `io.copy` move it in constant
+ * space. The stream threads need to be able to finish: a child that closes
+ * its output and then keeps running is waited for here until it ends, or
+ * the timeout kills it. Grandchildren that inherit the pipes keep the
+ * streams open past the child's own end until `timeout_ms` or their own
+ * exit, as with `subprocess.run`. */
 pub Result<Completed, Error> run(List<str> argv, bytes input = [], str cwd = "", Option<Map<str, str>> env = Option<Map<str, str>>.None, int timeout_ms = 0, bool should_check = true, bool is_quiet = false) {
     if (timeout_ms < 0) {
         trap("run: timeout_ms is a count of milliseconds, 0 for none");
@@ -1191,8 +1191,8 @@ pub Result<Completed, Error> run(List<str> argv, bytes input = [], str cwd = "",
     }
     // Every stream is at its end; reap the child. This is the only wait.
     os.ExitStatus status = child.wait()?;
-    // Record the reaping so a watchdog still looking never signals the pid
-    // again, and learn whether it was the one that ended the child.
+    /* Record the reaping so a watchdog still looking never signals the pid
+     * again, and learn whether it was the one that ended the child. */
     bool is_killed_by_timeout = false;
     if (deadline_ns > 0) {
         int state = recv(gate);

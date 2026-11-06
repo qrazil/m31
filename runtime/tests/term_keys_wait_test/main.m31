@@ -4,21 +4,21 @@ import term;
 import text;
 import timer;
 
-// The program runtime/tests/term_keys_wait_test.sh drives over a pipe on
-// standard input, writing to it at chosen times. A pipe is enough: the
-// reader waits on any descriptor, and raw mode is not involved.
-//
-// Arguments are triples, `KIND A B`, run in order:
-//
-//   k T E    term.Reader.read_keys(T, E)
-//   r T 0    term.Reader.read(T)
-//   s MS 0   sleep MS milliseconds
-//
-// Each `k` and `r` prints one line on standard error, which is flushed as
-// it is written: `<n> <outcome> pending=<held bytes> t=<ms>`, where t is
-// the milliseconds since `ready` was printed. The driver starts its clock
-// at the `ready` line, so t is never smaller than the driver's own reading:
-// a lower bound that passes is a real one.
+/* The program runtime/tests/term_keys_wait_test.sh drives over a pipe on
+ * standard input, writing to it at chosen times. A pipe is enough: the
+ * reader waits on any descriptor, and raw mode is not involved.
+ *
+ * Arguments are triples, `KIND A B`, run in order:
+ *
+ *   k T E    term.Reader.read_keys(T, E)
+ *   r T 0    term.Reader.read(T)
+ *   s MS 0   sleep MS milliseconds
+ *
+ * Each `k` and `r` prints one line on standard error, which is flushed as
+ * it is written: `<n> <outcome> pending=<held bytes> t=<ms>`, where t is
+ * the milliseconds since `ready` was printed. The driver starts its clock
+ * at the `ready` line, so t is never smaller than the driver's own reading:
+ * a lower bound that passes is a real one. */
 
 int to_number(str word) {
     match (text.parse_int(word)) {

@@ -1,65 +1,65 @@
-// The whole SSH client in one call, for a git client that wants
-// `ssh user@host command`: connect, check the host key against a
-// `known_hosts` file, authenticate with a key file, run one command.
-//
-// API
+/* The whole SSH client in one call, for a git client that wants
+ * `ssh user@host command`: connect, check the host key against a
+ * `known_hosts` file, authenticate with a key file, run one command.
+ *
+ * API */
 // ---
-//   sshclient.connect(host, port, user, key_path, known_hosts_path)
-//                                  -> Result<Session, Error>
-//   sshclient.connect_configured(host, port, user, ...)
-//                                  -> Result<Session, Error>   like `ssh` would
-//   sshclient.connect_detailed(host, port, user, ...)
-//                                  -> Result<Session, ConnectFailure>
-//   sshclient.resolve(host, port, user, ...)
-//                                  -> Result<Resolved, str>    no connection
-//   session.exec(command)          -> Result<sshexec.Channel, Error>
-//   session.banner()               -> str      the server's pre-login notice
-//   session.close()                -> Result<bool, Error>
-//
-// Everything is a thin composition of `sshhosts` (which keys are trusted for
-// this host), `ssh.connect_any` (transport, host-key check), `sshkey` (the
-// private key file) and `sshauth` / `sshexec`. This module adds no protocol
-// and no trust decisions of its own: a host that is not in `known_hosts` is
-// refused before any byte is sent to it, a passphrase-protected key is
-// refused with a clear error, and the files named are the only ones read --
-// `~/.ssh` is never consulted. One `Session` runs commands one after another
-// (finish with a channel -- `wait()` or `close()` -- before the next `exec`).
-//
-// A caller that wants to ask a person about an unknown host (trust on first
-// use) gets `Error.KnownHosts(UnknownHost)` here, then `ssh.presented_host_key`
-// for what to show and `sshhosts.add` to record a yes -- see `lib/sshhosts.m31`;
-// a `Connect(HostKeyMismatch)` has no such path.
-//
-// `connect_configured` is the other entry point, for a caller that wants
-// "connect the way `ssh user@host` would": the same resolution as `m31ssh`
-// (`~/.ssh/config` with `Host`/`Match`/`Include`, `HostName`, `Port`, `User`,
-// `IdentityFile`, `IdentitiesOnly`, `ProxyJump`, `UserKnownHostsFile`,
-// `StrictHostKeyChecking`, `ConnectTimeout`), the identities of `ssh-agent`
-// (`SSH_AUTH_SOCK`) and the default key files, passphrase-protected keys,
-// and the same host-key policy (`lib/ssh/sshconnect.m31`). Nothing is asked
-// of a person unless `is_interactive` is true: an unknown host is then
-// refused under the default `ask`, and a key that needs a passphrase is
-// skipped in favour of the agent.
-//
-// `connect_detailed` is `connect_configured` for a program that must show a
-// person what happened instead of printing a line (a terminal UI, a git
-// client with a confirm dialog): the same resolution and the same host-key
-// policy, but a refused host key comes back as data -- `ConnectFailure.
-// UnknownHost(PendingHost)` carries the resolved host and port, the key type,
-// the fingerprint and the `known_hosts` path, and `PendingHost.record()`
-// writes the line once the person said yes (then connect again: the second
-// connection is the same refusing check, so only the approved key can
-// succeed); `HostKeyChanged` and `HostKeyRevoked` carry the presented and the
-// listed fingerprints and have no record path. The library never trusts a
-// host key on its own: `is_interactive` false (the default) means it never
-// prompts, and what it does with an unknown host is what the configuration's
-// `StrictHostKeyChecking` says, exactly as in `connect_configured`. A program
-// that owns the terminal passes `is_silent` true so that `Warning:` lines
-// are returned in `Detail.warnings` rather than written to standard error.
-// `resolve` says what `connect_configured` would connect to, without
-// connecting.
-//
-// `Error` says which stage failed and carries that stage's own error.
+/*   sshclient.connect(host, port, user, key_path, known_hosts_path)
+ *                                  -> Result<Session, Error>
+ *   sshclient.connect_configured(host, port, user, ...)
+ *                                  -> Result<Session, Error>   like `ssh` would
+ *   sshclient.connect_detailed(host, port, user, ...)
+ *                                  -> Result<Session, ConnectFailure>
+ *   sshclient.resolve(host, port, user, ...)
+ *                                  -> Result<Resolved, str>    no connection
+ *   session.exec(command)          -> Result<sshexec.Channel, Error>
+ *   session.banner()               -> str      the server's pre-login notice
+ *   session.close()                -> Result<bool, Error>
+ *
+ * Everything is a thin composition of `sshhosts` (which keys are trusted for
+ * this host), `ssh.connect_any` (transport, host-key check), `sshkey` (the
+ * private key file) and `sshauth` / `sshexec`. This module adds no protocol
+ * and no trust decisions of its own: a host that is not in `known_hosts` is
+ * refused before any byte is sent to it, a passphrase-protected key is
+ * refused with a clear error, and the files named are the only ones read --
+ * `~/.ssh` is never consulted. One `Session` runs commands one after another
+ * (finish with a channel -- `wait()` or `close()` -- before the next `exec`).
+ *
+ * A caller that wants to ask a person about an unknown host (trust on first
+ * use) gets `Error.KnownHosts(UnknownHost)` here, then `ssh.presented_host_key`
+ * for what to show and `sshhosts.add` to record a yes -- see `lib/sshhosts.m31`;
+ * a `Connect(HostKeyMismatch)` has no such path.
+ *
+ * `connect_configured` is the other entry point, for a caller that wants
+ * "connect the way `ssh user@host` would": the same resolution as `m31ssh`
+ * (`~/.ssh/config` with `Host`/`Match`/`Include`, `HostName`, `Port`, `User`,
+ * `IdentityFile`, `IdentitiesOnly`, `ProxyJump`, `UserKnownHostsFile`,
+ * `StrictHostKeyChecking`, `ConnectTimeout`), the identities of `ssh-agent`
+ * (`SSH_AUTH_SOCK`) and the default key files, passphrase-protected keys,
+ * and the same host-key policy (`lib/ssh/sshconnect.m31`). Nothing is asked
+ * of a person unless `is_interactive` is true: an unknown host is then
+ * refused under the default `ask`, and a key that needs a passphrase is
+ * skipped in favour of the agent.
+ *
+ * `connect_detailed` is `connect_configured` for a program that must show a
+ * person what happened instead of printing a line (a terminal UI, a git
+ * client with a confirm dialog): the same resolution and the same host-key
+ * policy, but a refused host key comes back as data -- `ConnectFailure.
+ * UnknownHost(PendingHost)` carries the resolved host and port, the key type,
+ * the fingerprint and the `known_hosts` path, and `PendingHost.record()`
+ * writes the line once the person said yes (then connect again: the second
+ * connection is the same refusing check, so only the approved key can
+ * succeed); `HostKeyChanged` and `HostKeyRevoked` carry the presented and the
+ * listed fingerprints and have no record path. The library never trusts a
+ * host key on its own: `is_interactive` false (the default) means it never
+ * prompts, and what it does with an unknown host is what the configuration's
+ * `StrictHostKeyChecking` says, exactly as in `connect_configured`. A program
+ * that owns the terminal passes `is_silent` true so that `Warning:` lines
+ * are returned in `Detail.warnings` rather than written to standard error.
+ * `resolve` says what `connect_configured` would connect to, without
+ * connecting.
+ *
+ * `Error` says which stage failed and carries that stage's own error. */
 
 import ssh;
 import ssh.sshkey;
@@ -79,9 +79,9 @@ pub enum Error {
     Auth(sshauth.Error);
     /// Opening the channel or running the command failed.
     Exec(sshexec.Error);
-    /// `connect_configured` could not connect: one line, as `m31ssh` would
-    /// print it (configuration error, unreachable host, host key refused,
-    /// `Permission denied (publickey).`, ...).
+    /** `connect_configured` could not connect: one line, as `m31ssh` would
+     * print it (configuration error, unreachable host, host key refused,
+     * `Permission denied (publickey).`, ...). */
     Configured(str);
 }
 
@@ -119,8 +119,8 @@ pub str Session.banner() {
     return notice;
 }
 
-/// Runs `command` (handed to the user's login shell by the server, as with
-/// `ssh host command`).
+/** Runs `command` (handed to the user's login shell by the server, as with
+ * `ssh host command`). */
 pub Result<sshexec.Channel, Error> Session.exec(str command) {
     match (sshexec.exec(transport, command)) {
         case Ok(sshexec.Channel channel): {
@@ -132,12 +132,12 @@ pub Result<sshexec.Channel, Error> Session.exec(str command) {
     }
 }
 
-/// Bound every later read on the connection -- each `Channel` read among
-/// them -- to `timeout_ms` milliseconds of waiting for the server; 0 waits
-/// for ever. A read that runs out of time fails with
-/// `Exec(Transport(TimedOut))` (or `Connect(TimedOut)` here), and the session
-/// must then be closed: see `ssh.Error.TimedOut`. `connect`'s own
-/// `timeout_ms` sets the same bound from the first byte of the handshake.
+/** Bound every later read on the connection -- each `Channel` read among
+ * them -- to `timeout_ms` milliseconds of waiting for the server; 0 waits
+ * for ever. A read that runs out of time fails with
+ * `Exec(Transport(TimedOut))` (or `Connect(TimedOut)` here), and the session
+ * must then be closed: see `ssh.Error.TimedOut`. `connect`'s own
+ * `timeout_ms` sets the same bound from the first byte of the handshake. */
 pub Result<void, Error> Session.set_read_timeout(int timeout_ms) {
     match (transport.set_read_timeout(timeout_ms)) {
         case Ok: {
@@ -161,14 +161,14 @@ pub Result<bool, Error> Session.close() {
     }
 }
 
-/// Connects to `host:port`, trusting only the keys `known_hosts_path` lists
-/// for it, and authenticates as `user` with the unencrypted Ed25519 key in
-/// `key_path`.
-///
-/// `timeout_ms` above 0 bounds every read of the connection -- the handshake,
-/// authentication and every later channel read -- to that many milliseconds
-/// of waiting for the server (`Session.set_read_timeout` changes it later);
-/// 0, the default, waits for ever.
+/** Connects to `host:port`, trusting only the keys `known_hosts_path` lists
+ * for it, and authenticates as `user` with the unencrypted Ed25519 key in
+ * `key_path`.
+ *
+ * `timeout_ms` above 0 bounds every read of the connection -- the handshake,
+ * authentication and every later channel read -- to that many milliseconds
+ * of waiting for the server (`Session.set_read_timeout` changes it later);
+ * 0, the default, waits for ever. */
 pub Result<Session, Error> connect(str host, int port, str user, str key_path, str known_hosts_path, int timeout_ms = 0) {
     match (sshkey.load(key_path)) {
         case Ok(sshkey.PrivateKey key): {
@@ -217,21 +217,21 @@ Result<Session, Error> open_session(str host, int port, str user, sshkey.Private
     }
 }
 
-/// Connects to `host` the way `ssh [-p port] [-l user] [-o option]... host`
-/// would, and returns the session ready for `exec`.
-///
-/// * `port` 0 and `user` "" leave both to the configuration (then 22 and the
-///   local user), as `git`'s `ssh://[user@]host[:port]/` URL does;
-/// * `identities` are `-i` files; `options` are `-o` lines (`Key=value`);
-///   `config_file` "" is `~/.ssh/config`;
-/// * `is_interactive` allows asking the person on the terminal (an unknown
-///   host's fingerprint, a key passphrase); leave it false for a daemon or a
-///   program whose standard input is not a person;
-/// * `timeout_ms` above 0 bounds every later read, as in `connect`
-///   (`ConnectTimeout` from the configuration bounds only the TCP connect).
-///
-/// Failures are `Error.Configured(line)`; `Warning:` lines go to standard
-/// error exactly as with `m31ssh`.
+/** Connects to `host` the way `ssh [-p port] [-l user] [-o option]... host`
+ * would, and returns the session ready for `exec`.
+ *
+ * * `port` 0 and `user` "" leave both to the configuration (then 22 and the
+ *   local user), as `git`'s `ssh://[user@]host[:port]/` URL does;
+ * * `identities` are `-i` files; `options` are `-o` lines (`Key=value`);
+ *   `config_file` "" is `~/.ssh/config`;
+ * * `is_interactive` allows asking the person on the terminal (an unknown
+ *   host's fingerprint, a key passphrase); leave it false for a daemon or a
+ *   program whose standard input is not a person;
+ * * `timeout_ms` above 0 bounds every later read, as in `connect`
+ *   (`ConnectTimeout` from the configuration bounds only the TCP connect).
+ *
+ * Failures are `Error.Configured(line)`; `Warning:` lines go to standard
+ * error exactly as with `m31ssh`. */
 pub Result<Session, Error> connect_configured(str host, int port, str user, List<str> identities = [], List<str> options = [], str config_file = "", bool is_interactive = false, int timeout_ms = 0) {
     sshconnect.Params parameters = sshconnect.Params(host, port, user, identities, options, config_file, "", false, is_interactive);
     match (sshconnect.connect(parameters)) {
@@ -257,15 +257,15 @@ pub Result<Session, Error> connect_configured(str host, int port, str user, List
 
 // --- structured connection failures ------------------------------------------
 
-/// A host that `known_hosts` does not list, and the key it presented:
-/// everything a program needs to show the fingerprint and, after a yes, to
-/// record it.
+/** A host that `known_hosts` does not list, and the key it presented:
+ * everything a program needs to show the fingerprint and, after a yes, to
+ * record it. */
 pub type PendingHost {
     /// The host as checked (`HostName` after the configuration), and its port.
     pub str host;
     pub int port;
-    /// The key type, as in `known_hosts`: `ssh-ed25519`, `ecdsa-sha2-nistp256`,
-    /// `ssh-rsa`.
+    /** The key type, as in `known_hosts`: `ssh-ed25519`, `ecdsa-sha2-nistp256`,
+     * `ssh-rsa`. */
     pub str key_type;
     /// `SHA256:<unpadded base64>`, as `ssh-keygen -lf` prints it.
     pub str fingerprint;
@@ -276,10 +276,10 @@ pub type PendingHost {
     ssh.HostKey key;
 }
 
-/// Appends the presented key to `known_hosts_path` (creating the file and its
-/// directory), plain or hashed as the configuration says. Call it only after
-/// a person approved `fingerprint`; the library does nothing of the kind on
-/// its own. `Err` is one line.
+/** Appends the presented key to `known_hosts_path` (creating the file and its
+ * directory), plain or hashed as the configuration says. Call it only after
+ * a person approved `fingerprint`; the library does nothing of the kind on
+ * its own. `Err` is one line. */
 pub Result<void, str> PendingHost.record() {
     match (sshhosts.add(known_hosts_path, host, port, key, is_hashed)) {
         case Ok(bool added): {
@@ -291,17 +291,17 @@ pub Result<void, str> PendingHost.record() {
     }
 }
 
-/// A host key that is not the one on file (`HostKeyChanged`) or that the file
-/// marks revoked (`HostKeyRevoked`). Never recordable: the file is not
-/// rewritten, and the person must remove the old entry by hand.
+/** A host key that is not the one on file (`HostKeyChanged`) or that the file
+ * marks revoked (`HostKeyRevoked`). Never recordable: the file is not
+ * rewritten, and the person must remove the old entry by hand. */
 pub type HostKeyProblem {
     pub str host;
     pub int port;
     pub str key_type;
     /// The key the server presented.
     pub str fingerprint;
-    /// The fingerprints the file lists for this host (empty for a revoked
-    /// key).
+    /** The fingerprints the file lists for this host (empty for a revoked
+     * key). */
     pub List<str> known_fingerprints;
     pub str known_hosts_path;
 }
@@ -335,8 +335,8 @@ pub str ConnectFailure.to_str() {
     }
 }
 
-/// What `connect_detailed` collects besides its result: the `Warning:` lines
-/// when `is_silent` was true. Hold the object and read it afterwards.
+/** What `connect_detailed` collects besides its result: the `Warning:` lines
+ * when `is_silent` was true. Hold the object and read it afterwards. */
 pub type Detail {
     pub bool is_silent;
     pub List<str> warnings = [];
@@ -358,21 +358,21 @@ ConnectFailure failure_of(sshconnect.Report report, str message) {
     return ConnectFailure.HostKeyRevoked(problem);
 }
 
-/// `connect_configured` with the failure as data. The arguments are the same
-/// (see there), plus:
-///
-/// * `is_quiet` is `m31ssh --quiet`: the notices that option hides (the
-///   server banner, "permanently added", unsupported-option warnings) are not
-///   produced;
-/// * `detail`: pass a `Detail(is_silent: true)` to have every remaining
-///   `Warning:` line appended to `detail.warnings` instead of being written to
-///   standard error, which a program with the terminal in raw mode must not
-///   have written under it.
-///
-/// With `is_interactive` false (the default) nothing is ever asked of a
-/// person and nothing is read from the terminal. An unknown host is
-/// `UnknownHost` under the default policy; this function never decides to
-/// trust a host key itself.
+/** `connect_configured` with the failure as data. The arguments are the same
+ * (see there), plus:
+ *
+ * * `is_quiet` is `m31ssh --quiet`: the notices that option hides (the
+ *   server banner, "permanently added", unsupported-option warnings) are not
+ *   produced;
+ * * `detail`: pass a `Detail(is_silent: true)` to have every remaining
+ *   `Warning:` line appended to `detail.warnings` instead of being written to
+ *   standard error, which a program with the terminal in raw mode must not
+ *   have written under it.
+ *
+ * With `is_interactive` false (the default) nothing is ever asked of a
+ * person and nothing is read from the terminal. An unknown host is
+ * `UnknownHost` under the default policy; this function never decides to
+ * trust a host key itself. */
 pub Result<Session, ConnectFailure> connect_detailed(str host, int port, str user, List<str> identities = [], List<str> options = [], str config_file = "", bool is_interactive = false, int timeout_ms = 0, bool is_quiet = false, Detail detail = Detail(false)) {
     sshconnect.Params parameters = sshconnect.Params(host, port, user, identities, options, config_file, "", is_quiet, is_interactive);
     sshconnect.Report report = sshconnect.Report(is_silent: detail.is_silent);
@@ -400,17 +400,17 @@ pub Result<Session, ConnectFailure> connect_detailed(str host, int port, str use
     }
 }
 
-/// What a destination resolves to under `~/.ssh/config` (or `config_file`),
-/// with `Include`s expanded, `options` applied and the explicit `host`, `port`
-/// (0: the configuration's) and `user` ("": the configuration's) given.
+/** What a destination resolves to under `~/.ssh/config` (or `config_file`),
+ * with `Include`s expanded, `options` applied and the explicit `host`, `port`
+ * (0: the configuration's) and `user` ("": the configuration's) given. */
 pub type Resolved {
     pub str alias;
     /// `HostName`, or `alias`.
     pub str host;
     pub int port;
     pub str user;
-    /// `IdentityFile`s in order, or the default key files when none is
-    /// configured (`is_default_identities`).
+    /** `IdentityFile`s in order, or the default key files when none is
+     * configured (`is_default_identities`). */
     pub List<str> identity_files;
     pub bool is_default_identities;
     /// `UserKnownHostsFile`, else `~/.ssh/known_hosts`.
@@ -422,9 +422,9 @@ pub type Resolved {
     pub List<str> jump_hosts;
 }
 
-/// Resolves a destination like `connect_configured` would, without
-/// connecting or writing anything. `Err` is the configuration error line
-/// `connect_configured` would return.
+/** Resolves a destination like `connect_configured` would, without
+ * connecting or writing anything. `Err` is the configuration error line
+ * `connect_configured` would return. */
 pub Result<Resolved, str> resolve(str host, int port = 0, str user = "", List<str> identities = [], List<str> options = [], str config_file = "") {
     sshconnect.Params parameters = sshconnect.Params(host, port, user, identities, options, config_file, "", true, false);
     match (sshconnect.resolve(parameters)) {

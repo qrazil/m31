@@ -1,6 +1,6 @@
-// Test kernels for `prim "c"` (docs/ffi-decision.md, "Testing"). Not part of
-// the standard library: the compiler imports this only when M31C_FFITEST is
-// set, and the kernels are in runtime/ffitest_<arch>.S.
+/* Test kernels for `prim "c"` (docs/ffi-decision.md, "Testing"). Not part of
+ * the standard library: the compiler imports this only when M31C_FFITEST is
+ * set, and the kernels are in runtime/ffitest_<arch>.S. */
 
 // out[offset .. offset + count] = left ^ right over the same range
 prim "c" nonblocking void __k_ffitest_xor(

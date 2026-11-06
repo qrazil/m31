@@ -1,49 +1,49 @@
-// Port forwarding over an SSH connection (RFC 4254 §7): `-L` (a local
-// listener whose connections go out through the server to a destination it
-// can reach) and `-R` (a listener on the server whose connections come back
-// to a destination this side can reach), as many channels at once.
-//
-// API
+/* Port forwarding over an SSH connection (RFC 4254 §7): `-L` (a local
+ * listener whose connections go out through the server to a destination it
+ * can reach) and `-R` (a listener on the server whose connections come back
+ * to a destination this side can reach), as many channels at once.
+ *
+ * API */
 // ---
-//   Mux mux = sshforward.new_mux(link, is_quiet);
-//   mux.listen_local(rule)         -> Result<void, str>   -L: bind now
-//   mux.request_remote(rule)       -> Result<void, str>   -R: ask the server
-//   mux.route(payload)             -> Result<bool, str>   a server message; true = consumed
-//   mux.pump_local()               -> Result<bool, str>   move bytes between sockets and
-//                                                         channels; true = progress was made
-//   mux.collect(fds, events)       append what to poll
-//   mux.service(revents, offset)   -> Result<void, str>   after the poll: accept, write
-//   mux.send_keepalive()           -> Result<void, str>
-//   mux.take_notices()             -> List<str>           lines to show on stderr
-//
-// The owner is an event loop (`sshshell.m31`): it reads server messages
-// itself, offers each to `route` first (channel 0 is its own session), and
-// otherwise treats the connection like the single-channel case. Everything
-// is one thread; nothing here ever waits on a socket:
-//
-//   * the data direction local -> server reads only while the server's
-//     window for that channel is open, and only what the window holds, so a
-//     slow server pushes back on the local program;
-//   * server -> local data is held per channel until the local socket is
-//     writable (the loop polls for it), and the channel's window credit is
-//     returned only as that data is consumed (`Channel.acknowledge`), so a
-//     slow local program pushes back on the server: at most 2 MiB is ever
-//     held per tunnel;
-//   * EOF in each direction is carried across (`shutdown` / CHANNEL_EOF),
-//     and a tunnel is closed when both are done, when the server closes it,
-//     or when the local socket fails;
-//   * no more than 64 tunnels exist at once; a connection beyond that is
-//     closed at once, which bounds descriptors and memory against a local
-//     flood or a hostile server.
-//
-// A forward that cannot be set up is a notice, not a fatal error (OpenSSH's
-// default, `ExitOnForwardFailure no`): the session goes on without it.
-// Global-request replies are matched to requests in order, which the
-// protocol guarantees, so this layer owns every global request it makes
-// (`tcpip-forward`, `keepalive@openssh.com`).
-//
-// Not here: `-D` (SOCKS), `-W`, UNIX-socket forwarding, `GatewayPorts`
-// beyond what an explicit bind address does, cancelling a forward.
+/*   Mux mux = sshforward.new_mux(link, is_quiet);
+ *   mux.listen_local(rule)         -> Result<void, str>   -L: bind now
+ *   mux.request_remote(rule)       -> Result<void, str>   -R: ask the server
+ *   mux.route(payload)             -> Result<bool, str>   a server message; true = consumed
+ *   mux.pump_local()               -> Result<bool, str>   move bytes between sockets and
+ *                                                         channels; true = progress was made
+ *   mux.collect(fds, events)       append what to poll
+ *   mux.service(revents, offset)   -> Result<void, str>   after the poll: accept, write
+ *   mux.send_keepalive()           -> Result<void, str>
+ *   mux.take_notices()             -> List<str>           lines to show on stderr
+ *
+ * The owner is an event loop (`sshshell.m31`): it reads server messages
+ * itself, offers each to `route` first (channel 0 is its own session), and
+ * otherwise treats the connection like the single-channel case. Everything
+ * is one thread; nothing here ever waits on a socket:
+ *
+ *   * the data direction local -> server reads only while the server's
+ *     window for that channel is open, and only what the window holds, so a
+ *     slow server pushes back on the local program;
+ *   * server -> local data is held per channel until the local socket is
+ *     writable (the loop polls for it), and the channel's window credit is
+ *     returned only as that data is consumed (`Channel.acknowledge`), so a
+ *     slow local program pushes back on the server: at most 2 MiB is ever
+ *     held per tunnel;
+ *   * EOF in each direction is carried across (`shutdown` / CHANNEL_EOF),
+ *     and a tunnel is closed when both are done, when the server closes it,
+ *     or when the local socket fails;
+ *   * no more than 64 tunnels exist at once; a connection beyond that is
+ *     closed at once, which bounds descriptors and memory against a local
+ *     flood or a hostile server.
+ *
+ * A forward that cannot be set up is a notice, not a fatal error (OpenSSH's
+ * default, `ExitOnForwardFailure no`): the session goes on without it.
+ * Global-request replies are matched to requests in order, which the
+ * protocol guarantees, so this layer owns every global request it makes
+ * (`tcpip-forward`, `keepalive@openssh.com`).
+ *
+ * Not here: `-D` (SOCKS), `-W`, UNIX-socket forwarding, `GatewayPorts`
+ * beyond what an explicit bind address does, cancelling a forward. */
 
 import io;
 import net;
@@ -56,18 +56,18 @@ const int MAX_TUNNELS = 64;
 const int READ_CHUNK = 32768;
 const int KEEPALIVE_MARK = -1;
 
-/// One forwarding rule. For `-L`: listen on `bind_host:bind_port` here and
-/// connect through the server to `target_host:target_port`. For `-R`: ask the
-/// server to listen on `bind_host:bind_port` (empty host: loopback) and
-/// connect each connection here to `target_host:target_port`.
+/** One forwarding rule. For `-L`: listen on `bind_host:bind_port` here and
+ * connect through the server to `target_host:target_port`. For `-R`: ask the
+ * server to listen on `bind_host:bind_port` (empty host: loopback) and
+ * connect each connection here to `target_host:target_port`. */
 pub type Rule {
     pub bool is_remote;
     pub str bind_host;
     pub int bind_port;
     pub str target_host;
     pub int target_port;
-    /// -R: the port the server really bound (differs from `bind_port` when
-    /// that was 0); filled in from its reply.
+    /** -R: the port the server really bound (differs from `bind_port` when
+     * that was 0); filled in from its reply. */
     pub int bound_port;
 }
 
@@ -101,8 +101,8 @@ void Mux.notice(str text) {
     }
 }
 
-/// Lines the owner should show (and drop): channel open failures, refused
-/// remote forwards, allocated ports.
+/** Lines the owner should show (and drop): channel open failures, refused
+ * remote forwards, allocated ports. */
 pub List<str> Mux.take_notices() {
     List<str> out = clone(notices);
     notices.clear();
@@ -177,9 +177,9 @@ Result<void, str> Mux.transmit(bytes payload) {
     }
 }
 
-/// Offers one server message to this layer: channel numbers other than 0
-/// (the session's) and server-opened channels are handled here and the
-/// answer is `true`; anything else is `false` and the owner handles it.
+/** Offers one server message to this layer: channel numbers other than 0
+ * (the session's) and server-opened channels are handled here and the
+ * answer is `true`; anything else is `false` and the owner handles it. */
 pub Result<bool, str> Mux.route(bytes payload) {
     if (payload.size() < 1) {
         return Result<bool, str>.Ok(false);
@@ -209,9 +209,9 @@ pub Result<bool, str> Mux.route(bytes payload) {
         return Result<bool, str>.Ok(true);
     }
     if (kind == sshexec.SSH_MESSAGE_GLOBAL_REQUEST) {
-        // Requests from the server (OpenSSH sends `hostkeys-00@openssh.com`
-        // after login): this client implements none, so a request that
-        // wants an answer gets a failure, and any other is ignored.
+        /* Requests from the server (OpenSSH sends `hostkeys-00@openssh.com`
+         * after login): this client implements none, so a request that
+         * wants an answer gets a failure, and any other is ignored. */
         match (ssh.parse_string(payload, 1)) {
             case Ok(ssh.Field name): {
                 if (name.next < payload.size() && payload[name.next] != 0) {
@@ -319,14 +319,14 @@ Result<void, str> Mux.accept_open(bytes payload) {
 }
 
 void Mux.drop_tunnel(int index) {
-    // closing the socket is the Conn's destructor: removing the last
-    // reference does it
+    /* closing the socket is the Conn's destructor: removing the last
+     * reference does it */
     tunnels.remove_at(index);
 }
 
-/// Appends what this layer needs polled: each listener readable, and each
-/// tunnel's socket for input while its channel can take data and for output
-/// while there is data to write.
+/** Appends what this layer needs polled: each listener readable, and each
+ * tunnel's socket for input while its channel can take data and for output
+ * while there is data to write. */
 pub void Mux.collect(List<int> fds, List<int> events) {
     for (net.Listener listener in listeners) {
         fds.push(listener.fileno());
@@ -342,9 +342,9 @@ pub void Mux.collect(List<int> fds, List<int> events) {
     }
 }
 
-/// After a poll over `collect`'s entries (which began at `offset` in
-/// `revents`): accept new local connections and write pending data to the
-/// sockets that became writable.
+/** After a poll over `collect`'s entries (which began at `offset` in
+ * `revents`): accept new local connections and write pending data to the
+ * sockets that became writable. */
 pub Result<void, str> Mux.service(List<int> revents, int offset) {
     int position = offset;
     int listener_index = 0;
@@ -355,8 +355,8 @@ pub Result<void, str> Mux.service(List<int> revents, int offset) {
         position = position + 1;
         listener_index = listener_index + 1;
     }
-    // Tunnels may have been added by accepts above (they were not part of
-    // this poll); only the ones polled are indexed by `position`.
+    /* Tunnels may have been added by accepts above (they were not part of
+     * this poll); only the ones polled are indexed by `position`. */
     int tunnel_index = 0;
     int polled = revents.size();
     while (tunnel_index < tunnels.size() && position < polled) {
@@ -425,9 +425,9 @@ Result<void, str> Mux.accept_local(int listener_index) {
     }
 }
 
-/// Moves bytes between the sockets and their channels as far as windows and
-/// buffers allow, carries EOFs across and retires finished tunnels.
-/// `true` when something moved (call again before sleeping).
+/** Moves bytes between the sockets and their channels as far as windows and
+ * buffers allow, carries EOFs across and retires finished tunnels.
+ * `true` when something moved (call again before sleeping). */
 pub Result<bool, str> Mux.pump_local() {
     bool is_progress = false;
     int index = 0;
@@ -532,9 +532,9 @@ pub Result<bool, str> Mux.pump_local() {
             }
             is_progress = true;
         }
-        // The server's CLOSE retires the tunnel -- but only once what it sent
-        // before closing has reached the local socket: data and EOF are
-        // buffered here until the local program has taken them.
+        /* The server's CLOSE retires the tunnel -- but only once what it sent
+         * before closing has reached the local socket: data and EOF are
+         * buffered here until the local program has taken them. */
         if (tunnels[index].channel[0].is_closed() && tunnels[index].to_socket.size() == 0 && !tunnels[index].channel[0].has_pending()) {
             if (!tunnels[index].is_shutdown) {
                 Result<bool, net.Error> ignored = tunnels[index].socket[0].shutdown_write();
@@ -548,8 +548,8 @@ pub Result<bool, str> Mux.pump_local() {
     return Result<bool, str>.Ok(is_progress);
 }
 
-/// How many tunnels are open or opening (for the caller's idle decisions
-/// and for tests).
+/** How many tunnels are open or opening (for the caller's idle decisions
+ * and for tests). */
 pub int Mux.tunnel_count() {
     return tunnels.size();
 }
@@ -559,10 +559,10 @@ pub bool Mux.is_waiting() {
     return pending_global.size() > 0;
 }
 
-// What to poll a tunnel's socket for: input only while the channel is open
-// and can take data (otherwise a readable socket would spin the loop),
-// output while there is data to write. 0 means leave it out of the poll
-// (`collect` and `service` both skip it, so their positions agree).
+/* What to poll a tunnel's socket for: input only while the channel is open
+ * and can take data (otherwise a readable socket would spin the loop),
+ * output while there is data to write. 0 means leave it out of the poll
+ * (`collect` and `service` both skip it, so their positions agree). */
 int wanted_events(Tunnel tunnel) {
     if (tunnel.socket.size() == 0) {
         return 0;
@@ -584,9 +584,9 @@ pub Mux new_mux(ssh.Link link, bool is_quiet) {
     return Mux(link, is_quiet, [], [], [], [], [], []);
 }
 
-/// Parses `[bind_address:]port:host:hostport` (the shape of `-L` and `-R`
-/// arguments; `host` may be a bracketed IPv6 literal). `Err` names what is
-/// wrong.
+/** Parses `[bind_address:]port:host:hostport` (the shape of `-L` and `-R`
+ * arguments; `host` may be a bracketed IPv6 literal). `Err` names what is
+ * wrong. */
 pub Result<Rule, str> parse_rule(str spec, bool is_remote) {
     List<str> parts = [];
     str rest = spec;
@@ -659,8 +659,8 @@ str strip_brackets(str host) {
     return host;
 }
 
-// The address a local listener binds for a given bind_address: loopback for
-// none or `localhost` (OpenSSH's GatewayPorts=no), all interfaces for `*`.
+/* The address a local listener binds for a given bind_address: loopback for
+ * none or `localhost` (OpenSSH's GatewayPorts=no), all interfaces for `*`. */
 str listen_address(str bind_host) {
     if (bind_host == "" || bind_host == "localhost") {
         return "127.0.0.1";
@@ -677,8 +677,8 @@ int be32(bytes buffer, int offset) {
     return buffer[offset] << 24 | buffer[offset + 1] << 16 | buffer[offset + 2] << 8 | buffer[offset + 3];
 }
 
-// A copy of `payload` addressed to channel 0, which is what a `Channel`
-// believes it is.
+/* A copy of `payload` addressed to channel 0, which is what a `Channel`
+ * believes it is. */
 bytes readdressed(bytes payload) {
     bytes out = clone(payload);
     out[1] = 0;

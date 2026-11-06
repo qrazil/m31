@@ -1,44 +1,44 @@
-// A reader for the useful core of an OpenSSH client configuration file
-// (`ssh_config(5)`), as `m31ssh` needs it. Pure: it takes the file's text and
-// answers what applies to one host name; it opens nothing and expands no
-// file names that it was not given a home directory for.
-//
-// API
+/* A reader for the useful core of an OpenSSH client configuration file
+ * (`ssh_config(5)`), as `m31ssh` needs it. Pure: it takes the file's text and
+ * answers what applies to one host name; it opens nothing and expands no
+ * file names that it was not given a home directory for.
+ *
+ * API */
 // ---
-//   sshconfig.resolve(text, host, local_user, home) -> Settings
-//   sshconfig.is_pattern_matching(pattern, name)        -> bool   `*` and `?`
-//
-// What is understood: `Host` blocks (space-separated patterns with `*`/`?`,
-// `!`-negation; a block applies when some pattern matches and no negated one
-// does), lines before the first `Host` (they apply to every host, which is
-// also how `-o` options are given: prepend them to the file's text), and
-//
-//   HostName, User, Port, IdentityFile (all of them, in order),
-//   IdentitiesOnly, HashKnownHosts, RekeyLimit (bytes, K/M/G), StrictHostKeyChecking, UserKnownHostsFile,
-//   ServerAliveInterval, ServerAliveCountMax, ConnectTimeout, ProxyJump,
-//   LocalForward, RemoteForward, RequestTTY, ProxyCommand (the rest of the
-//   line, as written; `none` clears it), ControlPath (parsed, ignored).
-//
-// **The first value obtained for an option wins** (OpenSSH's rule, which is
-// why command-line options go first), except `IdentityFile`, `LocalForward`
-// and `RemoteForward`, which accumulate. `Key value` and `Key=value` are both
-// accepted, keys are case-insensitive, `"quoted values"` keep their spaces,
-// and `#` starts a comment. `%h` (the host as typed, or HostName for
-// UserKnownHostsFile/IdentityFile), `%u` (local user), `%r` (remote user),
-// `%d` (home directory) and `%%` expand in HostName, IdentityFile and
-// UserKnownHostsFile; a leading `~` is the home directory.
-//
-// `Match` understands `all`, `host`, `originalhost`, `user` and `localuser`
-// (pattern lists, `!` negates); `Include` is expanded by the caller before
-// the text gets here (`sshconnect`).
-//
-// **What is not understood is said, not guessed**: any option not listed is
-// collected in `Settings.ignored` (as the line's keyword), and a `Match`
-// with a criterion that is not understood (`exec`, `canonical`, ...) is
-// reported as `match <criterion>` and its lines are not applied -- a
-// security setting inside one is therefore not silently half-applied. A malformed
-// value for a known option (`Port banana`) is `Settings.errors`, never a
-// default.
+/*   sshconfig.resolve(text, host, local_user, home) -> Settings
+ *   sshconfig.is_pattern_matching(pattern, name)        -> bool   `*` and `?`
+ *
+ * What is understood: `Host` blocks (space-separated patterns with `*`/`?`,
+ * `!`-negation; a block applies when some pattern matches and no negated one
+ * does), lines before the first `Host` (they apply to every host, which is
+ * also how `-o` options are given: prepend them to the file's text), and
+ *
+ *   HostName, User, Port, IdentityFile (all of them, in order),
+ *   IdentitiesOnly, HashKnownHosts, RekeyLimit (bytes, K/M/G), StrictHostKeyChecking, UserKnownHostsFile,
+ *   ServerAliveInterval, ServerAliveCountMax, ConnectTimeout, ProxyJump,
+ *   LocalForward, RemoteForward, RequestTTY, ProxyCommand (the rest of the
+ *   line, as written; `none` clears it), ControlPath (parsed, ignored).
+ *
+ * **The first value obtained for an option wins** (OpenSSH's rule, which is
+ * why command-line options go first), except `IdentityFile`, `LocalForward`
+ * and `RemoteForward`, which accumulate. `Key value` and `Key=value` are both
+ * accepted, keys are case-insensitive, `"quoted values"` keep their spaces,
+ * and `#` starts a comment. `%h` (the host as typed, or HostName for
+ * UserKnownHostsFile/IdentityFile), `%u` (local user), `%r` (remote user),
+ * `%d` (home directory) and `%%` expand in HostName, IdentityFile and
+ * UserKnownHostsFile; a leading `~` is the home directory.
+ *
+ * `Match` understands `all`, `host`, `originalhost`, `user` and `localuser`
+ * (pattern lists, `!` negates); `Include` is expanded by the caller before
+ * the text gets here (`sshconnect`).
+ *
+ * **What is not understood is said, not guessed**: any option not listed is
+ * collected in `Settings.ignored` (as the line's keyword), and a `Match`
+ * with a criterion that is not understood (`exec`, `canonical`, ...) is
+ * reported as `match <criterion>` and its lines are not applied -- a
+ * security setting inside one is therefore not silently half-applied. A malformed
+ * value for a known option (`Port banana`) is `Settings.errors`, never a
+ * default. */
 
 pub type Settings {
     /// HostName if given, else the name that was asked about.
@@ -59,8 +59,8 @@ pub type Settings {
     pub str proxy_jump;
     /// ProxyCommand as written (the rest of the line), "" when not given or `none`.
     pub str proxy_command;
-    /// RekeyLimit in bytes (the first word; a time after it is ignored): -1
-    /// when not given or `default`.
+    /** RekeyLimit in bytes (the first word; a time after it is ignored): -1
+     * when not given or `default`. */
     pub int rekey_limit;
     pub List<str> local_forwards;
     pub List<str> remote_forwards;
@@ -71,8 +71,8 @@ pub type Settings {
     pub List<str> errors;
 }
 
-/// Whether `name` matches `pattern`, where `*` is any run (including none)
-/// and `?` is one byte. Everything else matches itself exactly.
+/** Whether `name` matches `pattern`, where `*` is any run (including none)
+ * and `?` is one byte. Everything else matches itself exactly. */
 pub bool is_pattern_matching(str pattern, str name) {
     int pattern_at = 0;
     int name_at = 0;
@@ -115,8 +115,8 @@ bool is_host_line_matching(List<str> patterns, str host) {
     return is_matched;
 }
 
-// Splits one line into its keyword and argument words, honouring quotes and
-// `#` comments. Returns an empty list for a blank or comment line.
+/* Splits one line into its keyword and argument words, honouring quotes and
+ * `#` comments. Returns an empty list for a blank or comment line. */
 List<str> words_of(str line) {
     List<str> words = [];
     str current = "";
@@ -165,8 +165,8 @@ List<str> words_of(str line) {
     return words;
 }
 
-// What follows the keyword on a line, as written (quotes and all): the value
-// of options such as `ProxyCommand` whose argument is a whole command.
+/* What follows the keyword on a line, as written (quotes and all): the value
+ * of options such as `ProxyCommand` whose argument is a whole command. */
 str rest_of_line(str line) {
     str text = line.trim();
     int index = 0;
@@ -228,17 +228,17 @@ bool can_parse_yes_no(str value, List<bool> out) {
     return false;
 }
 
-// Whether a comma-separated pattern list (with `!` negation, as on a `Host`
-// line) selects `name`.
+/* Whether a comma-separated pattern list (with `!` negation, as on a `Host`
+ * line) selects `name`. */
 bool is_list_matching(str list, str name) {
     return is_host_line_matching(list.split(","), name);
 }
 
-// A `Match` line: every criterion must hold. Understood: `all`, `host`,
-// `originalhost`, `user` (the remote user known so far) and `localuser`,
-// the last four each with a comma-separated pattern list. Anything else
-// (`exec`, `canonical`, `final`, `localnetwork`, `tagged`, ...) makes the
-// block not apply and is recorded in `ignored` as `match <criterion>`.
+/* A `Match` line: every criterion must hold. Understood: `all`, `host`,
+ * `originalhost`, `user` (the remote user known so far) and `localuser`,
+ * the last four each with a comma-separated pattern list. Anything else
+ * (`exec`, `canonical`, `final`, `localnetwork`, `tagged`, ...) makes the
+ * block not apply and is recorded in `ignored` as `match <criterion>`. */
 bool is_match_line_matching(List<str> criteria, str original_host, str current_host, str current_user, str local_user, List<str> ignored) {
     if (criteria.size() == 0) {
         ignored.push("match");
@@ -272,8 +272,8 @@ bool is_match_line_matching(List<str> criteria, str original_host, str current_h
     return is_matched;
 }
 
-/// What applies to `host` given the configuration `config_text` (command-line
-/// `-o` lines first, then the file).
+/** What applies to `host` given the configuration `config_text` (command-line
+ * `-o` lines first, then the file). */
 pub Settings resolve(str config_text, str host, str local_user, str home) {
     Settings settings = Settings(host, "", 0, [], false, "", "", -1, -1, -1, "", "", -1, [], [], "", false, [], []);
     bool has_host_name = false;
@@ -283,8 +283,8 @@ pub Settings resolve(str config_text, str host, str local_user, str home) {
     bool has_proxy_command = false;
     bool has_rekey_limit = false;
     bool is_applicable = true;
-    // The raw (unexpanded) values; expanded at the end, when HostName and
-    // User are final.
+    /* The raw (unexpanded) values; expanded at the end, when HostName and
+     * User are final. */
     str raw_known_hosts = "";
     List<str> raw_identities = [];
     int line_number = 0;

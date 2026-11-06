@@ -2,10 +2,10 @@ import net.http;
 import io;
 import net;
 
-// The server half of tests/http/test_invalid_utf8.sh: it listens on a port the
-// kernel picks, prints it on stderr, and serves exactly CONNECTIONS connections. The
-// handler answers 200 and the path, so a client can tell a request that was
-// read from one that was refused with a 4xx.
+/* The server half of tests/http/test_invalid_utf8.sh: it listens on a port the
+ * kernel picks, prints it on stderr, and serves exactly CONNECTIONS connections. The
+ * handler answers 200 and the path, so a client can tell a request that was
+ * read from one that was refused with a 4xx. */
 type Echo {
 }
 

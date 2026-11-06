@@ -1,11 +1,11 @@
-// One TLS 1.3 record at a time (`lib/tls/tls13record.m31`'s pure functions)
-// against `oracle_tls13_record.py`, which seals and opens the same records
-// with the `cryptography` package's ChaCha20Poly1305 / AESGCM and the RFC 8446
-// §5.3 nonce rule, written out separately in Python. Every line this prints is
-// printed again by the oracle; `test_tls13.sh` diffs the two, once per suite.
-//
-//   ./build.sh tests/tls/t_tls13_record.m31 -o t_tls13_record
-//   ./t_tls13_record chacha | aes128 | aes256
+/* One TLS 1.3 record at a time (`lib/tls/tls13record.m31`'s pure functions)
+ * against `oracle_tls13_record.py`, which seals and opens the same records
+ * with the `cryptography` package's ChaCha20Poly1305 / AESGCM and the RFC 8446
+ * §5.3 nonce rule, written out separately in Python. Every line this prints is
+ * printed again by the oracle; `test_tls13.sh` diffs the two, once per suite.
+ *
+ *   ./build.sh tests/tls/t_tls13_record.m31 -o t_tls13_record
+ *   ./t_tls13_record chacha | aes128 | aes256 */
 
 import crypto.aesgcm;
 import crypto.chacha20poly1305;
@@ -83,8 +83,8 @@ str outcome(tls13schedule.Suite suite, bytes wire, int sequence) {
     }
 }
 
-// A sealed record that the library itself would refuse to build: the AEAD
-// applied to `inner` directly, under the header a record of that size has.
+/* A sealed record that the library itself would refuse to build: the AEAD
+ * applied to `inner` directly, under the header a record of that size has. */
 bytes forged(tls13schedule.Suite suite, bytes inner, int sequence) {
     bytes wire = [tls13record.CONTENT_APPLICATION_DATA, 3, 3, (inner.size() + 16) >> 8, (inner.size() + 16) & 0xFF];
     bytes nonce = tls13record.record_nonce(test_iv(), sequence);

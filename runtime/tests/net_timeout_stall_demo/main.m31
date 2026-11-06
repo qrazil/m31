@@ -2,27 +2,27 @@ import net;
 import io;
 import date;
 
-// The stall `set_read_timeout` used to cause, measured (docs/net-timeouts-
-// decision.md). Run by runtime/tests/net_timeout_stall_test.sh with
-// LANG_NUM_CARRIERS=2, not by the ordinary corpus: its output is timings.
-//
-// N clients connect to a server and say nothing. The server gives each
-// connection a 400 ms read timeout. Then one more client connects and sends
-// a line at once. When a timeout held its carrier in ppoll(2), N silent
-// connections occupied both carriers for the whole 400 ms, and the one live
-// connection -- and the accept loop, and this program's own main -- waited
-// behind them. When a timeout parks only the green thread, the live
-// connection is served the moment its line arrives.
-//
-// What is printed, per case, in milliseconds:
-//
-//   live    from the start of the case to the live connection's line being
-//           read. The case itself needs about 2 * SETTLE (120) ms, spent
-//           letting the silent handlers get into their reads and the live
-//           connection into its own; anything above that is a stall.
-//   silent  the longest any silent connection took to report its timeout.
-//
-// The numbers go through `date.now_ns()`, one clock, so they are comparable.
+/* The stall `set_read_timeout` used to cause, measured (docs/net-timeouts-
+ * decision.md). Run by runtime/tests/net_timeout_stall_test.sh with
+ * LANG_NUM_CARRIERS=2, not by the ordinary corpus: its output is timings.
+ *
+ * N clients connect to a server and say nothing. The server gives each
+ * connection a 400 ms read timeout. Then one more client connects and sends
+ * a line at once. When a timeout held its carrier in ppoll(2), N silent
+ * connections occupied both carriers for the whole 400 ms, and the one live
+ * connection -- and the accept loop, and this program's own main -- waited
+ * behind them. When a timeout parks only the green thread, the live
+ * connection is served the moment its line arrives.
+ *
+ * What is printed, per case, in milliseconds:
+ *
+ *   live    from the start of the case to the live connection's line being
+ *           read. The case itself needs about 2 * SETTLE (120) ms, spent
+ *           letting the silent handlers get into their reads and the live
+ *           connection into its own; anything above that is a stall.
+ *   silent  the longest any silent connection took to report its timeout.
+ *
+ * The numbers go through `date.now_ns()`, one clock, so they are comparable. */
 
 const int TIMEOUT_MS = 400;
 const int SETTLE_MS = 60;
@@ -32,8 +32,8 @@ bytes newline_bytes() {
     return newline;
 }
 
-// A sleep that parks only the calling green thread: wait for a connection
-// on a listener nobody connects to.
+/* A sleep that parks only the calling green thread: wait for a connection
+ * on a listener nobody connects to. */
 void pause(net.Listener idle, int milliseconds) {
     match (idle.wait(milliseconds)) {
         case Ok(_): {
@@ -177,8 +177,8 @@ void run_case(int silent, net.Listener idle) {
                 }
                 loop_index = loop_index + 1;
             }
-            // Only now: a client that closed early would turn a handler's
-            // timeout into an end of file.
+            /* Only now: a client that closed early would turn a handler's
+             * timeout into an end of file. */
             loop_index = 0;
             while (loop_index < silent) {
                 send(release, 1);

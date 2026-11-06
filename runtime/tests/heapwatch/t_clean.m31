@@ -1,4 +1,4 @@
-// A program that exits cleanly with nothing to report: heap watch removes its
-// ledger on the way out (runtime/tests/heapwatch_test.sh).
+/* A program that exits cleanly with nothing to report: heap watch removes its
+ * ledger on the way out (runtime/tests/heapwatch_test.sh). */
 List<str> words = ["a", "b"];
 print(words.size());

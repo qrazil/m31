@@ -3,25 +3,25 @@ import ssh.sshclient;
 import ssh.sshexec;
 import os;
 
-// The program half of tests/ssh/test_timeout.sh. Arguments: a mode, a port,
-// a user, a private-key path and a known_hosts path. It prints one word
-// describing what happened, and the script times it from outside:
-//
-//   connect-silent   connect(timeout_ms: 600) to a peer that accepts and
-//                    says nothing: "connect-timed-out"
-//   exec-stall       connect(timeout_ms: 800), `sleep 8`, read_all:
-//                    "read-timed-out"
-//   exec-after       connect without a timeout, then
-//                    Session.set_read_timeout(800), `sleep 8`:
-//                    "read-timed-out"
-//   exec-trickle     connect(timeout_ms: 800), `seq 1 200000` through a proxy that
-//                    passes the handshake and then trickles a byte every
-//                    250 ms: no single wait ever times out, the packet as a
-//                    whole must: "read-timed-out"
-//   exec-fast        connect(timeout_ms: 800), `echo hi`: "hi" and exit 0,
-//                    which a timeout that fired early would not give
-//   exec-slow-ok     connect(timeout_ms: 2000), `sleep 1; echo done`: "done"
-//                    -- the timeout bounds one wait, and this one is shorter
+/* The program half of tests/ssh/test_timeout.sh. Arguments: a mode, a port,
+ * a user, a private-key path and a known_hosts path. It prints one word
+ * describing what happened, and the script times it from outside:
+ *
+ *   connect-silent   connect(timeout_ms: 600) to a peer that accepts and
+ *                    says nothing: "connect-timed-out"
+ *   exec-stall       connect(timeout_ms: 800), `sleep 8`, read_all:
+ *                    "read-timed-out"
+ *   exec-after       connect without a timeout, then
+ *                    Session.set_read_timeout(800), `sleep 8`:
+ *                    "read-timed-out"
+ *   exec-trickle     connect(timeout_ms: 800), `seq 1 200000` through a proxy that
+ *                    passes the handshake and then trickles a byte every
+ *                    250 ms: no single wait ever times out, the packet as a
+ *                    whole must: "read-timed-out"
+ *   exec-fast        connect(timeout_ms: 800), `echo hi`: "hi" and exit 0,
+ *                    which a timeout that fired early would not give
+ *   exec-slow-ok     connect(timeout_ms: 2000), `sleep 1; echo done`: "done"
+ *                    -- the timeout bounds one wait, and this one is shorter */
 
 bool is_timed_out(ssh.Error error) {
     return error.to_str() == ssh.Error.TimedOut.to_str();

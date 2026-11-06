@@ -2,14 +2,14 @@ import net.http;
 import io;
 import os;
 
-// The client half of tests/http/test_stream.sh. Arguments: the URL, the file
-// to write the body to, and a marker file to create as soon as the first
-// piece of the body has arrived -- the Python server withholds the rest of
-// the body until it exists, so a client that buffered the whole response
-// before returning would deadlock instead of passing.
-//
-// Prints the status, the number of reads that returned data, and the number
-// of body bytes.
+/* The client half of tests/http/test_stream.sh. Arguments: the URL, the file
+ * to write the body to, and a marker file to create as soon as the first
+ * piece of the body has arrived -- the Python server withholds the rest of
+ * the body until it exists, so a client that buffered the whole response
+ * before returning would deadlock instead of passing.
+ *
+ * Prints the status, the number of reads that returned data, and the number
+ * of body bytes. */
 
 List<str> argv = os.arguments();
 match (http.request("GET", argv[1])) {

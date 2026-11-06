@@ -1,6 +1,6 @@
-// Store-heavy: every iteration overwrites reference fields and List slots,
-// which is where heap watch's store hook sits (docs/heap-watch-design.md,
-// "Cost"). Nothing is allocated in the loop.
+/* Store-heavy: every iteration overwrites reference fields and List slots,
+ * which is where heap watch's store hook sits (docs/heap-watch-design.md,
+ * "Cost"). Nothing is allocated in the loop. */
 type Holder {
     List<str> items;
     str last;

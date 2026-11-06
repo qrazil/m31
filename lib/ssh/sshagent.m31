@@ -1,35 +1,35 @@
-// An ssh-agent client (draft-miller-ssh-agent): list the Ed25519 identities
-// an agent holds and have it sign, so a private key never has to be read by
-// this process.
-//
-// API
+/* An ssh-agent client (draft-miller-ssh-agent): list the Ed25519 identities
+ * an agent holds and have it sign, so a private key never has to be read by
+ * this process.
+ *
+ * API */
 // ---
-//   sshagent.connect(path)            -> Result<Agent, Error>
-//   sshagent.from_environment()       -> Result<Agent, Error>   $SSH_AUTH_SOCK
-//   agent.identities()                -> Result<List<Identity>, Error>
-//   sshagent.AgentSigner(path, blob)  an sshauth.Signer over a fresh connection
-//   agent.sign(blob, data)            -> Result<bytes, Error>   signature blob
-//   sshagent.build_identities_request() / parse_identities(payload)
-//   sshagent.build_sign_request(blob, data) / parse_sign_response(payload)
-//
-// Identities of the key types this client can use (`ssh-ed25519`,
-// `ecdsa-sha2-nistp256`, `ssh-rsa`) are kept; others the agent holds are
-// skipped. A signature the agent returns is **verified against the public
-// key before it is used** (a new check on every type), so a confused agent
-// cannot make this client send garbage and a wrong one is reported as
-// `BadSignature`, not as a server refusal. For RSA the request carries the
-// SHA-2 flag (2 for `rsa-sha2-256`, 4 for `rsa-sha2-512`); `ssh-rsa`
-// (SHA-1) signatures are never requested and never accepted.
-//
-// The agent is trusted with signing and nothing else: no message is sent
-// that is not REQUEST_IDENTITIES or SIGN_REQUEST (flags 0), no key is ever
-// added, removed or locked here, and a reply longer than 262144 bytes is
-// refused rather than buffered. Every read of the agent is bounded by a
-// 10-second wait: a hung agent is `Error.TimedOut`, not a hung client.
-//
-// The socket is a plain blocking AF_UNIX stream used through the runtime's
-// own primitives (`lib/net.m31` is TCP only); one request is in flight at a
-// time.
+/*   sshagent.connect(path)            -> Result<Agent, Error>
+ *   sshagent.from_environment()       -> Result<Agent, Error>   $SSH_AUTH_SOCK
+ *   agent.identities()                -> Result<List<Identity>, Error>
+ *   sshagent.AgentSigner(path, blob)  an sshauth.Signer over a fresh connection
+ *   agent.sign(blob, data)            -> Result<bytes, Error>   signature blob
+ *   sshagent.build_identities_request() / parse_identities(payload)
+ *   sshagent.build_sign_request(blob, data) / parse_sign_response(payload)
+ *
+ * Identities of the key types this client can use (`ssh-ed25519`,
+ * `ecdsa-sha2-nistp256`, `ssh-rsa`) are kept; others the agent holds are
+ * skipped. A signature the agent returns is **verified against the public
+ * key before it is used** (a new check on every type), so a confused agent
+ * cannot make this client send garbage and a wrong one is reported as
+ * `BadSignature`, not as a server refusal. For RSA the request carries the
+ * SHA-2 flag (2 for `rsa-sha2-256`, 4 for `rsa-sha2-512`); `ssh-rsa`
+ * (SHA-1) signatures are never requested and never accepted.
+ *
+ * The agent is trusted with signing and nothing else: no message is sent
+ * that is not REQUEST_IDENTITIES or SIGN_REQUEST (flags 0), no key is ever
+ * added, removed or locked here, and a reply longer than 262144 bytes is
+ * refused rather than buffered. Every read of the agent is bounded by a
+ * 10-second wait: a hung agent is `Error.TimedOut`, not a hung client.
+ *
+ * The socket is a plain blocking AF_UNIX stream used through the runtime's
+ * own primitives (`lib/net.m31` is TCP only); one request is in flight at a
+ * time. */
 
 import os;
 import crypto.ed25519;
@@ -149,8 +149,8 @@ Result<ssh.Field, Error> field_at(bytes buffer, int offset) {
     }
 }
 
-// The key type named by a public key blob, or "" if the blob is not a
-// well-formed `string type, ...`.
+/* The key type named by a public key blob, or "" if the blob is not a
+ * well-formed `string type, ...`. */
 str blob_type(bytes blob) {
     match (ssh.parse_string(blob, 0)) {
         case Ok(ssh.Field field): {
@@ -206,8 +206,8 @@ pub Result<List<Identity>, Error> parse_identities(bytes payload) {
     return Result<List<Identity>, Error>.Ok(out);
 }
 
-/// A `SIGN_RESPONSE`'s signature blob (`string algorithm, string data`),
-/// checked for shape: the algorithm name and the data are returned.
+/** A `SIGN_RESPONSE`'s signature blob (`string algorithm, string data`),
+ * checked for shape: the algorithm name and the data are returned. */
 pub type AgentSignature {
     pub str algorithm;
     pub bytes data;
@@ -239,8 +239,8 @@ pub Result<AgentSignature, Error> parse_sign_response_full(bytes payload) {
     }
 }
 
-/// An ed25519 `SIGN_RESPONSE`'s 64 raw octets (kept for its callers and
-/// tests; `Agent.sign` accepts every key type).
+/** An ed25519 `SIGN_RESPONSE`'s 64 raw octets (kept for its callers and
+ * tests; `Agent.sign` accepts every key type). */
 pub Result<bytes, Error> parse_sign_response(bytes payload) {
     AgentSignature signature = parse_sign_response_full(payload)?;
     if (signature.algorithm != KEY_TYPE || signature.data.size() != 64) {
@@ -320,10 +320,10 @@ pub Result<List<Identity>, Error> Agent.identities() {
     return parse_identities(reply);
 }
 
-/// Has the agent sign `data` with the key whose blob is `blob`, using the
-/// signature `algorithm` (`ssh-ed25519`, `ecdsa-sha2-nistp256`,
-/// `rsa-sha2-256`, `rsa-sha2-512`); the answer is the signature blob ready
-/// for USERAUTH_REQUEST, **verified under the key** before it is returned.
+/** Has the agent sign `data` with the key whose blob is `blob`, using the
+ * signature `algorithm` (`ssh-ed25519`, `ecdsa-sha2-nistp256`,
+ * `rsa-sha2-256`, `rsa-sha2-512`); the answer is the signature blob ready
+ * for USERAUTH_REQUEST, **verified under the key** before it is returned. */
 pub Result<bytes, Error> Agent.sign_for(bytes blob, bytes data, str algorithm) {
     int flags = 0;
     if (algorithm == "rsa-sha2-256") {
@@ -467,9 +467,9 @@ bytes strip_zeros(bytes value) {
     return value.substr(start, value.size());
 }
 
-/// An `sshauth.Signer` for one identity: each signature opens a fresh
-/// connection to the agent at `path` (an `Agent` owns a descriptor and a
-/// signer is a plain value), asks, and hangs up.
+/** An `sshauth.Signer` for one identity: each signature opens a fresh
+ * connection to the agent at `path` (an `Agent` owns a descriptor and a
+ * signer is a plain value), asks, and hangs up. */
 pub type AgentSigner {
     pub str path;
     pub bytes blob;

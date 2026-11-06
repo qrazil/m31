@@ -1,89 +1,89 @@
-// A line-based diff between two byte buffers: which lines are unchanged,
-// removed or added, and nothing about how to show that to anyone.
-//
-// API
+/* A line-based diff between two byte buffers: which lines are unchanged,
+ * removed or added, and nothing about how to show that to anyone.
+ *
+ * API */
 // ---
-//   diff.is_binary(content)     -> bool                does `content` look
-//                                                        like a binary file?
-//   diff.diff(old, new)         -> Diff                 `Binary`, or the
-//                                                        line-level edit
-//                                                        script
-//   diff.Kind                   Keep | Add | Remove     what one line's op is
-//   diff.Op                     { kind, line }          one line, its
-//                                                        terminator kept
-//   diff.reconstruct_old(ops)   -> bytes                `old`, rebuilt
-//   diff.reconstruct_new(ops)   -> bytes                `new`, rebuilt
-//
-// This is a generic text utility -- `apps/git/design.md`'s "Starting the
-// client" section named it as the missing piece under hunk-level staging --
-// and it knows nothing about git, about a terminal, or about
-// `apps/tui/tuidiffview.Hunk`/`Line`. Grouping this module's output into
-// hunks with context, and turning a `bytes` line into the `str` a widget can
-// render, is `apps/git/hunks.m31`'s job: that conversion depends on
-// `apps/tui`, which this standalone standard library must not (see that
-// file for why the boundary sits there and not here).
-//
+/*   diff.is_binary(content)     -> bool                does `content` look
+ *                                                        like a binary file?
+ *   diff.diff(old, new)         -> Diff                 `Binary`, or the
+ *                                                        line-level edit
+ *                                                        script
+ *   diff.Kind                   Keep | Add | Remove     what one line's op is
+ *   diff.Op                     { kind, line }          one line, its
+ *                                                        terminator kept
+ *   diff.reconstruct_old(ops)   -> bytes                `old`, rebuilt
+ *   diff.reconstruct_new(ops)   -> bytes                `new`, rebuilt
+ *
+ * This is a generic text utility -- `apps/git/design.md`'s "Starting the
+ * client" section named it as the missing piece under hunk-level staging --
+ * and it knows nothing about git, about a terminal, or about
+ * `apps/tui/tuidiffview.Hunk`/`Line`. Grouping this module's output into
+ * hunks with context, and turning a `bytes` line into the `str` a widget can
+ * render, is `apps/git/hunks.m31`'s job: that conversion depends on
+ * `apps/tui`, which this standalone standard library must not (see that
+ * file for why the boundary sits there and not here).
+ * */
 // --- bytes, not str --------------------------------------------------------
-//
-// The content being diffed is whatever a blob holds -- `apps/git/object.m31`
-// already carries that as `bytes`, never `str`, because a blob is octets and
-// need not be valid UTF-8 (§3.10). Splitting on the byte `\n` is always safe
-// regardless of encoding, for the same reason `apps/git/csv.m31`'s comment
-// gives for splitting on a comma: `\n` is ASCII, and UTF-8 never reuses an
-// ASCII byte as a continuation byte, so the split can never land inside a
-// multi-byte character. Working in `bytes` end to end means this module
-// makes no claim about encoding at all, which is the honest answer for a
-// tool whose job includes noticing when a file is not text.
-//
+/*
+ * The content being diffed is whatever a blob holds -- `apps/git/object.m31`
+ * already carries that as `bytes`, never `str`, because a blob is octets and
+ * need not be valid UTF-8 (§3.10). Splitting on the byte `\n` is always safe
+ * regardless of encoding, for the same reason `apps/git/csv.m31`'s comment
+ * gives for splitting on a comma: `\n` is ASCII, and UTF-8 never reuses an
+ * ASCII byte as a continuation byte, so the split can never land inside a
+ * multi-byte character. Working in `bytes` end to end means this module
+ * makes no claim about encoding at all, which is the honest answer for a
+ * tool whose job includes noticing when a file is not text.
+ * */
 // --- binary detection --------------------------------------------------------
-//
-// `is_binary` is git's own heuristic (`buffer_is_binary` in git's
-// `xdiff-interface.c`): a NUL byte anywhere in roughly the first 8000 bytes.
-// No text file writes a NUL, and a binary one almost always has one within
-// the first few KB, so this is cheap and matches what `git diff` itself
-// decides -- the oracle a caller would otherwise disagree with. `diff` calls
-// it on both buffers before doing anything else, so a binary file is never
-// split into fake "lines" or fed to the edit-distance search below; it is
-// simply reported as `Diff.Binary`.
-//
-// This is a heuristic about *bytes that look like text*, not a claim that
-// the result is valid UTF-8 -- a file that passes it and is not UTF-8 (a
-// Latin-1 log, say) still reaches the line splitter below, whose splits stay
-// valid regardless. Only a caller that turns a line's `bytes` into a `str`
-// (`apps/git/hunks.m31` does, since `tuidiffview.Line.text` is one) has to
-// decide what to do with a line that fails `utf8()`; that is that module's
-// problem, not this one's, and is not the NUL heuristic this function gives.
-//
+/*
+ * `is_binary` is git's own heuristic (`buffer_is_binary` in git's
+ * `xdiff-interface.c`): a NUL byte anywhere in roughly the first 8000 bytes.
+ * No text file writes a NUL, and a binary one almost always has one within
+ * the first few KB, so this is cheap and matches what `git diff` itself
+ * decides -- the oracle a caller would otherwise disagree with. `diff` calls
+ * it on both buffers before doing anything else, so a binary file is never
+ * split into fake "lines" or fed to the edit-distance search below; it is
+ * simply reported as `Diff.Binary`.
+ *
+ * This is a heuristic about *bytes that look like text*, not a claim that
+ * the result is valid UTF-8 -- a file that passes it and is not UTF-8 (a
+ * Latin-1 log, say) still reaches the line splitter below, whose splits stay
+ * valid regardless. Only a caller that turns a line's `bytes` into a `str`
+ * (`apps/git/hunks.m31` does, since `tuidiffview.Line.text` is one) has to
+ * decide what to do with a line that fails `utf8()`; that is that module's
+ * problem, not this one's, and is not the NUL heuristic this function gives.
+ * */
 // --- the algorithm -------------------------------------------------------------
-//
-// Myers' O(ND) algorithm (E. Myers, "An O(ND) Difference Algorithm and Its
-// Variations", 1986) -- the same algorithm `git diff` itself is built on, and
-// so a diff that is easy to check against real `git diff`/`diff -u` as an
-// oracle: same hunk boundaries, same lines called context, added or removed.
-// `N` and `M` are the two line counts and `D` is the size of the edit
-// script; for the ordinary case a caller has in mind -- two versions of one
-// source file, not two unrelated files pasted together -- `D` is small and
-// this is far faster than an O(N*M) LCS table, which is the choice this
-// module deliberately did not make.
-//
-// `diff` returns the shortest edit script as a flat `List<Op>` in old-to-new
-// order: a `Remove` op holds the line as it was in `old`, an `Add` holds the
-// line as it is in `new`, and a `Keep` holds the one line both agree on.
-// Concatenating a script's `Keep` and `Remove` lines reproduces `old`
-// exactly; concatenating its `Keep` and `Add` lines reproduces `new`
-// exactly -- `reconstruct_old`/`reconstruct_new` do exactly that, and are
-// what this module's own round-trip tests check.
-//
+/*
+ * Myers' O(ND) algorithm (E. Myers, "An O(ND) Difference Algorithm and Its
+ * Variations", 1986) -- the same algorithm `git diff` itself is built on, and
+ * so a diff that is easy to check against real `git diff`/`diff -u` as an
+ * oracle: same hunk boundaries, same lines called context, added or removed.
+ * `N` and `M` are the two line counts and `D` is the size of the edit
+ * script; for the ordinary case a caller has in mind -- two versions of one
+ * source file, not two unrelated files pasted together -- `D` is small and
+ * this is far faster than an O(N*M) LCS table, which is the choice this
+ * module deliberately did not make.
+ *
+ * `diff` returns the shortest edit script as a flat `List<Op>` in old-to-new
+ * order: a `Remove` op holds the line as it was in `old`, an `Add` holds the
+ * line as it is in `new`, and a `Keep` holds the one line both agree on.
+ * Concatenating a script's `Keep` and `Remove` lines reproduces `old`
+ * exactly; concatenating its `Keep` and `Add` lines reproduces `new`
+ * exactly -- `reconstruct_old`/`reconstruct_new` do exactly that, and are
+ * what this module's own round-trip tests check.
+ * */
 // --- lines carry their own terminator -----------------------------------------
-//
-// A "line" here is a run of bytes up to and including its own `\n`, except
-// possibly the very last line of a buffer, which has none if the buffer does
-// not end in `\n`. Carrying the terminator (or its absence) INSIDE the line
-// is what makes `reconstruct_old`/`reconstruct_new` exact byte-for-byte
-// rebuilds with no extra bookkeeping: there is no separate "did this file
-// end in a newline" flag to thread through, because the answer is already
-// sitting on the last line, the same way it is sitting in the file itself.
-// An empty buffer has no lines at all, matching `text.lines("")`.
+/*
+ * A "line" here is a run of bytes up to and including its own `\n`, except
+ * possibly the very last line of a buffer, which has none if the buffer does
+ * not end in `\n`. Carrying the terminator (or its absence) INSIDE the line
+ * is what makes `reconstruct_old`/`reconstruct_new` exact byte-for-byte
+ * rebuilds with no extra bookkeeping: there is no separate "did this file
+ * end in a newline" flag to thread through, because the answer is already
+ * sitting on the last line, the same way it is sitting in the file itself.
+ * An empty buffer has no lines at all, matching `text.lines("")`. */
 
 /// What one line of an edit script is doing.
 pub enum Kind {
@@ -95,25 +95,25 @@ pub enum Kind {
     Remove;
 }
 
-/// One line of an edit script: its own trailing `\n`, if it had one, is part
-/// of `line`.
+/** One line of an edit script: its own trailing `\n`, if it had one, is part
+ * of `line`. */
 pub type Op {
     pub Kind kind;
     pub bytes line;
 }
 
-/// The result of comparing two buffers: either both looked like text and
-/// here is the edit script, or one of them did not look like text at all
-/// (`is_binary`) and no line diff was attempted.
+/** The result of comparing two buffers: either both looked like text and
+ * here is the edit script, or one of them did not look like text at all
+ * (`is_binary`) and no line diff was attempted. */
 pub enum Diff {
     Binary;
     Lines(List<Op>);
 }
 
-/// Does `content` look like a binary file -- git's own heuristic: a NUL byte
-/// within roughly the first 8000 bytes. A text file, in any encoding, never
-/// contains one; nearly every binary format puts one within a few KB of the
-/// start, so this rarely has to read the whole file to answer.
+/** Does `content` look like a binary file -- git's own heuristic: a NUL byte
+ * within roughly the first 8000 bytes. A text file, in any encoding, never
+ * contains one; nearly every binary format puts one within a few KB of the
+ * start, so this rarely has to read the whole file to answer. */
 pub bool is_binary(bytes content) {
     int scan_length = content.size();
     if (scan_length > 8000) {
@@ -129,11 +129,11 @@ pub bool is_binary(bytes content) {
     return false;
 }
 
-/// Compare `old` and `new` line by line.
-///
-/// `Diff.Binary` if either buffer fails `is_binary`; otherwise
-/// `Diff.Lines(ops)`, the shortest edit script Myers' algorithm finds
-/// between the two buffers' lines.
+/** Compare `old` and `new` line by line.
+ *
+ * `Diff.Binary` if either buffer fails `is_binary`; otherwise
+ * `Diff.Lines(ops)`, the shortest edit script Myers' algorithm finds
+ * between the two buffers' lines. */
 pub Diff diff(bytes old, bytes new) {
     if (is_binary(old) || is_binary(new)) {
         return Diff.Binary;
@@ -141,9 +141,9 @@ pub Diff diff(bytes old, bytes new) {
     return Diff.Lines(myers(split_lines(old), split_lines(new)));
 }
 
-/// `old`, rebuilt from `ops`: every `Keep` and `Remove` line, in order.
-/// Exact, byte for byte, for any `ops` `diff` returned -- the round-trip
-/// property this module's own tests check.
+/** `old`, rebuilt from `ops`: every `Keep` and `Remove` line, in order.
+ * Exact, byte for byte, for any `ops` `diff` returned -- the round-trip
+ * property this module's own tests check. */
 pub bytes reconstruct_old(List<Op> ops) {
     bytes out = [];
     for (Op operation in ops) {
@@ -180,13 +180,13 @@ pub bytes reconstruct_new(List<Op> ops) {
 }
 
 // --- lines, terminator attached ------------------------------------------------
-//
-// `content`'s lines, each ending in its own `\n` except possibly the last,
-// which has none if `content` does not end in one. An empty buffer has no
-// lines. Splitting on the raw byte, not `text.lines` (which strips the
-// terminator on purpose, for a different job -- reference §6.5/`text.m31`):
-// this module needs the terminator kept, not dropped, so a rebuild needs
-// nothing else.
+/*
+ * `content`'s lines, each ending in its own `\n` except possibly the last,
+ * which has none if `content` does not end in one. An empty buffer has no
+ * lines. Splitting on the raw byte, not `text.lines` (which strips the
+ * terminator on purpose, for a different job -- reference §6.5/`text.m31`):
+ * this module needs the terminator kept, not dropped, so a rebuild needs
+ * nothing else. */
 List<bytes> split_lines(bytes content) {
     List<bytes> out = [];
     int byte_count = content.size();
@@ -206,15 +206,15 @@ List<bytes> split_lines(bytes content) {
 }
 
 // --- Myers' O(ND) algorithm ----------------------------------------------------
-//
-// The classic "greedy" formulation: for each edit distance `edit_distance` from 0 up,
-// walk every diagonal `diagonal` a script of length `edit_distance` can reach, extend it along
-// any run of matching lines (a "snake"), and stop the moment one reaches
-// (n, m) -- the end of both sequences. `v[k]` is the furthest `x` reached on
-// diagonal `diagonal` at the current `edit_distance`, indexed through `offset` because `diagonal`
-// ranges over negative numbers. `trace` keeps one snapshot of `furthest_x` per `edit_distance`,
-// which is all `backtrack` needs to recover the path afterwards; nothing
-// else about the search is kept.
+/*
+ * The classic "greedy" formulation: for each edit distance `edit_distance` from 0 up,
+ * walk every diagonal `diagonal` a script of length `edit_distance` can reach, extend it along
+ * any run of matching lines (a "snake"), and stop the moment one reaches
+ * (n, m) -- the end of both sequences. `v[k]` is the furthest `x` reached on
+ * diagonal `diagonal` at the current `edit_distance`, indexed through `offset` because `diagonal`
+ * ranges over negative numbers. `trace` keeps one snapshot of `furthest_x` per `edit_distance`,
+ * which is all `backtrack` needs to recover the path afterwards; nothing
+ * else about the search is kept. */
 List<Op> myers(List<bytes> old_lines, List<bytes> new_lines) {
     int old_count = old_lines.size();
     int new_count = new_lines.size();
@@ -259,14 +259,14 @@ List<Op> myers(List<bytes> old_lines, List<bytes> new_lines) {
     return backtrack(old_lines, new_lines, trace, end_d, offset);
 }
 
-// Walk `trace` from the end back to the start, turning the path Myers found
-// into an edit script. Each depth `edit_distance` says whether the move into it was an
-// insertion or a deletion (whichever side did NOT move to reach `previous_x`),
-// preceded by however long a diagonal (a run of `Keep`s) led into it; the
-// diagonal below `d == 0` -- the very start, before any edit -- is walked
-// once more after the loop, since no depth ever generates it. Built
-// backwards and reversed once at the end, rather than reversed at every
-// step.
+/* Walk `trace` from the end back to the start, turning the path Myers found
+ * into an edit script. Each depth `edit_distance` says whether the move into it was an
+ * insertion or a deletion (whichever side did NOT move to reach `previous_x`),
+ * preceded by however long a diagonal (a run of `Keep`s) led into it; the
+ * diagonal below `d == 0` -- the very start, before any edit -- is walked
+ * once more after the loop, since no depth ever generates it. Built
+ * backwards and reversed once at the end, rather than reversed at every
+ * step. */
 List<Op> backtrack(List<bytes> old_lines, List<bytes> new_lines, List<List<int>> trace, int end_d, int offset) {
     List<Op> ops = [];
     int x = old_lines.size();

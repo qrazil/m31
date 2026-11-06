@@ -1,51 +1,51 @@
-// SHA-512 (FIPS 180-4), written in the language over `bytes` and the bit
-// operators. Ed25519 (RFC 8032) uses SHA-512 throughout -- to expand a seed
-// into a scalar and a nonce prefix, to derive the per-signature nonce, and
-// to build the challenge scalar -- so this exists for `ed25519.m31`, not for
-// git (which is SHA-1, `apps/git/sha1.m31`, and stays that way).
-//
-// API
+/* SHA-512 (FIPS 180-4), written in the language over `bytes` and the bit
+ * operators. Ed25519 (RFC 8032) uses SHA-512 throughout -- to expand a seed
+ * into a scalar and a nonce prefix, to derive the per-signature nonce, and
+ * to build the challenge scalar -- so this exists for `ed25519.m31`, not for
+ * git (which is SHA-1, `apps/git/sha1.m31`, and stays that way).
+ *
+ * API */
 // ---
-//   sha512.Hasher h = sha512.Hasher();
-//   h.update(chunk);            // as many times as you like
-//   bytes d = h.digest();       // 64 octets; h starts over, ready for
-//                               // the next message
-//
-//   sha512.sum(data)            -> bytes, the 64 octets
-//   sha512.hex(data)            -> str, 128 lowercase hex digits
-//
-// And SHA-384 (FIPS 180-4 §6.5), which is SHA-512 with a different set of
-// initial chaining values and a digest cut to its first 48 octets -- nothing
-// else differs, so it lives here rather than in a module that would copy the
-// 80-round compression function. TLS 1.3 uses it for the
-// `TLS_AES_256_GCM_SHA384` key schedule and for verifying the ECDSA-with-SHA384
-// signatures on the certificate chains of real hosts.
-//
-//   sha512.Hasher h = sha512.sha384_hasher();   // then update/digest as above
-//   bytes d = h.digest();       // 48 octets; h starts over
-//
-//   sha512.sum384(data)         -> bytes, the 48 octets
-//   sha512.hex384(data)         -> str, 96 lowercase hex digits
-//
+/*   sha512.Hasher h = sha512.Hasher();
+ *   h.update(chunk);            // as many times as you like
+ *   bytes d = h.digest();       // 64 octets; h starts over, ready for
+ *                               // the next message
+ *
+ *   sha512.sum(data)            -> bytes, the 64 octets
+ *   sha512.hex(data)            -> str, 128 lowercase hex digits
+ *
+ * And SHA-384 (FIPS 180-4 §6.5), which is SHA-512 with a different set of
+ * initial chaining values and a digest cut to its first 48 octets -- nothing
+ * else differs, so it lives here rather than in a module that would copy the
+ * 80-round compression function. TLS 1.3 uses it for the
+ * `TLS_AES_256_GCM_SHA384` key schedule and for verifying the ECDSA-with-SHA384
+ * signatures on the certificate chains of real hosts.
+ *
+ *   sha512.Hasher h = sha512.sha384_hasher();   // then update/digest as above
+ *   bytes d = h.digest();       // 48 octets; h starts over
+ *
+ *   sha512.sum384(data)         -> bytes, the 48 octets
+ *   sha512.hex384(data)         -> str, 96 lowercase hex digits
+ * */
 // --- words and constant time ----------------------------------------------
-//
-// Each 64-bit word is a plain `int`, and the additions are `wrapping_add`
-// (modulo 2^64, never a trap). SHA-512 needs a LOGICAL right shift and `>>`
-// is arithmetic (reference §6.1), so `shr` masks off the copied sign bits.
-//
-// Ed25519 hashes secret data with this (the seed and the nonce prefix, RFC
-// 8032 §5.1.6), and password hashing builds on it, so nothing here may branch
-// on a word's value. `>>` does not: `rt_ishr` in runtime/rt.h computes the
-// arithmetic shift from the logical one and a mask built from the sign bit,
-// with no branch on the operand. (An earlier version kept every word as a
-// `Word64` object of two 32-bit halves because `rt_ishr` used to branch on
-// the sign; that allocated per operation and made a 5000-round SHA-512-crypt
-// verify take about 650 ms instead of about 30 ms.)
-//
-// `H512` and `K512` are FIPS 180-4's: the first 64 bits of the fractional
-// parts of the square roots of the first 8 primes and the cube roots of the
-// first 80 primes. They were generated, not copied by hand, and checked
-// against the values every published implementation uses.
+/*
+ * Each 64-bit word is a plain `int`, and the additions are `wrapping_add`
+ * (modulo 2^64, never a trap). SHA-512 needs a LOGICAL right shift and `>>`
+ * is arithmetic (reference §6.1), so `shr` masks off the copied sign bits.
+ *
+ * Ed25519 hashes secret data with this (the seed and the nonce prefix, RFC
+ * 8032 §5.1.6), and password hashing builds on it, so nothing here may branch
+ * on a word's value. `>>` does not: `rt_ishr` in runtime/rt.h computes the
+ * arithmetic shift from the logical one and a mask built from the sign bit,
+ * with no branch on the operand. (An earlier version kept every word as a
+ * `Word64` object of two 32-bit halves because `rt_ishr` used to branch on
+ * the sign; that allocated per operation and made a 5000-round SHA-512-crypt
+ * verify take about 650 ms instead of about 30 ms.)
+ *
+ * `H512` and `K512` are FIPS 180-4's: the first 64 bits of the fractional
+ * parts of the square roots of the first 8 primes and the cube roots of the
+ * first 80 primes. They were generated, not copied by hand, and checked
+ * against the values every published implementation uses. */
 
 import crypto.accel;
 
@@ -79,24 +79,24 @@ const Array<int> K512 = [
     0x4cc5_d4be_cb3e_42b6, 0x597f_299c_fc65_7e2a, 0x5fcb_6fab_3ad6_faec, 0x6c44_198c_4a47_5817
 ];
 
-// SHA-384's eight chaining values, FIPS 180-4 §5.3.4: the first 64 bits of the
-// fractional part of the square root of the ninth through sixteenth primes.
-// The compression function and the round constants are SHA-512's, unchanged.
+/* SHA-384's eight chaining values, FIPS 180-4 §5.3.4: the first 64 bits of the
+ * fractional part of the square root of the ninth through sixteenth primes.
+ * The compression function and the round constants are SHA-512's, unchanged. */
 const Array<int> H384 = [
     0xcbbb_9d5d_c105_9ed8, 0x629a_292a_367c_d507, 0x9159_015a_3070_dd17, 0x152f_ecd8_f70e_5939,
     0x6733_2667_ffc0_0b31, 0x8eb4_4a87_6858_1511, 0xdb0c_2e0d_64f9_8fa7, 0x47b5_481d_befa_4fa4
 ];
 
-/// The chaining state and everything `update`/`digest` need across calls.
-/// `Hasher()` is the whole of "start a hash".
+/** The chaining state and everything `update`/`digest` need across calls.
+ * `Hasher()` is the whole of "start a hash". */
 pub type Hasher {
     Array<int> state = clone(H512);
-    /// Octets seen so far, for the 128-bit length field. Kept as one `int`
-    /// (a message longer than 2^63 octets is not supported), so the top 8
-    /// octets of the length field are always zero.
+    /** Octets seen so far, for the 128-bit length field. Kept as one `int`
+     * (a message longer than 2^63 octets is not supported), so the top 8
+     * octets of the length field are always zero. */
     int total = 0;
-    /// How many octets of the final chaining value `digest` returns: 64 for
-    /// SHA-512, 48 for SHA-384 (`sha384_hasher`).
+    /** How many octets of the final chaining value `digest` returns: 64 for
+     * SHA-512, 48 for SHA-384 (`sha384_hasher`). */
     int digest_size = 64;
     /// The partial block: always fewer than 128 octets between `update`s.
     bytes tail = [];
@@ -104,8 +104,8 @@ pub type Hasher {
     Array<int> schedule = [0; 80];
 }
 
-/// Feed `data` to the hash. Any number of calls, of any sizes, hash the same
-/// as one call with them joined.
+/** Feed `data` to the hash. Any number of calls, of any sizes, hash the same
+ * as one call with them joined. */
 pub void Hasher.update(bytes data) {
     int data_length = data.size();
     total = total + data_length;
@@ -131,16 +131,16 @@ pub void Hasher.update(bytes data) {
     }
 }
 
-/// The digest: 64 octets, or 48 for a `sha384_hasher`. The hasher then starts
-/// over, so the next `update` begins a new message.
+/** The digest: 64 octets, or 48 for a `sha384_hasher`. The hasher then starts
+ * over, so the next `update` begins a new message. */
 pub bytes Hasher.digest() {
     int bits = total * 8;
     tail.push(0x80);
     while (tail.size() % 128 != 112) {
         tail.push(0);
     }
-    // The 128-bit big-endian length: 8 octets of zero (see the field
-    // comment on `total`), then the 64-bit bit count.
+    /* The 128-bit big-endian length: 8 octets of zero (see the field
+     * comment on `total`), then the 64-bit bit count. */
     for (int padding_index in 0 .. 8) {
         tail.push(0);
     }
@@ -162,9 +162,9 @@ pub bytes Hasher.digest() {
     return out;
 }
 
-// Back to the initial chaining values for this hasher's digest size, so the
-// next `update` begins a new message. SHA-512-crypt hashes thousands of short
-// messages in a row; this spares it a new `Hasher` for each.
+/* Back to the initial chaining values for this hasher's digest size, so the
+ * next `update` begins a new message. SHA-512-crypt hashes thousands of short
+ * messages in a row; this spares it a new `Hasher` for each. */
 void Hasher.restart() {
     for (int index in 0 .. 8) {
         if (digest_size == 48) {
@@ -176,9 +176,9 @@ void Hasher.restart() {
     total = 0;
 }
 
-// `count` whole blocks of `data` from `offset`: the kernel if there is one,
-// else the portable compression function below, block by block. Same result
-// either way (tests/cryptodiff runs both).
+/* `count` whole blocks of `data` from `offset`: the kernel if there is one,
+ * else the portable compression function below, block by block. Same result
+ * either way (tests/cryptodiff runs both). */
 void Hasher.run_blocks(bytes data, int offset, int count) {
     if (count > 0 && (accel.features() & accel.SHA512) != 0) {
         bytes packed = [0; 64];
@@ -252,9 +252,9 @@ void Hasher.block(bytes data, int offset) {
     state[7] = state[7].wrapping_add(working_h);
 }
 
-// The hardware kernel (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
-// runtime/crypto_*.S, called with spans the compiler range-checks. Called only
-// when `accel.features()` has SHA512 set.
+/* The hardware kernel (docs/ffi-decision.md, docs/CRYPTO-ACCEL.md): assembly in
+ * runtime/crypto_*.S, called with spans the compiler range-checks. Called only
+ * when `accel.features()` has SHA512 set. */
 prim "c" nonblocking void __k_sha512(
     inout bytes state[0 .. 64],
     in bytes data[offset .. offset + 128 * count],
@@ -273,8 +273,8 @@ pub str hex(bytes data) {
     return sum(data).hex();
 }
 
-/// A `Hasher` that computes SHA-384 instead of SHA-512: SHA-384's initial
-/// chaining values and a 48-octet digest, the same `update` and `block`.
+/** A `Hasher` that computes SHA-384 instead of SHA-512: SHA-384's initial
+ * chaining values and a 48-octet digest, the same `update` and `block`. */
 pub Hasher sha384_hasher() {
     Hasher hasher = Hasher();
     hasher.state = clone(H384);
@@ -294,8 +294,8 @@ pub str hex384(bytes data) {
     return sum384(data).hex();
 }
 
-// Logical shift right, 1 <= distance <= 63: the arithmetic shift with the
-// copied sign bits masked off.
+/* Logical shift right, 1 <= distance <= 63: the arithmetic shift with the
+ * copied sign bits masked off. */
 int shr(int value, int distance) {
     return (value >> distance) & ~(-1 << (64 - distance));
 }

@@ -1,6 +1,6 @@
-// `lib/ssh/sshconfig.m31`: Host patterns, first-value-wins, accumulation,
-// quoting, `%` expansion and the things that must be reported rather than
-// guessed. Pure; a `trap` means a check failed.
+/* `lib/ssh/sshconfig.m31`: Host patterns, first-value-wins, accumulation,
+ * quoting, `%` expansion and the things that must be reported rather than
+ * guessed. Pure; a `trap` means a check failed. */
 import ssh.sshconfig;
 
 int check(int passed_count, bool is_ok, str label) {

@@ -1,55 +1,55 @@
-// The process: its command line, its environment, how it ends, and how it
-// starts another one.
-//
-// API
+/* The process: its command line, its environment, how it ends, and how it
+ * starts another one.
+ *
+ * API */
 // ---
-//   os.arguments()        -> List<str>, every argument, the program's own
-//                            name first
-//   os.arguments_bytes()  -> List<bytes>, the same, exactly as the OS passed them
-//   os.env(name)          -> Option<str>, one environment variable, as text
-//   os.env_bytes(name)    -> Option<bytes>, the same, exactly as the OS holds it
-//   os.env_map()          -> Map<str, str>, every variable that is text
-//
-// A name ends in the shape it answers with: `_bytes` gives octets, `_map`
-// gives a map, and a plain name gives text or a list of it.
-//   os.exit(code)         -> does not return; standard output is flushed first
-//
-//   os.run(argv)          -> Result<ExitStatus, io.Error>
-//   ExitStatus            enum: Exited(int) or Signaled(int)
-//
-// Three facts the operating system hands a process, and nothing built on
-// them: parsing the command line is `args`, and it is handed these tokens
-// rather than reading them itself, which is what makes a parser testable
-// from a program that has no command line of its own.
-//
-// Text or octets is decided here, at the door, as `io.read` decides it for a
-// file. On Unix an argument or a variable is any run of non-NUL bytes, and a
-// `str` is always valid UTF-8 (reference §3), so the runtime hands over
-// `bytes` and `utf8()` -- the one conversion into `str` -- checks each.
-// docs/text-decision.md compares this with Rust, whose `env::args()` panics
-// here and whose `args_os()` is `arguments_bytes`.
-//
-// `run` is the odd one out: it is the only thing in this module that can
-// fail, and the only thing that takes as long as the child process runs.
-// `Err` is reserved for the process never starting at all -- `argv[0]`
-// nowhere on `$PATH`, most commonly -- built from the same `io.from_errno`
-// `io` and `fs` already use, one vocabulary for every failure that touches
-// the operating system. A process that DID start is always `Ok`, whether it
-// exited 0, exited nonzero, or was killed by a signal: those are three
-// different facts a caller may need to tell apart (real git's own editor
-// flow treats a signal as an abort, distinct from a nonzero exit), never a
-// reason to fail the call that only asked "did it run".
-//
-// This is a separate mechanism from `spawn`/`Chan<T>`: `spawn` starts a
-// thread inside this same process and shares its memory; `run` starts a
-// different program's image, in its own process, connected to the real
-// terminal (stdin, stdout and stderr are inherited untouched, which is what
-// lets an interactive program like an editor take it over) so the two
-// should never be reached for interchangeably.
-//
-// A child whose output is wanted -- or fed, or on a terminal of its own -- is
-// the `proc` module's (`proc.run`, `proc.start`, `proc.start_pty`); `os.run`
-// is for the one that should have the real terminal.
+/*   os.arguments()        -> List<str>, every argument, the program's own
+ *                            name first
+ *   os.arguments_bytes()  -> List<bytes>, the same, exactly as the OS passed them
+ *   os.env(name)          -> Option<str>, one environment variable, as text
+ *   os.env_bytes(name)    -> Option<bytes>, the same, exactly as the OS holds it
+ *   os.env_map()          -> Map<str, str>, every variable that is text
+ *
+ * A name ends in the shape it answers with: `_bytes` gives octets, `_map`
+ * gives a map, and a plain name gives text or a list of it.
+ *   os.exit(code)         -> does not return; standard output is flushed first
+ *
+ *   os.run(argv)          -> Result<ExitStatus, io.Error>
+ *   ExitStatus            enum: Exited(int) or Signaled(int)
+ *
+ * Three facts the operating system hands a process, and nothing built on
+ * them: parsing the command line is `args`, and it is handed these tokens
+ * rather than reading them itself, which is what makes a parser testable
+ * from a program that has no command line of its own.
+ *
+ * Text or octets is decided here, at the door, as `io.read` decides it for a
+ * file. On Unix an argument or a variable is any run of non-NUL bytes, and a
+ * `str` is always valid UTF-8 (reference §3), so the runtime hands over
+ * `bytes` and `utf8()` -- the one conversion into `str` -- checks each.
+ * docs/text-decision.md compares this with Rust, whose `env::args()` panics
+ * here and whose `args_os()` is `arguments_bytes`.
+ *
+ * `run` is the odd one out: it is the only thing in this module that can
+ * fail, and the only thing that takes as long as the child process runs.
+ * `Err` is reserved for the process never starting at all -- `argv[0]`
+ * nowhere on `$PATH`, most commonly -- built from the same `io.from_errno`
+ * `io` and `fs` already use, one vocabulary for every failure that touches
+ * the operating system. A process that DID start is always `Ok`, whether it
+ * exited 0, exited nonzero, or was killed by a signal: those are three
+ * different facts a caller may need to tell apart (real git's own editor
+ * flow treats a signal as an abort, distinct from a nonzero exit), never a
+ * reason to fail the call that only asked "did it run".
+ *
+ * This is a separate mechanism from `spawn`/`Chan<T>`: `spawn` starts a
+ * thread inside this same process and shares its memory; `run` starts a
+ * different program's image, in its own process, connected to the real
+ * terminal (stdin, stdout and stderr are inherited untouched, which is what
+ * lets an interactive program like an editor take it over) so the two
+ * should never be reached for interchangeably.
+ *
+ * A child whose output is wanted -- or fed, or on a terminal of its own -- is
+ * the `proc` module's (`proc.run`, `proc.start`, `proc.start_pty`); `os.run`
+ * is for the one that should have the real terminal. */
 
 import io;
 
@@ -60,25 +60,25 @@ prim void __exit(int code);
 prim int __proc_start(List<str> argv);
 prim int __proc_wait(int pid);
 
-/// Every argument the program was started with, `argv[0]` -- the name it was
-/// invoked as -- first.
-///
-/// Including it is Go's `os.Args`, Oro's `sys.argv` and C's `argv`, and the
-/// agreement is the reason: a list that is exactly what the operating system
-/// passed has one meaning everywhere, where a list with the first element
-/// quietly removed is a second convention to remember at every index. A
-/// parser is handed the rest; see `args`.
-///
-/// An argument that is not UTF-8 -- a file name from a Latin-1 disk, say --
-/// **traps**, naming the argument and `arguments_bytes`. This is Rust's trade
-/// (`env::args()` panics, `args_os()` does not): nearly every program wants
-/// its arguments as text and would otherwise carry a `match` for a case it
-/// never meets, and the program that really does take any file name reads
-/// `arguments_bytes` instead. It is neither dropped nor repaired: dropping one
-/// would move every later index, and a replacement character would hand the
-/// program a file name that names no file.
-///
-/// A fresh list per call: changing it changes nothing but the copy.
+/** Every argument the program was started with, `argv[0]` -- the name it was
+ * invoked as -- first.
+ *
+ * Including it is Go's `os.Args`, Oro's `sys.argv` and C's `argv`, and the
+ * agreement is the reason: a list that is exactly what the operating system
+ * passed has one meaning everywhere, where a list with the first element
+ * quietly removed is a second convention to remember at every index. A
+ * parser is handed the rest; see `args`.
+ *
+ * An argument that is not UTF-8 -- a file name from a Latin-1 disk, say --
+ * **traps**, naming the argument and `arguments_bytes`. This is Rust's trade
+ * (`env::args()` panics, `args_os()` does not): nearly every program wants
+ * its arguments as text and would otherwise carry a `match` for a case it
+ * never meets, and the program that really does take any file name reads
+ * `arguments_bytes` instead. It is neither dropped nor repaired: dropping one
+ * would move every later index, and a replacement character would hand the
+ * program a file name that names no file.
+ *
+ * A fresh list per call: changing it changes nothing but the copy. */
 pub List<str> arguments() {
     List<str> out = [];
     int argument_index = 0;
@@ -96,31 +96,31 @@ pub List<str> arguments() {
     return out;
 }
 
-/// Every argument, exactly the octets the operating system passed, whether
-/// or not they are text: Rust's `args_os`. A fresh list per call.
+/** Every argument, exactly the octets the operating system passed, whether
+ * or not they are text: Rust's `args_os`. A fresh list per call. */
 pub List<bytes> arguments_bytes() {
     List<bytes> out = [];
     __args(out);
     return out;
 }
 
-/// The value of the environment variable `name` as text, or None if it is
-/// not set.
-///
-/// Set-but-empty is `Some("")`, not None: the two are different facts and
-/// programs do branch on them. A name that could never be a variable -- empty,
-/// or holding an `=` or a NUL -- is simply not set.
-///
-/// A value that is not valid UTF-8 is None as well: there is no text by that
-/// name, which is the question asked, and a program that falls back to a
-/// default when `LANG` is unset does the right thing when it is not text.
-/// `env_bytes` tells the two apart. `args` cannot, because a list cannot
-/// leave one element out without moving the rest.
-///
-/// Oro spells this `os.env` too, having renamed Python's `os.environ`. There
-/// is no way to set or list variables: a program that needs to change the
-/// environment is starting another program, and that belongs with whatever
-/// starts it.
+/** The value of the environment variable `name` as text, or None if it is
+ * not set.
+ *
+ * Set-but-empty is `Some("")`, not None: the two are different facts and
+ * programs do branch on them. A name that could never be a variable -- empty,
+ * or holding an `=` or a NUL -- is simply not set.
+ *
+ * A value that is not valid UTF-8 is None as well: there is no text by that
+ * name, which is the question asked, and a program that falls back to a
+ * default when `LANG` is unset does the right thing when it is not text.
+ * `env_bytes` tells the two apart. `args` cannot, because a list cannot
+ * leave one element out without moving the rest.
+ *
+ * Oro spells this `os.env` too, having renamed Python's `os.environ`. There
+ * is no way to set or list variables: a program that needs to change the
+ * environment is starting another program, and that belongs with whatever
+ * starts it. */
 pub Option<str> env(str name) {
     match (env_bytes(name)) {
         case Some(bytes value_bytes): {
@@ -132,8 +132,8 @@ pub Option<str> env(str name) {
     }
 }
 
-/// The value of the environment variable `name`, exactly the octets the
-/// operating system holds, or None if it is not set.
+/** The value of the environment variable `name`, exactly the octets the
+ * operating system holds, or None if it is not set. */
 pub Option<bytes> env_bytes(str name) {
     List<bytes> got = [];
     if (__env(name, got) == 0) {
@@ -142,12 +142,12 @@ pub Option<bytes> env_bytes(str name) {
     return Option<bytes>.Some(got[0]);
 }
 
-/// Every environment variable whose name and value are both text.
-///
-/// One that is not -- a value from a Latin-1 disk, a name the shell smuggled
-/// through -- is left out rather than repaired, for the reason `env` answers
-/// None: there is no text by that name. `env_bytes` still finds it by name.
-/// A fresh map per call, so changing it changes nothing but the copy.
+/** Every environment variable whose name and value are both text.
+ *
+ * One that is not -- a value from a Latin-1 disk, a name the shell smuggled
+ * through -- is left out rather than repaired, for the reason `env` answers
+ * None: there is no text by that name. `env_bytes` still finds it by name.
+ * A fresh map per call, so changing it changes nothing but the copy. */
 pub Map<str, str> env_map() {
     List<bytes> flat = [];
     __env_map(flat);
@@ -172,14 +172,14 @@ pub Map<str, str> env_map() {
     return out;
 }
 
-/// End the program now with status `code`, after flushing standard output so
-/// nothing already printed is lost.
-///
-/// The code must be 0 through 255, and anything else traps: the operating
-/// system keeps only the low eight bits, so `exit(256)` would report success,
-/// which is the one thing a program exiting with a non-zero code cannot have
-/// meant. Threads still running are not waited for, which is the difference
-/// between this and reaching the end of the program.
+/** End the program now with status `code`, after flushing standard output so
+ * nothing already printed is lost.
+ *
+ * The code must be 0 through 255, and anything else traps: the operating
+ * system keeps only the low eight bits, so `exit(256)` would report success,
+ * which is the one thing a program exiting with a non-zero code cannot have
+ * meant. Threads still running are not waited for, which is the difference
+ * between this and reaching the end of the program. */
 pub void exit(int code) {
     if (code < 0 || code > 255) {
         trap("os.exit(" + code.to_str() + "): an exit status is 0 through 255");
@@ -187,28 +187,28 @@ pub void exit(int code) {
     __exit(code);
 }
 
-/// How a process that ran to completion ended: normally, with a status
-/// `run` never has to guess at, or killed by a signal it never chose.
-///
-/// The two are kept apart because a caller has to be able to ask which:
-/// real git's own editor flow treats a signalled `$EDITOR` as the user
-/// aborting -- ^C, say -- and a nonzero exit as the editor itself refusing,
-/// which is a different thing to tell someone. A bare int, the way a shell
-/// reports `$?`, folds both into one number and a caller has to already
-/// know the encoding to pull them back apart; this does not have that
-/// encoding to know.
+/** How a process that ran to completion ended: normally, with a status
+ * `run` never has to guess at, or killed by a signal it never chose.
+ *
+ * The two are kept apart because a caller has to be able to ask which:
+ * real git's own editor flow treats a signalled `$EDITOR` as the user
+ * aborting -- ^C, say -- and a nonzero exit as the editor itself refusing,
+ * which is a different thing to tell someone. A bare int, the way a shell
+ * reports `$?`, folds both into one number and a caller has to already
+ * know the encoding to pull them back apart; this does not have that
+ * encoding to know. */
 pub enum ExitStatus {
-    /// The process called `exit` (or returned from `main`) with this code,
-    /// 0 through 255 -- the same range `os.exit` enforces on the way in.
+    /** The process called `exit` (or returned from `main`) with this code,
+     * 0 through 255 -- the same range `os.exit` enforces on the way in. */
     Exited(int);
-    /// The process never got to choose its exit code: this signal ended it
-    /// first. `2` is ^C (SIGINT), `9` is a kill nothing can catch (SIGKILL),
-    /// `15` is an ordinary request to stop (SIGTERM).
+    /** The process never got to choose its exit code: this signal ended it
+     * first. `2` is ^C (SIGINT), `9` is a kill nothing can catch (SIGKILL),
+     * `15` is an ordinary request to stop (SIGTERM). */
     Signaled(int);
 }
 
-/// A sentence saying how the process ended, for a log line or a trap
-/// message: `print(status)` and `"editor: " + status.to_str()` both read.
+/** A sentence saying how the process ended, for a log line or a trap
+ * message: `print(status)` and `"editor: " + status.to_str()` both read. */
 pub str ExitStatus.to_str() {
     match (this) {
         case Exited(int code): {
@@ -220,11 +220,11 @@ pub str ExitStatus.to_str() {
     }
 }
 
-/// Whether the process both ran and reported success: exit code 0, and not
-/// killed by a signal. Everything else -- a nonzero exit, a signal -- is
-/// `false`, on purpose: the two are different failures (see `ExitStatus`
-/// above), but only one of them is a *success*, so a caller that only wants
-/// "did it work" does not have to `match` to find out.
+/** Whether the process both ran and reported success: exit code 0, and not
+ * killed by a signal. Everything else -- a nonzero exit, a signal -- is
+ * `false`, on purpose: the two are different failures (see `ExitStatus`
+ * above), but only one of them is a *success*, so a caller that only wants
+ * "did it work" does not have to `match` to find out. */
 pub bool ExitStatus.is_success() {
     match (this) {
         case Exited(int code): {
@@ -236,25 +236,25 @@ pub bool ExitStatus.is_success() {
     }
 }
 
-/// Run `argv` as a child process -- `argv[0]` searched on `$PATH` when it
-/// names no directory, exactly the rule `$EDITOR` relies on -- and wait for
-/// it to finish. Standard input, standard output and standard error are the
-/// process's own, untouched: not captured, not redirected, which is what
-/// lets an interactive program `argv` names (an editor, a pager) take over
-/// the real terminal a person is sitting at. The environment is this
-/// process's own too, in full.
-///
-/// `Err` means the process never started at all -- `argv[0]` was nowhere on
-/// `$PATH` and not a path of its own, most commonly, which arrives as
-/// `io.Error.NotFound`. A process that DID start is always `Ok`, whatever
-/// its `ExitStatus` turned out to be: a nonzero exit is not a reason to fail
-/// this call, only a fact for the caller's own `match` on the result.
-///
-/// `argv` must hold at least one element -- the command itself -- or this
-/// is `Err(io.Error.Other(22))` (EINVAL) without ever trying to start
-/// anything; a `str` with an embedded NUL fails the same way, for the
-/// reason `fs`'s path functions refuse one: there is no way to pass it to
-/// the operating system without silently truncating the argument.
+/** Run `argv` as a child process -- `argv[0]` searched on `$PATH` when it
+ * names no directory, exactly the rule `$EDITOR` relies on -- and wait for
+ * it to finish. Standard input, standard output and standard error are the
+ * process's own, untouched: not captured, not redirected, which is what
+ * lets an interactive program `argv` names (an editor, a pager) take over
+ * the real terminal a person is sitting at. The environment is this
+ * process's own too, in full.
+ *
+ * `Err` means the process never started at all -- `argv[0]` was nowhere on
+ * `$PATH` and not a path of its own, most commonly, which arrives as
+ * `io.Error.NotFound`. A process that DID start is always `Ok`, whatever
+ * its `ExitStatus` turned out to be: a nonzero exit is not a reason to fail
+ * this call, only a fact for the caller's own `match` on the result.
+ *
+ * `argv` must hold at least one element -- the command itself -- or this
+ * is `Err(io.Error.Other(22))` (EINVAL) without ever trying to start
+ * anything; a `str` with an embedded NUL fails the same way, for the
+ * reason `fs`'s path functions refuse one: there is no way to pass it to
+ * the operating system without silently truncating the argument. */
 pub Result<ExitStatus, io.Error> run(List<str> argv) {
     int pid = __proc_start(argv);
     if (pid < 0) {
@@ -264,8 +264,8 @@ pub Result<ExitStatus, io.Error> run(List<str> argv) {
     if (status < 0) {
         return Result<ExitStatus, io.Error>.Err(io.from_errno(-status));
     }
-    // sys.h's sys_proc_wait: 0..255 is an exit code, 256 and up is
-    // SYS_WAIT_SIGNAL_BASE (256) plus the signal that killed the process.
+    /* sys.h's sys_proc_wait: 0..255 is an exit code, 256 and up is
+     * SYS_WAIT_SIGNAL_BASE (256) plus the signal that killed the process. */
     if (status >= 256) {
         return Result<ExitStatus, io.Error>.Ok(ExitStatus.Signaled(status - 256));
     }

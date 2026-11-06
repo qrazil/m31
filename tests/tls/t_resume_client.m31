@@ -1,20 +1,20 @@
-// The session-resumption client under test, driven from `test_resume.sh`.
-//
-//   t_resume_client <port> <pin as 64 hex digits> <capacity> <step>...
-//
-// Each step is `label:pin:now:action`, run in order against 127.0.0.1:<port>
-// with one shared session cache of the given capacity:
-//   label    the host name the connection is made *for* (SNI, cache key); the
-//            socket always goes to the loopback port
-//   pin      `same` for the pin given above (or, if that starts with `ca:`,
-//            the CA file after it), `other` for a pin nothing matches
-//   now      the clock for this connection, epoch seconds
-//   action   `handshake` (connect, close), `get` (send a request, read to the
-//            server's close_notify), `clear` (empty the cache, no connection)
-// and an optional fifth field, `port`, that sends this step to another port.
-// Prints one line per step:
-//   step <n> <label> resumed=<true|false> cache=<sessions held>
-//   step <n> <label> error=<reason> cache=<sessions held>
+/* The session-resumption client under test, driven from `test_resume.sh`.
+ *
+ *   t_resume_client <port> <pin as 64 hex digits> <capacity> <step>...
+ *
+ * Each step is `label:pin:now:action`, run in order against 127.0.0.1:<port>
+ * with one shared session cache of the given capacity:
+ *   label    the host name the connection is made *for* (SNI, cache key); the
+ *            socket always goes to the loopback port
+ *   pin      `same` for the pin given above (or, if that starts with `ca:`,
+ *            the CA file after it), `other` for a pin nothing matches
+ *   now      the clock for this connection, epoch seconds
+ *   action   `handshake` (connect, close), `get` (send a request, read to the
+ *            server's close_notify), `clear` (empty the cache, no connection)
+ * and an optional fifth field, `port`, that sends this step to another port.
+ * Prints one line per step:
+ *   step <n> <label> resumed=<true|false> cache=<sessions held>
+ *   step <n> <label> error=<reason> cache=<sessions held> */
 
 import io;
 import net;

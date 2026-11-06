@@ -1,9 +1,9 @@
-// `lib/ssh/sshauth.m31`, self-checked against a scripted peer: the "server" is an
-// in-memory `ssh.Link` that replays canned messages and records what the
-// client sent, so every message parser, every branch of the exchange and
-// every `sshauth.Error` variant is exercised with nothing on the network.
-// (`test_auth_exec.sh` is the other half: the same exchange against a real
-// `sshd`.) A `trap` means a check failed.
+/* `lib/ssh/sshauth.m31`, self-checked against a scripted peer: the "server" is an
+ * in-memory `ssh.Link` that replays canned messages and records what the
+ * client sent, so every message parser, every branch of the exchange and
+ * every `sshauth.Error` variant is exercised with nothing on the network.
+ * (`test_auth_exec.sh` is the other half: the same exchange against a real
+ * `sshd`.) A `trap` means a check failed. */
 import io;
 import encoding.base64;
 import crypto.ed25519;
@@ -51,8 +51,8 @@ const int ERROR_BAD_MESSAGE = 3;
 const int ERROR_KEY_REJECTED = 4;
 const int ERROR_AUTH_FAILED = 5;
 
-// A scripted peer: `recv` hands out the canned messages in order and then
-// reports a disconnect; `send` records.
+/* A scripted peer: `recv` hands out the canned messages in order and then
+ * reports a disconnect; `send` records. */
 pub type Script {
     List<bytes> inbox;
     int next;
@@ -193,8 +193,8 @@ sshkey.PrivateKey key_from(bytes seed) {
     }
 }
 
-// The code of the error `authenticate` returns against `inbox`, or -1 if it
-// succeeded.
+/* The code of the error `authenticate` returns against `inbox`, or -1 if it
+ * succeeded. */
 int outcome(List<bytes> inbox, sshkey.PrivateKey key) {
     return run_auth(script(inbox), key);
 }
@@ -319,8 +319,8 @@ match (sshauth.authenticate(happy_script, "git", key)) {
 checks = check(checks, happy_script.sent.size() == 3, "the client sends exactly three messages");
 checks = check(checks, happy_script.sent[0] == want_service, "message 1 is the SERVICE_REQUEST");
 checks = check(checks, happy_script.sent[1] == want_query, "message 2 is the unsigned probe");
-// Message 3: the signed request, whose signature must verify over the
-// session id and the request body.
+/* Message 3: the signed request, whose signature must verify over the
+ * session id and the request body. */
 bytes third = happy_script.sent[2];
 checks = check(checks, third.size() > want_query.size() && third[0] == 50, "message 3 is a USERAUTH_REQUEST");
 ssh.Field f_user = must_string(third, 1);

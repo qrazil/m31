@@ -1,68 +1,68 @@
-// SSH host-key handling (`docs/ssh-decision.md` §1 left "where the expected
-// host key comes from" to the caller): an OpenSSH `known_hosts` reader that
-// answers one question -- which `ssh-ed25519` keys does this file trust for
-// `host:port` -- and hands the answer to `ssh.connect_any`.
-//
-// API
+/* SSH host-key handling (`docs/ssh-decision.md` §1 left "where the expected
+ * host key comes from" to the caller): an OpenSSH `known_hosts` reader that
+ * answers one question -- which `ssh-ed25519` keys does this file trust for
+ * `host:port` -- and hands the answer to `ssh.connect_any`.
+ *
+ * API */
 // ---
-//   sshhosts.parse(text)        -> Result<KnownHosts, Error>
-//   sshhosts.load(path)         -> Result<KnownHosts, Error>
-//   kh.keys_for(host, port)     -> Result<List<bytes>, Error>   32-octet keys
-//   kh.is_revoked(host, port, key)              -> bool          ssh.HostKey
-//   sshhosts.add(path, host, port, key, hashed)  -> Result<bool, Error>
-//   sshhosts.plain_line(host, port, key)         -> str
-//   sshhosts.hashed_line(host, port, key, salt)  -> str
-//
-// **No trust on first use.** A host with no entry is `Error.UnknownHost`;
-// there is no "add it and carry on" path, and an empty result is never
-// returned as success (`ssh.connect_any` also refuses an empty list, so a
-// caller who ignores this module's error still cannot connect).
-//
-// **Asking a person is the caller's job, and `add` is what it does after a
-// yes.** The flow OpenSSH calls "the authenticity of host ... can't be
-// established": on `UnknownHost`, `ssh.presented_host_key(host, port)` says
-// which key the server offers (`key.fingerprint()` is the `SHA256:...` string
-// to show); if the person agrees, `add` appends it and the next connection
-// succeeds -- through the same refusing check as any other. `add` writes
-// whatever it is given: it asks nobody, and it does not look for an existing
-// entry. So a caller must not call it
-//   - for a host whose key *changed* (`ssh.Error.HostKeyMismatch`): that is a
-//     refusal, which OpenSSH too leaves to the person to resolve by editing
-//     the file; nor
-//   - before checking `kh.is_revoked(host, port, key)`: a lone `@revoked`
-//     line makes `keys_for` answer `UnknownHost`, not `Revoked`, so a prompt
-//     would otherwise be shown for a key that can never be trusted.
-//
-// `add` writes plain `host key` lines by default (`[host]:port` for any port
-// but 22, lower-cased -- exactly what `keys_for` matches) and, with
-// `hashed: true`, OpenSSH's `HashKnownHosts` form (`|1|salt|HMAC-SHA1`, a
-// fresh random 20-octet salt each time). Which to use is the caller's call;
-// this module never reads `~/.ssh/config`.
-//
+/*   sshhosts.parse(text)        -> Result<KnownHosts, Error>
+ *   sshhosts.load(path)         -> Result<KnownHosts, Error>
+ *   kh.keys_for(host, port)     -> Result<List<bytes>, Error>   32-octet keys
+ *   kh.is_revoked(host, port, key)              -> bool          ssh.HostKey
+ *   sshhosts.add(path, host, port, key, hashed)  -> Result<bool, Error>
+ *   sshhosts.plain_line(host, port, key)         -> str
+ *   sshhosts.hashed_line(host, port, key, salt)  -> str
+ *
+ * **No trust on first use.** A host with no entry is `Error.UnknownHost`;
+ * there is no "add it and carry on" path, and an empty result is never
+ * returned as success (`ssh.connect_any` also refuses an empty list, so a
+ * caller who ignores this module's error still cannot connect).
+ *
+ * **Asking a person is the caller's job, and `add` is what it does after a
+ * yes.** The flow OpenSSH calls "the authenticity of host ... can't be
+ * established": on `UnknownHost`, `ssh.presented_host_key(host, port)` says
+ * which key the server offers (`key.fingerprint()` is the `SHA256:...` string
+ * to show); if the person agrees, `add` appends it and the next connection
+ * succeeds -- through the same refusing check as any other. `add` writes
+ * whatever it is given: it asks nobody, and it does not look for an existing
+ * entry. So a caller must not call it
+ *   - for a host whose key *changed* (`ssh.Error.HostKeyMismatch`): that is a
+ *     refusal, which OpenSSH too leaves to the person to resolve by editing
+ *     the file; nor
+ *   - before checking `kh.is_revoked(host, port, key)`: a lone `@revoked`
+ *     line makes `keys_for` answer `UnknownHost`, not `Revoked`, so a prompt
+ *     would otherwise be shown for a key that can never be trusted.
+ *
+ * `add` writes plain `host key` lines by default (`[host]:port` for any port
+ * but 22, lower-cased -- exactly what `keys_for` matches) and, with
+ * `hashed: true`, OpenSSH's `HashKnownHosts` form (`|1|salt|HMAC-SHA1`, a
+ * fresh random 20-octet salt each time). Which to use is the caller's call;
+ * this module never reads `~/.ssh/config`.
+ * */
 // --- the format (sshd(8), "SSH_KNOWN_HOSTS FILE FORMAT") --------------------
-//
-//   [@marker] hostnames keytype base64-key [comment]
-//
-// `hostnames` is a comma-separated list of patterns: a plain host name
-// (`example.com`) for port 22, `[host]:port` for any other port, `*` and `?`
-// wildcards, a leading `!` to negate a pattern -- or a single hashed entry
-// `|1|base64(salt)|base64(HMAC-SHA1(salt, name))` where `name` is spelled
-// the same way (`host`, or `[host]:port`), which is what `ssh-keygen -H` and
-// `HashKnownHosts yes` write. Any other pattern that starts with `|` (a
-// different hash scheme, a hashed entry in a list) is a malformed line. Host names are compared case-insensitively.
-//
-// `@revoked` lines name keys that must never be accepted for a matching
-// host: a key listed there is removed from the answer, and if that leaves
-// nothing, the answer is `Error.Revoked` rather than `UnknownHost`. Lines
-// marked `@cert-authority` describe certificate authorities, which this
-// client does not support (it never negotiates a certificate algorithm), so
-// they are skipped. Lines for key types other than `ssh-ed25519` are valid
-// but useless to this client (it proposes only that host-key algorithm), so
-// they are skipped too. A line that is not even well-formed is an error, not
-// something to step over: a silently ignored `@revoked` line would turn into
-// trust.
-//
-// Never reads or writes `~/.ssh`: the caller names the file.
+/*
+ *   [@marker] hostnames keytype base64-key [comment]
+ *
+ * `hostnames` is a comma-separated list of patterns: a plain host name
+ * (`example.com`) for port 22, `[host]:port` for any other port, `*` and `?`
+ * wildcards, a leading `!` to negate a pattern -- or a single hashed entry
+ * `|1|base64(salt)|base64(HMAC-SHA1(salt, name))` where `name` is spelled
+ * the same way (`host`, or `[host]:port`), which is what `ssh-keygen -H` and
+ * `HashKnownHosts yes` write. Any other pattern that starts with `|` (a
+ * different hash scheme, a hashed entry in a list) is a malformed line. Host names are compared case-insensitively.
+ *
+ * `@revoked` lines name keys that must never be accepted for a matching
+ * host: a key listed there is removed from the answer, and if that leaves
+ * nothing, the answer is `Error.Revoked` rather than `UnknownHost`. Lines
+ * marked `@cert-authority` describe certificate authorities, which this
+ * client does not support (it never negotiates a certificate algorithm), so
+ * they are skipped. Lines for key types other than `ssh-ed25519` are valid
+ * but useless to this client (it proposes only that host-key algorithm), so
+ * they are skipped too. A line that is not even well-formed is an error, not
+ * something to step over: a silently ignored `@revoked` line would turn into
+ * trust.
+ *
+ * Never reads or writes `~/.ssh`: the caller names the file. */
 
 import io;
 import encoding.base64;
@@ -75,11 +75,11 @@ import ssh;
 pub enum Error {
     /// The file could not be read.
     Io;
-    /// A line is not `[marker] hostnames keytype key [comment]`, or a hashed
-    /// host entry is not `|1|salt|hash` with a 20-octet hash.
+    /** A line is not `[marker] hostnames keytype key [comment]`, or a hashed
+     * host entry is not `|1|salt|hash` with a 20-octet hash. */
     MalformedLine;
-    /// An `ssh-ed25519` line whose key does not decode to a 32-octet
-    /// Ed25519 public key.
+    /** An `ssh-ed25519` line whose key does not decode to a 32-octet
+     * Ed25519 public key. */
     BadKey;
     /// No entry for this host and port.
     UnknownHost;
@@ -87,10 +87,10 @@ pub enum Error {
     Revoked;
     /// `add` could not create the file's directory or append to the file.
     Write;
-    /// The file lists this host, but only with keys this client cannot
-    /// check (another curve, `sk-*`, `ssh-dss`, a short RSA key, a
-    /// certificate authority): the host is known, so it must not be treated
-    /// as new and have another key recorded for it.
+    /** The file lists this host, but only with keys this client cannot
+     * check (another curve, `sk-*`, `ssh-dss`, a short RSA key, a
+     * certificate authority): the host is known, so it must not be treated
+     * as new and have another key recorded for it. */
     Unverifiable;
 }
 
@@ -138,8 +138,8 @@ type Entry {
 /// The ed25519 entries of one `known_hosts` file, in file order.
 pub type KnownHosts {
     List<Entry> entries;
-    /// The host patterns of entries that were skipped as unusable (see
-    /// `Error.Unverifiable`), `@cert-authority` lines included.
+    /** The host patterns of entries that were skipped as unusable (see
+     * `Error.Unverifiable`), `@cert-authority` lines included. */
     List<List<str>> unusable;
 }
 
@@ -154,25 +154,25 @@ pub bool KnownHosts.has_unusable(str host, int port) {
     return false;
 }
 
-/// The 32-octet `ssh-ed25519` keys this file trusts for `host` on `port`,
-/// minus any `@revoked` ones. `Err(UnknownHost)` if there are none because
-/// the host is not listed, `Err(Revoked)` if there are none because every
-/// listed key is revoked. (`blobs_for` answers for every key type.)
+/** The 32-octet `ssh-ed25519` keys this file trusts for `host` on `port`,
+ * minus any `@revoked` ones. `Err(UnknownHost)` if there are none because
+ * the host is not listed, `Err(Revoked)` if there are none because every
+ * listed key is revoked. (`blobs_for` answers for every key type.) */
 pub Result<List<bytes>, Error> KnownHosts.keys_for(str host, int port) {
     return select(host, port, false);
 }
 
-/// The key blobs (`string type, ...`, what `ssh.HostKey.blob` holds) of every
-/// type this file trusts for `host` on `port`, minus revoked ones; same
-/// errors as `keys_for`. A server's key is trusted iff its blob is in here.
+/** The key blobs (`string type, ...`, what `ssh.HostKey.blob` holds) of every
+ * type this file trusts for `host` on `port`, minus revoked ones; same
+ * errors as `keys_for`. A server's key is trusted iff its blob is in here. */
 pub Result<List<bytes>, Error> KnownHosts.blobs_for(str host, int port) {
     return select(host, port, true);
 }
 
-/// The host-key algorithm names (`ssh-ed25519`, `ecdsa-sha2-nistp256`,
-/// `ssh-rsa`) this file has an unrevoked entry for, for `host` on `port`,
-/// in file order without repeats: what a client puts first in its offer so
-/// the server presents a key the file can vouch for.
+/** The host-key algorithm names (`ssh-ed25519`, `ecdsa-sha2-nistp256`,
+ * `ssh-rsa`) this file has an unrevoked entry for, for `host` on `port`,
+ * in file order without repeats: what a client puts first in its offer so
+ * the server presents a key the file can vouch for. */
 pub List<str> KnownHosts.algorithms_for(str host, int port) {
     str id = host_id(host, port);
     List<str> names = [];
@@ -229,9 +229,9 @@ Result<List<bytes>, Error> KnownHosts.select(str host, int port, bool is_blob) {
     return Result<List<bytes>, Error>.Ok(usable);
 }
 
-/// Whether this file marks `key` `@revoked` for `host` on `port`. Ask this
-/// before offering a person a "trust this key?" prompt: `keys_for` answers
-/// `Revoked` only when a revoked key is also listed as trusted.
+/** Whether this file marks `key` `@revoked` for `host` on `port`. Ask this
+ * before offering a person a "trust this key?" prompt: `keys_for` answers
+ * `Revoked` only when a revoked key is also listed as trusted. */
 pub bool KnownHosts.is_revoked(str host, int port, ssh.HostKey key) {
     str id = host_id(host, port);
     for (Entry entry in entries) {
@@ -242,10 +242,10 @@ pub bool KnownHosts.is_revoked(str host, int port, ssh.HostKey key) {
     return false;
 }
 
-// HMAC-SHA-1 (RFC 2104). Not in `lib/crypto/hmac.m31` (which has only the SHA-2
-// family) and needed here for exactly one thing: OpenSSH hashes host names
-// with it. It is a name-matching aid, not an authenticator -- the host key's
-// signature, not this, is what authenticates a server.
+/* HMAC-SHA-1 (RFC 2104). Not in `lib/crypto/hmac.m31` (which has only the SHA-2
+ * family) and needed here for exactly one thing: OpenSSH hashes host names
+ * with it. It is a name-matching aid, not an authenticator -- the host key's
+ * signature, not this, is what authenticates a server. */
 bytes hmac_sha1(bytes key, bytes message) {
     bytes block_key = key;
     if (key.size() > SHA1_BLOCK) {
@@ -294,8 +294,8 @@ bool is_glob_match(str pattern, int pattern_index, str text, int text_index) {
     return text_index == text.size();
 }
 
-// How OpenSSH spells the name it matches and hashes: the bare host for port
-// 22, `[host]:port` otherwise.
+/* How OpenSSH spells the name it matches and hashes: the bare host for port
+ * 22, `[host]:port` otherwise. */
 str host_id(str host, int port) {
     if (port == 22) {
         return host.to_lower();
@@ -334,8 +334,8 @@ Option<List<bytes>> parse_hashed(str pattern) {
     return Option<List<bytes>>.Some(out);
 }
 
-// Whether the comma-separated patterns of one entry cover `id`: some
-// non-negated pattern matches and no negated one does.
+/* Whether the comma-separated patterns of one entry cover `id`: some
+ * non-negated pattern matches and no negated one does. */
 bool is_entry_match(List<str> patterns, str id) {
     bool is_matched = false;
     for (str pattern in patterns) {
@@ -378,9 +378,9 @@ List<str> fields_of(str line) {
     return out;
 }
 
-/// Parses a whole `known_hosts` file. See the module header for what is
-/// skipped (comments, blank lines, other key types, `@cert-authority`) and
-/// what is an error.
+/** Parses a whole `known_hosts` file. See the module header for what is
+ * skipped (comments, blank lines, other key types, `@cert-authority`) and
+ * what is an error. */
 pub Result<KnownHosts, Error> parse(str text) {
     List<Entry> entries = [];
     List<List<str>> unusable = [];
@@ -431,10 +431,10 @@ pub Result<KnownHosts, Error> parse(str text) {
                 entries.push(Entry(patterns, parsed.key, blob, type_name, is_revoked));
             }
             case Err(ssh.Error error): {
-                // A well-formed key this client cannot use (an RSA modulus
-                // under 2048 bits, another curve) is skipped, like a key
-                // type it does not implement; a malformed ssh-ed25519 line
-                // and every other failure is an error, never a skip.
+                /* A well-formed key this client cannot use (an RSA modulus
+                 * under 2048 bits, another curve) is skipped, like a key
+                 * type it does not implement; a malformed ssh-ed25519 line
+                 * and every other failure is an error, never a skip. */
                 if (!error.is_unsupported_key() || type_name == KEY_TYPE) {
                     return Result<KnownHosts, Error>.Err(Error.BadKey);
                 }
@@ -475,15 +475,15 @@ pub Result<KnownHosts, Error> load(str path) {
     }
 }
 
-/// The plain `known_hosts` line for `key` on `host:port`, without the
-/// newline: `host ssh-ed25519 base64` (`[host]:port` unless the port is 22).
+/** The plain `known_hosts` line for `key` on `host:port`, without the
+ * newline: `host ssh-ed25519 base64` (`[host]:port` unless the port is 22). */
 pub str plain_line(str host, int port, ssh.HostKey key) {
     return host_id(host, port) + " " + key.algorithm + " " + key.blob_base64();
 }
 
-/// The same line in OpenSSH's hashed form (`ssh-keygen -H`,
-/// `HashKnownHosts yes`): the name becomes `|1|base64(salt)|base64(HMAC-SHA1
-/// (salt, name))`. OpenSSH uses a random 20-octet salt; `add` draws one.
+/** The same line in OpenSSH's hashed form (`ssh-keygen -H`,
+ * `HashKnownHosts yes`): the name becomes `|1|base64(salt)|base64(HMAC-SHA1
+ * (salt, name))`. OpenSSH uses a random 20-octet salt; `add` draws one. */
 pub str hashed_line(str host, int port, ssh.HostKey key, bytes salt) {
     bytes mac = hmac_sha1(salt, host_id(host, port).to_bytes());
     return HASH_PREFIX + base64.encode(salt) + "|" + base64.encode(mac) + " " + key.algorithm + " " + key.blob_base64();
@@ -507,12 +507,12 @@ pub type Removal {
     pub int removed;
 }
 
-/// `known_hosts` text with every entry for `host`:`port` removed (what
-/// `ssh-keygen -R` does): a line whose host-pattern list names it, plain,
-/// `[host]:port` or hashed, goes whole; a line that does not match, a
-/// comment and a blank line are kept byte for byte. Wildcard patterns are
-/// matched as OpenSSH matches them, so `-R host` removes a `*.example.com`
-/// entry too -- nothing is removed that `keys_for` would not have used.
+/** `known_hosts` text with every entry for `host`:`port` removed (what
+ * `ssh-keygen -R` does): a line whose host-pattern list names it, plain,
+ * `[host]:port` or hashed, goes whole; a line that does not match, a
+ * comment and a blank line are kept byte for byte. Wildcard patterns are
+ * matched as OpenSSH matches them, so `-R host` removes a `*.example.com`
+ * entry too -- nothing is removed that `keys_for` would not have used. */
 pub Removal remove(str text, str host, int port) {
     str id = host_id(host, port);
     List<str> kept = [];
@@ -526,9 +526,9 @@ pub Removal remove(str text, str host, int port) {
         List<str> fields = fields_of(line);
         int offset = 0;
         if (fields[0].starts_with("@")) {
-            // `@revoked` and `@cert-authority` lines are never removed, as with
-            // ssh-keygen -R: dropping a revocation would let the key be
-            // trusted again.
+            /* `@revoked` and `@cert-authority` lines are never removed, as with
+             * ssh-keygen -R: dropping a revocation would let the key be
+             * trusted again. */
             kept.push(raw);
             continue;
         }
@@ -545,8 +545,8 @@ pub Removal remove(str text, str host, int port) {
     return Removal(kept.join("\n"), removed);
 }
 
-/// The 1-based line numbers of the entries that name `host`:`port` (what
-/// `ssh-keygen -F` finds): plain, `[host]:port`, hashed or a wildcard pattern.
+/** The 1-based line numbers of the entries that name `host`:`port` (what
+ * `ssh-keygen -F` finds): plain, `[host]:port`, hashed or a wildcard pattern. */
 pub List<int> matching_lines(str text, str host, int port) {
     str id = host_id(host, port);
     List<int> found = [];
@@ -572,11 +572,11 @@ pub List<int> matching_lines(str text, str host, int port) {
     return found;
 }
 
-/// `known_hosts` text with every plain entry rewritten in the hashed form
-/// (`ssh-keygen -H`): `removed` is how many lines were hashed. A line that
-/// is already hashed, names a wildcard or negated pattern, or is malformed
-/// is kept byte for byte; a line naming several hosts becomes one hashed
-/// line per host; markers (`@revoked`, `@cert-authority`) are kept.
+/** `known_hosts` text with every plain entry rewritten in the hashed form
+ * (`ssh-keygen -H`): `removed` is how many lines were hashed. A line that
+ * is already hashed, names a wildcard or negated pattern, or is malformed
+ * is kept byte for byte; a line naming several hosts becomes one hashed
+ * line per host; markers (`@revoked`, `@cert-authority`) are kept. */
 pub Removal hash_entries(str text) {
     List<str> out = [];
     int hashed = 0;
@@ -619,11 +619,11 @@ pub Removal hash_entries(str text) {
     return Removal(out.join("\n"), hashed);
 }
 
-/// Appends `key` as the key for `host:port` to the `known_hosts` file at
-/// `path`: plain, or with `is_hashed` in OpenSSH's `HashKnownHosts` form. The
-/// file (and its directory, with the process umask's permissions) is created
-/// if missing; a last line lacking its newline is not run into. See the
-/// module header for when to call this -- never for a changed key.
+/** Appends `key` as the key for `host:port` to the `known_hosts` file at
+ * `path`: plain, or with `is_hashed` in OpenSSH's `HashKnownHosts` form. The
+ * file (and its directory, with the process umask's permissions) is created
+ * if missing; a last line lacking its newline is not run into. See the
+ * module header for when to call this -- never for a changed key. */
 pub Result<bool, Error> add(str path, str host, int port, ssh.HostKey key, bool is_hashed) {
     str directory = directory_of(path);
     if (directory != "" && !fs.is_present(directory)) {

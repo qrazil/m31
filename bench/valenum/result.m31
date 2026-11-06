@@ -1,8 +1,8 @@
-// `Result<int, Error>` returned from a function called 50 million times,
-// with `Error` a value enum of its own -- the shape `apps/git/zlib.m31`'s bit
-// reader wanted and could not afford.
-//
-// The A/B partner is `result-boxed.m31`.
+/* `Result<int, Error>` returned from a function called 50 million times,
+ * with `Error` a value enum of its own -- the shape `apps/git/zlib.m31`'s bit
+ * reader wanted and could not afford.
+ *
+ * The A/B partner is `result-boxed.m31`. */
 
 enum Error {
     Truncated(int);

@@ -1,7 +1,7 @@
-// `result.m31`, with one line added: a `List<Error>` the program never
-// touches, which takes `Error` back to being a heap object -- and with it
-// `Result<int, Error>`, whose payload would otherwise have to hold an object
-// in a machine-word slot. Two allocations per call instead of none.
+/* `result.m31`, with one line added: a `List<Error>` the program never
+ * touches, which takes `Error` back to being a heap object -- and with it
+ * `Result<int, Error>`, whose payload would otherwise have to hold an object
+ * in a machine-word slot. Two allocations per call instead of none. */
 
 enum Error {
     Truncated(int);

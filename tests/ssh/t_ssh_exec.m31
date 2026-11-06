@@ -1,17 +1,17 @@
-// `lib/ssh/sshexec.m31`, self-checked against in-memory peers (no network):
-//
-//  * a *canned* peer replays fixed messages -- the layout of each message,
-//    every parser on every proper prefix, one fixture per `sshexec.Error`
-//    variant, stdout/stderr separation, exit status and signal, the replies
-//    to requests this client does not implement;
-//  * a *reactive* peer models a real server's side of the flow control (it
-//    honours the client's window and maximum packet size, grants and tops up
-//    its own window, and records any violation) as `wc -c`, `cat` and a
-//    producer -- so multi-megabyte transfers and a tiny peer window are
-//    checked without a network.
-//
-// `test_auth_exec.sh` runs the same operations against a real `sshd`. A
-// `trap` means a check failed.
+/* `lib/ssh/sshexec.m31`, self-checked against in-memory peers (no network):
+ *
+ *  * a *canned* peer replays fixed messages -- the layout of each message,
+ *    every parser on every proper prefix, one fixture per `sshexec.Error`
+ *    variant, stdout/stderr separation, exit status and signal, the replies
+ *    to requests this client does not implement;
+ *  * a *reactive* peer models a real server's side of the flow control (it
+ *    honours the client's window and maximum packet size, grants and tops up
+ *    its own window, and records any violation) as `wc -c`, `cat` and a
+ *    producer -- so multi-megabyte transfers and a tiny peer window are
+ *    checked without a network.
+ *
+ * `test_auth_exec.sh` runs the same operations against a real `sshd`. A
+ * `trap` means a check failed. */
 import ssh;
 import ssh.sshexec;
 
@@ -362,8 +362,8 @@ int pattern(int offset) {
 
 // --- helpers --------------------------------------------------------------------
 
-// An open channel on a canned peer: the confirmation, the exec's SUCCESS,
-// then `rest`.
+/* An open channel on a canned peer: the confirmation, the exec's SUCCESS,
+ * then `rest`. */
 Peer ready(int window, int max_packet, List<bytes> rest) {
     List<bytes> out = [message_confirm(window, max_packet), message_simple(sshexec.SSH_MESSAGE_CHANNEL_SUCCESS, 0)];
     for (bytes message in rest) {
@@ -394,8 +394,8 @@ int exec_code(Peer scripted_peer) {
     }
 }
 
-// The code of the first error a channel on `rest` hits while reading stdout
-// to the end and waiting for the close, or -1.
+/* The code of the first error a channel on `rest` hits while reading stdout
+ * to the end and waiting for the close, or -1. */
 int read_code(List<bytes> rest) {
     Peer scripted_peer = ready(1000, 1000, rest);
     sshexec.Channel channel = must_exec(scripted_peer, "cmd");

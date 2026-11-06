@@ -1,5 +1,5 @@
-// `ssh.sanitize_text`: controls and invisible characters are dropped, the
-// rest kept, in time linear in the length. Pure; a `trap` is a failure.
+/* `ssh.sanitize_text`: controls and invisible characters are dropped, the
+ * rest kept, in time linear in the length. Pure; a `trap` is a failure. */
 import ssh;
 import timer;
 import crypto.ed25519;
@@ -27,8 +27,8 @@ int started = timer.monotonic_ns();
 str cleaned = ssh.sanitize_text(big);
 int elapsed_ms = (timer.monotonic_ns() - started) / 1000000;
 checks = check(checks, cleaned.size() < big.size() && elapsed_ms < 2000, "400 KB is cleaned in linear time (took " + elapsed_ms.to_str() + " ms)");
-// Ed25519: a public key of small order "verifies" a forged signature (R =
-// identity, S = 0) in a cofactorless check; it must be refused.
+/* Ed25519: a public key of small order "verifies" a forged signature (R =
+ * identity, S = 0) in a cofactorless check; it must be refused. */
 bytes identity_key = [];
 bytes forged = [];
 for (int index in 0 .. 32) {

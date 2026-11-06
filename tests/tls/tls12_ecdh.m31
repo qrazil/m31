@@ -1,10 +1,10 @@
-// P-256 ECDH (`ecdsa.ephemeral_public`, `ecdsa.shared_secret`) against
-// `tls12_ecdh_oracle.py`, which derives the same keys and exchanges them with
-// the `cryptography` package (OpenSSL). The last section is the negative
-// tests: scalars outside [1, n-1] and peer points that are not on the curve
-// must be refused, never multiplied.
-//
-//   ./build.sh tests/tls/tls12_ecdh.m31 -o tls12_ecdh && ./tls12_ecdh
+/* P-256 ECDH (`ecdsa.ephemeral_public`, `ecdsa.shared_secret`) against
+ * `tls12_ecdh_oracle.py`, which derives the same keys and exchanges them with
+ * the `cryptography` package (OpenSSL). The last section is the negative
+ * tests: scalars outside [1, n-1] and peer points that are not on the curve
+ * must be refused, never multiplied.
+ *
+ *   ./build.sh tests/tls/tls12_ecdh.m31 -o tls12_ecdh && ./tls12_ecdh */
 
 import crypto.ecdsa;
 import encoding.hexcodec;

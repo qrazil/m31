@@ -1,59 +1,59 @@
-// SSH Phase 4 (`docs/ssh-decision.md`): RFC 4254 -- one `session` channel
-// running one `exec` request, over an authenticated transport.
-//
-// API
+/* SSH Phase 4 (`docs/ssh-decision.md`): RFC 4254 -- one `session` channel
+ * running one `exec` request, over an authenticated transport.
+ *
+ * API */
 // ---
-//   sshexec.exec(link, command)  -> Result<Channel, Error>
-//
-//   ch.write(data)       -> Result<int, Error>     to the command's stdin
-//   ch.close_write()     -> Result<void, Error>    stdin EOF
-//   ch.read(max)         -> Result<bytes, Error>   stdout; empty == EOF
-//   ch.read_err(max)     -> Result<bytes, Error>   stderr; empty == EOF
-//   ch.read_all()        -> Result<bytes, Error>   stdout to EOF
-//   ch.read_all_err()    -> Result<bytes, Error>   stderr to EOF
-//   ch.wait()            -> Result<Exit, Error>    until the server closes
-//   ch.exit()            -> Exit                   what is known so far
-//   ch.close()           -> Result<void, Error>    close and drain
-//
-// `link` is an `ssh.Link` (an `ssh.Transport` after `sshauth.authenticate`).
-// That is the shape a git client wants: write the request to stdin, read the
-// response from stdout, see `git-upload-pack`'s diagnostics on stderr, and
-// get the exit status at the end. One channel at a time per link: the
-// connection layer is single-threaded and a second channel would need a
-// multiplexer; opening a second `exec` after the first is fully closed is
-// fine (the first channel's id is then free again).
-//
+/*   sshexec.exec(link, command)  -> Result<Channel, Error>
+ *
+ *   ch.write(data)       -> Result<int, Error>     to the command's stdin
+ *   ch.close_write()     -> Result<void, Error>    stdin EOF
+ *   ch.read(max)         -> Result<bytes, Error>   stdout; empty == EOF
+ *   ch.read_err(max)     -> Result<bytes, Error>   stderr; empty == EOF
+ *   ch.read_all()        -> Result<bytes, Error>   stdout to EOF
+ *   ch.read_all_err()    -> Result<bytes, Error>   stderr to EOF
+ *   ch.wait()            -> Result<Exit, Error>    until the server closes
+ *   ch.exit()            -> Exit                   what is known so far
+ *   ch.close()           -> Result<void, Error>    close and drain
+ *
+ * `link` is an `ssh.Link` (an `ssh.Transport` after `sshauth.authenticate`).
+ * That is the shape a git client wants: write the request to stdin, read the
+ * response from stdout, see `git-upload-pack`'s diagnostics on stderr, and
+ * get the exit status at the end. One channel at a time per link: the
+ * connection layer is single-threaded and a second channel would need a
+ * multiplexer; opening a second `exec` after the first is fully closed is
+ * fine (the first channel's id is then free again).
+ * */
 // --- flow control (RFC 4254 §5.2) -------------------------------------------
-//
-// *Sending.* The server grants a window at open and tops it up with
-// `WINDOW_ADJUST`. `write` sends no more than the current window allows, in
-// packets of at most min(32768, the server's maximum packet size), and when
-// the window is empty it reads messages -- handling data, `WINDOW_ADJUST`,
-// `EOF`, `CLOSE` as they come -- until the window opens or the channel
-// closes. The data it reads meanwhile is buffered for `read`, so a command
-// that echoes while the client is still writing (`cat`) cannot deadlock the
-// two directions against each other.
-//
-// *Receiving.* This client advertises a 2 MiB window and 32768-byte packets.
-// It tops the window up as soon as it falls to half, **on receipt rather
-// than on `read`**: there is no backpressure, so a server writing faster
-// than the caller reads makes the buffers grow. Because the window is topped
-// up to 2 MiB whenever it falls to 1 MiB and one packet is at most 32768, a
-// well-behaved server can never run out of window mid-packet; a packet larger
-// than 32768 is the one violation left to detect, and gets
-// `Error.DataTooLarge` rather than a silent overrun.
-// Stderr is kept apart from stdout (`EXTENDED_DATA` type 1) and buffered the
-// same way; a caller that never reads stderr still sees it drained from the
-// window, so it cannot stall the command.
-//
+/*
+ * *Sending.* The server grants a window at open and tops it up with
+ * `WINDOW_ADJUST`. `write` sends no more than the current window allows, in
+ * packets of at most min(32768, the server's maximum packet size), and when
+ * the window is empty it reads messages -- handling data, `WINDOW_ADJUST`,
+ * `EOF`, `CLOSE` as they come -- until the window opens or the channel
+ * closes. The data it reads meanwhile is buffered for `read`, so a command
+ * that echoes while the client is still writing (`cat`) cannot deadlock the
+ * two directions against each other.
+ *
+ * *Receiving.* This client advertises a 2 MiB window and 32768-byte packets.
+ * It tops the window up as soon as it falls to half, **on receipt rather
+ * than on `read`**: there is no backpressure, so a server writing faster
+ * than the caller reads makes the buffers grow. Because the window is topped
+ * up to 2 MiB whenever it falls to 1 MiB and one packet is at most 32768, a
+ * well-behaved server can never run out of window mid-packet; a packet larger
+ * than 32768 is the one violation left to detect, and gets
+ * `Error.DataTooLarge` rather than a silent overrun.
+ * Stderr is kept apart from stdout (`EXTENDED_DATA` type 1) and buffered the
+ * same way; a caller that never reads stderr still sees it drained from the
+ * window, so it cannot stall the command.
+ * */
 // --- everything else the server may say -------------------------------------
-//
-// `exit-status` and `exit-signal` become `Exit`. `GLOBAL_REQUEST`s (OpenSSH
-// sends `hostkeys-00@openssh.com` after login) are answered `REQUEST_FAILURE`
-// when they want a reply and are otherwise ignored; unknown `CHANNEL_REQUEST`s
-// likewise get `CHANNEL_FAILURE` when they want one. Anything else is
-// `Error.UnexpectedMessage`; a message for a channel number this client never
-// opened is `Error.BadChannel`.
+/*
+ * `exit-status` and `exit-signal` become `Exit`. `GLOBAL_REQUEST`s (OpenSSH
+ * sends `hostkeys-00@openssh.com` after login) are answered `REQUEST_FAILURE`
+ * when they want a reply and are otherwise ignored; unknown `CHANNEL_REQUEST`s
+ * likewise get `CHANNEL_FAILURE` when they want one. Anything else is
+ * `Error.UnexpectedMessage`; a message for a channel number this client never
+ * opened is `Error.BadChannel`. */
 
 import ssh;
 
@@ -65,24 +65,24 @@ pub enum Error {
     Truncated;
     /// A message type that cannot appear at this step.
     UnexpectedMessage;
-    /// A message with the right type but impossible content: a window that
-    /// would pass 2^32-1, an unknown extended-data type, a zero packet size,
-    /// text that is not UTF-8.
+    /** A message with the right type but impossible content: a window that
+     * would pass 2^32-1, an unknown extended-data type, a zero packet size,
+     * text that is not UTF-8. */
     BadMessage;
     /// A channel message addressed to a channel this client does not have.
     BadChannel;
-    /// The server refused to open the session channel (carries the RFC 4254
-    /// §5.1 reason code).
+    /** The server refused to open the session channel (carries the RFC 4254
+     * §5.1 reason code). */
     OpenRefused(int);
-    /// The server refused the `exec` request (command not allowed, forced
-    /// command, no shell).
+    /** The server refused the `exec` request (command not allowed, forced
+     * command, no shell). */
     ExecRefused;
     /// The server refused to allocate a pseudo-terminal.
     PtyRefused;
     /// The server sent one packet bigger than the maximum we advertised.
     DataTooLarge;
-    /// The channel cannot take this operation: stdin was already closed, or
-    /// the server has closed the channel.
+    /** The channel cannot take this operation: stdin was already closed, or
+     * the server has closed the channel. */
     Closed;
     /// A caller argument is out of range (`read(0)`).
     BadArgument;
@@ -128,13 +128,13 @@ pub str Error.to_str() {
 
 /// How the remote command ended.
 pub enum Exit {
-    /// No `exit-status`/`exit-signal` has arrived (yet, or ever: the server
-    /// may close without one).
+    /** No `exit-status`/`exit-signal` has arrived (yet, or ever: the server
+     * may close without one). */
     Unknown;
     /// The command exited with this status.
     Status(int);
-    /// The command was killed by this signal (name without the `SIG` prefix,
-    /// e.g. `KILL`).
+    /** The command was killed by this signal (name without the `SIG` prefix,
+     * e.g. `KILL`). */
     Signal(str);
 }
 
@@ -212,9 +212,9 @@ pub bytes build_exec(int remote_id, str command) {
     return out;
 }
 
-/// `CHANNEL_REQUEST "pty-req"` with `want_reply` set (RFC 4254 §6.2).
-/// `modes` is the already-encoded terminal-modes string (RFC 4254 §8:
-/// opcode/uint32 pairs ending in TTY_OP_END); pixel sizes are sent as 0.
+/** `CHANNEL_REQUEST "pty-req"` with `want_reply` set (RFC 4254 §6.2).
+ * `modes` is the already-encoded terminal-modes string (RFC 4254 §8:
+ * opcode/uint32 pairs ending in TTY_OP_END); pixel sizes are sent as 0. */
 pub bytes build_pty_request(int remote_id, str term, int columns, int rows, bytes modes) {
     bytes out = [];
     out.push(SSH_MESSAGE_CHANNEL_REQUEST);
@@ -265,8 +265,8 @@ pub bytes build_window_change(int remote_id, int columns, int rows) {
     return out;
 }
 
-/// `GLOBAL_REQUEST "keepalive@openssh.com"` with `want_reply` set: any
-/// answer, success or failure, proves the peer is alive.
+/** `GLOBAL_REQUEST "keepalive@openssh.com"` with `want_reply` set: any
+ * answer, success or failure, proves the peer is alive. */
 pub bytes build_keepalive() {
     bytes out = [];
     out.push(SSH_MESSAGE_GLOBAL_REQUEST);
@@ -275,8 +275,8 @@ pub bytes build_keepalive() {
     return out;
 }
 
-/// A message that is only a type byte and a channel number: `EOF`, `CLOSE`,
-/// `SUCCESS`, `FAILURE`.
+/** A message that is only a type byte and a channel number: `EOF`, `CLOSE`,
+ * `SUCCESS`, `FAILURE`. */
 pub bytes build_simple(int kind, int remote_id) {
     bytes out = [];
     out.push(kind);
@@ -298,8 +298,8 @@ pub bytes build_data(int remote_id, bytes data) {
 
 // --- Part 1: message parsers (pure, every read bounds-checked) -------------
 
-/// `CHANNEL_OPEN_CONFIRMATION`: the server's channel number, window and
-/// maximum packet size.
+/** `CHANNEL_OPEN_CONFIRMATION`: the server's channel number, window and
+ * maximum packet size. */
 pub type Confirmation {
     pub int remote_id;
     pub int window;
@@ -325,8 +325,8 @@ Result<int, Error> u32_at(bytes buffer, int offset) {
     return Result<int, Error>.Ok(be32(buffer, offset));
 }
 
-/// Checks the message type and that the recipient channel is ours; the rest
-/// of each parser starts at offset 5.
+/** Checks the message type and that the recipient channel is ours; the rest
+ * of each parser starts at offset 5. */
 Result<void, Error> expect_channel(bytes payload, int kind) {
     if (payload.size() < 1 || payload[0] != kind) {
         return Result<void, Error>.Err(Error.UnexpectedMessage);
@@ -349,8 +349,8 @@ pub Result<Confirmation, Error> parse_confirmation(bytes payload) {
     return Result<Confirmation, Error>.Ok(Confirmation(remote_id, window, max_packet));
 }
 
-/// `CHANNEL_OPEN_FAILURE`: the reason code (the description and language tag
-/// are parsed for bounds and dropped).
+/** `CHANNEL_OPEN_FAILURE`: the reason code (the description and language tag
+ * are parsed for bounds and dropped). */
 pub Result<int, Error> parse_open_failure(bytes payload) {
     expect_channel(payload, SSH_MESSAGE_CHANNEL_OPEN_FAILURE)?;
     int reason = u32_at(payload, 5)?;
@@ -455,19 +455,19 @@ pub type Channel {
     bool has_sent_eof;
     bool has_sent_close;
     Exit status;
-    /// Answers to our keepalive global requests that arrived and were not
-    /// yet collected with `take_keepalive_replies`.
+    /** Answers to our keepalive global requests that arrived and were not
+     * yet collected with `take_keepalive_replies`. */
     int keepalive_replies = 0;
     /// Whether the server granted a pty (`open_session` with `want_pty`).
     bool has_pty = false;
-    /// Window credit is returned when the caller has *consumed* data
-    /// (`acknowledge`), not on receipt: what a multiplexer needs so a slow
-    /// local socket pushes back on the server.
+    /** Window credit is returned when the caller has *consumed* data
+     * (`acknowledge`), not on receipt: what a multiplexer needs so a slow
+     * local socket pushes back on the server. */
     bool is_manual_window = false;
 }
 
-// Handles one message that arrived on the channel, updating buffers, windows
-// and state. The only place that interprets server messages after `exec`.
+/* Handles one message that arrived on the channel, updating buffers, windows
+ * and state. The only place that interprets server messages after `exec`. */
 Result<void, Error> Channel.dispatch(bytes payload) {
     if (payload.size() == 0) {
         return Result<void, Error>.Err(Error.Truncated);
@@ -528,8 +528,8 @@ Result<void, Error> Channel.dispatch(bytes payload) {
     } else if (kind == SSH_MESSAGE_GLOBAL_REQUEST) {
         answer_global(link, payload)?;
     } else if (kind == SSH_MESSAGE_REQUEST_SUCCESS || kind == SSH_MESSAGE_REQUEST_FAILURE) {
-        // The answer to a keepalive (this client sends no other global
-        // request). An unsolicited one is harmless and counted the same.
+        /* The answer to a keepalive (this client sends no other global
+         * request). An unsolicited one is harmless and counted the same. */
         keepalive_replies = keepalive_replies + 1;
     } else {
         return Result<void, Error>.Err(Error.UnexpectedMessage);
@@ -537,16 +537,16 @@ Result<void, Error> Channel.dispatch(bytes payload) {
     return Result<void, Error>.Ok;
 }
 
-// Charges `byte_count` received bytes against the window we granted. A packet within
-// `LOCAL_MAX_PACKET` always fits: `replenish` keeps `local_window` above half
-// of `LOCAL_WINDOW`, which is far more than one packet.
+/* Charges `byte_count` received bytes against the window we granted. A packet within
+ * `LOCAL_MAX_PACKET` always fits: `replenish` keeps `local_window` above half
+ * of `LOCAL_WINDOW`, which is far more than one packet. */
 Result<void, Error> Channel.take_window(int byte_count) {
     if (byte_count > LOCAL_MAX_PACKET) {
         return Result<void, Error>.Err(Error.DataTooLarge);
     }
     if (byte_count > local_window) {
-        // More than the credit we granted: a peer ignoring the window would
-        // otherwise grow the buffers without bound.
+        /* More than the credit we granted: a peer ignoring the window would
+         * otherwise grow the buffers without bound. */
         return Result<void, Error>.Err(Error.DataTooLarge);
     }
     local_window = local_window - byte_count;
@@ -572,9 +572,9 @@ Result<void, Error> Channel.pump() {
     return dispatch(payload);
 }
 
-/// Sends `data` to the command's stdin, in as many packets as the server's
-/// window needs; returns `data.size()`. `Err(Closed)` after `close_write` or
-/// once the server has closed the channel.
+/** Sends `data` to the command's stdin, in as many packets as the server's
+ * window needs; returns `data.size()`. `Err(Closed)` after `close_write` or
+ * once the server has closed the channel. */
 pub Result<int, Error> Channel.write(bytes data) {
     int sent = 0;
     while (sent < data.size()) {
@@ -602,11 +602,11 @@ pub Result<int, Error> Channel.write(bytes data) {
     return Result<int, Error>.Ok(sent);
 }
 
-/// Sends as much of `data` as the server's window allows *right now*, never
-/// waiting, and returns how many bytes went (0 when the window is empty).
-/// What an event loop uses so a command that is not reading its stdin cannot
-/// stall the loop: keep the rest and try again after the next
-/// `WINDOW_ADJUST`.
+/** Sends as much of `data` as the server's window allows *right now*, never
+ * waiting, and returns how many bytes went (0 when the window is empty).
+ * What an event loop uses so a command that is not reading its stdin cannot
+ * stall the loop: keep the rest and try again after the next
+ * `WINDOW_ADJUST`. */
 pub Result<int, Error> Channel.write_available(bytes data) {
     if (has_sent_eof || has_sent_close || has_received_close) {
         return Result<int, Error>.Err(Error.Closed);
@@ -643,9 +643,9 @@ pub Result<void, Error> Channel.close_write() {
     return Result<void, Error>.Ok;
 }
 
-/// Up to `max` bytes of the command's stdout, waiting for at least one;
-/// an empty result means the command closed stdout (EOF) and nothing is
-/// left to read.
+/** Up to `max` bytes of the command's stdout, waiting for at least one;
+ * an empty result means the command closed stdout (EOF) and nothing is
+ * left to read. */
 pub Result<bytes, Error> Channel.read(int max) {
     if (max < 1) {
         return Result<bytes, Error>.Err(Error.BadArgument);
@@ -691,9 +691,9 @@ pub Result<bytes, Error> Channel.read_all_error() {
     }
 }
 
-/// Reads until the server closes the channel, answers with our own `CLOSE`,
-/// and returns how the command ended. Output that arrives meanwhile stays
-/// readable. Call `close_write` first for a command that waits on stdin.
+/** Reads until the server closes the channel, answers with our own `CLOSE`,
+ * and returns how the command ended. Output that arrives meanwhile stays
+ * readable. Call `close_write` first for a command that waits on stdin. */
 pub Result<Exit, Error> Channel.wait() {
     while (!has_received_close) {
         pump()?;
@@ -701,14 +701,14 @@ pub Result<Exit, Error> Channel.wait() {
     return Result<Exit, Error>.Ok(status);
 }
 
-/// What is known about the exit so far (`Exit.Unknown` until the server has
-/// sent it, which it does before closing).
+/** What is known about the exit so far (`Exit.Unknown` until the server has
+ * sent it, which it does before closing). */
 pub Exit Channel.exit() {
     return status;
 }
 
-/// Gives up on the command: sends `CLOSE`, then reads and discards whatever
-/// arrives until the server's `CLOSE` comes back. Idempotent.
+/** Gives up on the command: sends `CLOSE`, then reads and discards whatever
+ * arrives until the server's `CLOSE` comes back. Idempotent. */
 pub Result<void, Error> Channel.close() {
     if (!has_sent_close) {
         send_on(link, build_simple(SSH_MESSAGE_CHANNEL_CLOSE, remote_id))?;
@@ -722,17 +722,17 @@ pub Result<void, Error> Channel.close() {
     return Result<void, Error>.Ok;
 }
 
-/// Handles one message addressed to this channel (recipient field 0, as a
-/// multiplexer rewrites it): data and flow control are buffered or
-/// accounted, EOF and CLOSE recorded, and CLOSE answered.
+/** Handles one message addressed to this channel (recipient field 0, as a
+ * multiplexer rewrites it): data and flow control are buffered or
+ * accounted, EOF and CLOSE recorded, and CLOSE answered. */
 pub Result<void, Error> Channel.dispatch_message(bytes payload) {
     return dispatch(payload);
 }
 
-/// Grants the peer window credit for what has been taken out of the buffers:
-/// call it after `take_output`/`take_error` on a manual-window channel. The
-/// credit outstanding plus what is buffered never exceeds the 2 MiB window,
-/// so a consumer that stops taking data stops the sender.
+/** Grants the peer window credit for what has been taken out of the buffers:
+ * call it after `take_output`/`take_error` on a manual-window channel. The
+ * credit outstanding plus what is buffered never exceeds the 2 MiB window,
+ * so a consumer that stops taking data stops the sender. */
 pub Result<void, Error> Channel.acknowledge() {
     if (has_sent_close || has_received_close) {
         return Result<void, Error>.Ok;
@@ -746,8 +746,8 @@ pub Result<void, Error> Channel.acknowledge() {
     return Result<void, Error>.Ok;
 }
 
-/// Sends CLOSE without waiting for the peer's (a multiplexer's `close`).
-/// Idempotent.
+/** Sends CLOSE without waiting for the peer's (a multiplexer's `close`).
+ * Idempotent. */
 pub Result<void, Error> Channel.begin_close() {
     if (!has_sent_close) {
         send_on(link, build_simple(SSH_MESSAGE_CHANNEL_CLOSE, remote_id))?;
@@ -766,21 +766,21 @@ pub bool Channel.is_close_sent() {
     return has_sent_close;
 }
 
-/// The peer's remaining window, in bytes: how much `write_available` can
-/// send right now.
+/** The peer's remaining window, in bytes: how much `write_available` can
+ * send right now. */
 pub int Channel.send_window() {
     return remote_window;
 }
 
-/// Reads and handles exactly one message from the server (waiting for it).
-/// What an event loop calls when the transport has bytes: afterwards
-/// `take_output`/`take_error`/`is_eof`/`is_closed` say what changed.
+/** Reads and handles exactly one message from the server (waiting for it).
+ * What an event loop calls when the transport has bytes: afterwards
+ * `take_output`/`take_error`/`is_eof`/`is_closed` say what changed. */
 pub Result<void, Error> Channel.pump_one() {
     return pump();
 }
 
-/// Up to `max` buffered stdout bytes, at once: empty when none are waiting
-/// (which is not the end -- `is_eof` says that).
+/** Up to `max` buffered stdout bytes, at once: empty when none are waiting
+ * (which is not the end -- `is_eof` says that). */
 pub bytes Channel.take_output(int max) {
     return take_front(output_buffer, max);
 }
@@ -827,9 +827,9 @@ pub int Channel.take_keepalive_replies() {
     return count;
 }
 
-/// A channel the server confirmed (or one this side confirmed to a
-/// server-opened request), for a multiplexer: `remote_id`, `window` and
-/// `max_packet` are the peer's. Window credit is manual (see `acknowledge`).
+/** A channel the server confirmed (or one this side confirmed to a
+ * server-opened request), for a multiplexer: `remote_id`, `window` and
+ * `max_packet` are the peer's. Window credit is manual (see `acknowledge`). */
 pub Channel new_channel(ssh.Link link, int remote_id, int window, int max_packet) {
     Channel channel = Channel(link, remote_id, window, max_packet, LOCAL_WINDOW, [], [], false, false, false, false, Exit.Unknown);
     channel.is_manual_window = true;
@@ -869,9 +869,9 @@ pub bytes build_tcpip_forward(str bind_address, int bind_port) {
     return out;
 }
 
-/// A server-initiated `CHANNEL_OPEN` (RFC 4254 §5.1, §7.2) parsed far enough
-/// to act on: for `forwarded-tcpip` the address and port the connection came
-/// in on.
+/** A server-initiated `CHANNEL_OPEN` (RFC 4254 §5.1, §7.2) parsed far enough
+ * to act on: for `forwarded-tcpip` the address and port the connection came
+ * in on. */
 pub type ServerOpen {
     pub str kind;
     pub int sender;
@@ -953,10 +953,10 @@ Result<bytes, Error> recv_on(ssh.Link link) {
     }
 }
 
-/// Opens a session channel on `link` and asks the server to run `command`
-/// (the string is passed to the user's login shell by sshd, as with
-/// `ssh host command`; quote accordingly). `Ok` once the server has accepted
-/// the `exec`.
+/** Opens a session channel on `link` and asks the server to run `command`
+ * (the string is passed to the user's login shell by sshd, as with
+ * `ssh host command`; quote accordingly). `Ok` once the server has accepted
+ * the `exec`. */
 pub Result<Channel, Error> exec(ssh.Link link, str command) {
     Channel channel = open_channel(link)?;
     send_on(link, build_exec(channel.remote_id, command))?;
@@ -964,11 +964,11 @@ pub Result<Channel, Error> exec(ssh.Link link, str command) {
     return Result<Channel, Error>.Ok(channel);
 }
 
-/// Opens a session channel with a pseudo-terminal (`pty-req` carrying `term`,
-/// the size and `modes`) and starts `command` on it, or the user's login
-/// shell when `command` is empty. Everything the remote program writes
-/// arrives on stdout (a tty merges the streams). `Err(PtyRefused)` when the
-/// server will not allocate a terminal.
+/** Opens a session channel with a pseudo-terminal (`pty-req` carrying `term`,
+ * the size and `modes`) and starts `command` on it, or the user's login
+ * shell when `command` is empty. Everything the remote program writes
+ * arrives on stdout (a tty merges the streams). `Err(PtyRefused)` when the
+ * server will not allocate a terminal. */
 pub Result<Channel, Error> open_pty(ssh.Link link, str term, int columns, int rows, bytes modes, str command) {
     Channel channel = open_channel(link)?;
     send_on(link, build_pty_request(channel.remote_id, term, columns, rows, modes))?;
@@ -983,8 +983,8 @@ pub Result<Channel, Error> open_pty(ssh.Link link, str term, int columns, int ro
     return Result<Channel, Error>.Ok(channel);
 }
 
-/// Opens a session channel and starts the subsystem `name` on it (`sftp`):
-/// the channel then carries that protocol's bytes both ways.
+/** Opens a session channel and starts the subsystem `name` on it (`sftp`):
+ * the channel then carries that protocol's bytes both ways. */
 pub Result<Channel, Error> subsystem(ssh.Link link, str name) {
     Channel channel = open_channel(link)?;
     send_on(link, build_subsystem(channel.remote_id, name))?;
@@ -992,9 +992,9 @@ pub Result<Channel, Error> subsystem(ssh.Link link, str name) {
     return Result<Channel, Error>.Ok(channel);
 }
 
-/// Opens a session channel and starts the user's login shell on it with no
-/// pseudo-terminal (`ssh host` with stdin not a terminal): the shell reads
-/// commands from the channel's stdin.
+/** Opens a session channel and starts the user's login shell on it with no
+ * pseudo-terminal (`ssh host` with stdin not a terminal): the shell reads
+ * commands from the channel's stdin. */
 pub Result<Channel, Error> shell(ssh.Link link) {
     Channel channel = open_channel(link)?;
     send_on(link, build_shell(channel.remote_id))?;
@@ -1002,9 +1002,9 @@ pub Result<Channel, Error> shell(ssh.Link link) {
     return Result<Channel, Error>.Ok(channel);
 }
 
-/// `CHANNEL_OPEN "direct-tcpip"` (RFC 4254 §7.2): ask the server to connect
-/// to `host`:`port` and carry the bytes. `originator` is the address this
-/// request claims to come from (informational).
+/** `CHANNEL_OPEN "direct-tcpip"` (RFC 4254 §7.2): ask the server to connect
+ * to `host`:`port` and carry the bytes. `originator` is the address this
+ * request claims to come from (informational). */
 pub bytes build_open_direct_tcpip(int local_id, int window, int max_packet, str host, int port, str originator, int originator_port) {
     bytes out = [];
     out.push(SSH_MESSAGE_CHANNEL_OPEN);
@@ -1019,11 +1019,11 @@ pub bytes build_open_direct_tcpip(int local_id, int window, int max_packet, str 
     return out;
 }
 
-/// Opens a `direct-tcpip` channel to `host`:`port` through the server: the
-/// channel then carries the raw bytes of that TCP connection both ways
-/// (`write`, `read`, `close_write`, `close`), which is what `ProxyJump` runs
-/// a whole SSH connection over. One channel at a time per link, like every
-/// channel here (`sshmux.m31` is the multi-channel layer).
+/** Opens a `direct-tcpip` channel to `host`:`port` through the server: the
+ * channel then carries the raw bytes of that TCP connection both ways
+ * (`write`, `read`, `close_write`, `close`), which is what `ProxyJump` runs
+ * a whole SSH connection over. One channel at a time per link, like every
+ * channel here (`sshmux.m31` is the multi-channel layer). */
 pub Result<Channel, Error> direct_tcpip(ssh.Link link, str host, int port) {
     return open_with(link, build_open_direct_tcpip(LOCAL_ID, LOCAL_WINDOW, LOCAL_MAX_PACKET, host, port, "127.0.0.1", 0));
 }
@@ -1058,8 +1058,8 @@ Result<Channel, Error> open_with(ssh.Link link, bytes open_message) {
     return Result<Channel, Error>.Ok(Channel(link, conf.remote_id, conf.window, conf.max_packet, LOCAL_WINDOW, [], [], false, false, false, false, Exit.Unknown));
 }
 
-// Waits for the SUCCESS/FAILURE to the request just sent, handling anything
-// else (data, window adjusts) as the channel would.
+/* Waits for the SUCCESS/FAILURE to the request just sent, handling anything
+ * else (data, window adjusts) as the channel would. */
 Result<void, Error> await_reply(Channel channel, Error refused) {
     while (true) {
         bytes reply = recv_on(channel.link)?;
@@ -1079,8 +1079,8 @@ Result<void, Error> await_reply(Channel channel, Error refused) {
     }
 }
 
-// Answers a GLOBAL_REQUEST: REQUEST_FAILURE if it wants a reply (this client
-// implements none of them), nothing otherwise.
+/* Answers a GLOBAL_REQUEST: REQUEST_FAILURE if it wants a reply (this client
+ * implements none of them), nothing otherwise. */
 Result<void, Error> answer_global(ssh.Link link, bytes payload) {
     bool is_reply_wanted = parse_global_want_reply(payload)?;
     if (is_reply_wanted) {

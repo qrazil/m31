@@ -1,8 +1,8 @@
-// `lib/ssh.m31`'s exchange hash and key derivation against an independent
-// `hashlib`-based computation: every line this prints is printed again by
-// `oracle_ssh_wire.py`, and `test.sh` diffs the two. See that oracle's own
-// header for why this -- not the live `sshd` fixture -- is where the
-// byte-order and `mpint` sign-bit rules get checked first.
+/* `lib/ssh.m31`'s exchange hash and key derivation against an independent
+ * `hashlib`-based computation: every line this prints is printed again by
+ * `oracle_ssh_wire.py`, and `test.sh` diffs the two. See that oracle's own
+ * header for why this -- not the live `sshd` fixture -- is where the
+ * byte-order and `mpint` sign-bit rules get checked first. */
 import ssh;
 
 bytes range_bytes(int from, int limit) {
