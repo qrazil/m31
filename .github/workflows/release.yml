@@ -259,7 +259,7 @@ jobs:
   # runtime/ctx_switch_aarch64.S and a kqueue reactor backend
   # (runtime/reactor_kqueue.c) -- both exist now, and
   # `.github/workflows/macos.yml` already confirms the full gate suite
-  # passes natively on `macos-14` (Apple Silicon). This is still the
+  # passes natively on `macos-15` (Apple Silicon). This is still the
   # FIRST time any program under tests/ has been built on macOS at all (gates.sh
   # itself never touches tests/), so a failure here is new information, not
   # a regression of something previously proven.
@@ -273,7 +273,7 @@ jobs:
   build-macos:
     name: Build — macOS (arm64)
     needs: gates
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 

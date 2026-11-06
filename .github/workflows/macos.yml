@@ -13,13 +13,13 @@ name: macOS runtime (kqueue reactor)
 # `macos-13` (GitHub's hosted Intel/x86_64 runner) is TEMPORARILY DISABLED
 # below -- GitHub's macos-13 pool has had so little available capacity that
 # a run queues indefinitely and the whole workflow never completes, even
-# though macos-14 (Apple Silicon) runs and reports within seconds. Re-add
+# though macos-15 (Apple Silicon) runs and reports within seconds. Re-add
 # "macos-13" to the matrix once a second real macOS remote (self-hosted, or
 # GitHub's queue easing) is available; the ideal end state is still both
 # architectures, for the reason below, not a permanent Apple-Silicon-only
 # choice.
 #
-# `macos-14` is Apple Silicon (arm64), real hardware, not emulated. Running
+# `macos-15` is Apple Silicon (arm64), real hardware, not emulated. Running
 # BOTH architectures matters here specifically because `void*`-sized udata
 # (this backend's spurious-wakeup fix stores a 64-bit sequence number in
 # kevent's `udata` field) and the EVFILT_USER control-bit behavior this file
@@ -47,7 +47,7 @@ jobs:
       matrix:
         # macos-13 temporarily removed -- see the comment at the top of this
         # file. Re-add it here once a second macOS remote is available.
-        os: [ macos-14 ]
+        os: [ macos-15 ]
     name: kqueue reactor + green-thread runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     # A hang must fail the job in bounded time, not run for GitHub's 6-hour
