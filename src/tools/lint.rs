@@ -917,7 +917,7 @@ fn check(opts: Opts, summary: bool, inputs: &[String]) -> std::process::ExitCode
     }
 }
 
-fn collect(path: &std::path::Path, out: &mut Vec<String>) -> std::io::Result<()> {
+pub(crate) fn collect(path: &std::path::Path, out: &mut Vec<String>) -> std::io::Result<()> {
     if path.is_dir() {
         let mut entries: Vec<_> = std::fs::read_dir(path)?
             .filter_map(Result::ok)

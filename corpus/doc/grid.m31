@@ -1,0 +1,54 @@
+/** The largest width a row may have. */
+pub const int MAX_WIDTH = 80;
+/// Not exported, so `-doc` leaves it out.
+const int SECRET = 1;
+
+/**
+ * A point on the grid.
+ *
+ * Only the `pub` fields are part of the API.
+ */
+pub type Point {
+    /// Distance from the left edge.
+    pub int across;
+    pub int down;
+    /// Private, so it is not listed.
+    int cache;
+}
+
+/// Straight-line distance, rounded down.
+pub int Point.distance(Point other) {
+    return 0;
+}
+
+pub static Point Point.origin() {
+    return Point(0, 0, 0);
+}
+
+/// The ways a move can fail.
+pub enum Failure {
+    /// The edge of the grid.
+    Edge;
+    /** Something stands there:
+     * what it is. */
+    Blocked(str);
+}
+
+/// Anything with a size.
+pub interface Sized {
+    /// How big it is.
+    int size();
+    int weight();
+}
+
+pub distinct int Metres;
+
+/// Pairs two values.
+pub List<T> pair<T>(T left, T right, int times = 1) {
+    return [left, right];
+}
+
+/// Private helper: not listed.
+int helper() {
+    return SECRET;
+}

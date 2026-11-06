@@ -6,6 +6,7 @@
 //!     m31c -emit-ir <source> [--out <out.ir>]
 //!     m31c -fmt [--check] [--recursive] <file|dir>...
 //!     m31c -lint <file|dir>... [--allow NAME...] [--strict] [--summary]
+//!     m31c -doc <file|dir>...
 //!     m31c -init [--lib] [--name N] [--prefix P] [dir]
 //!     m31c -heapwatch <ledger|pid> [--all] [--trace T...] [--untrace T...] [--depth N] [--paths]
 //!
@@ -27,7 +28,7 @@ use front::{ast, diag, lexer, parser};
 use middle::{lower, mono};
 use resolve::{modules, stdlib};
 use tools::cli::{Command, Kind, Need, Operand, Opt, Spec};
-use tools::{cli, fmt, heapwatch, init, lint};
+use tools::{cli, doc, fmt, heapwatch, init, lint};
 
 #[cfg(test)]
 mod tests;
@@ -137,6 +138,11 @@ static ROOT: Spec = Spec {
             spec: &lint::SPEC,
         },
         Command {
+            word: "doc",
+            short: None,
+            spec: &doc::SPEC,
+        },
+        Command {
             word: "init",
             short: None,
             spec: &init::SPEC,
@@ -187,6 +193,7 @@ fn main() -> ExitCode {
                     "emit-ir" => emit_main("ir", &parsed.operands[0], parsed.value("out")),
                     "fmt" => fmt_main(parsed),
                     "lint" => lint::run(parsed),
+                    "doc" => doc::run(parsed),
                     "heapwatch" => heapwatch::run(parsed),
                     _ => init::run(parsed),
                 };

@@ -59,6 +59,7 @@ impl Parser {
         let ty = self.expect_ty()?;
         let (name, _) = self.expect_ident()?;
         let param = Param {
+            doc: None,
             ty,
             name: name.clone(),
             default: None,

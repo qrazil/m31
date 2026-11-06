@@ -1,0 +1,4 @@
+corpus/errors/1502-doc-comment-at-end-of-file.m31:3:1: doc comment is not attached to a declaration
+  |
+3 | /** Nothing follows. */
+  | ^

@@ -1,0 +1,37 @@
+// A fixture for `m31c -fmt`: docstrings are comments to the formatter. They
+// keep their text exactly, sit directly above their item, and a block docstring
+// keeps its ` * ` gutter however deep the item is indented.
+
+/**
+ * A cell.
+ *
+ *     indented code stays indented
+ */
+type Cell {
+    /// the value
+    int v;
+    /** two
+     * lines */
+    int w;
+}
+
+/// Declared below its type: the docstring moves with it.
+int Cell.get() {
+    return v;
+}
+
+/// A plain comment between the docstring and the item does not detach it.
+// plain
+pub enum Mode {
+    /** first */
+    A;
+    B(int);
+}
+
+int run(int n) {
+    /* a block comment in a body
+       keeps its relative layout */
+    return n;
+}
+
+print(run(7));

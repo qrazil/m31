@@ -196,6 +196,94 @@ impl Tok {
 pub struct Token {
     pub tok: Tok,
     pub span: Span,
+    /// The doc comment directly above this token, if any (docs/docstrings-decision.md).
+    /// The parser takes it at a declaration and attaches it to the node; one
+    /// still here when parsing ends belonged to no declaration, and is an error.
+    pub doc: Option<Doc>,
+}
+
+/// A doc comment (`///` lines or one `/** ... */`), normalised: the
+/// markers and the ` * ` gutters stripped, the text dedented.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Doc {
+    pub text: String,
+    /// Where the comment starts, for the "not attached" diagnostic.
+    pub span: Span,
+}
+
+/// Why a doc comment that goes with no declaration is refused.
+pub const DETACHED_DOC: &str = "doc comment is not attached to a declaration";
+
+/// `///` and `/** */` are doc comments; `////`, `/**/` and `/***` are not.
+fn is_doc_start(rest: &[u8]) -> Option<bool> {
+    if rest.starts_with(b"///") && rest.get(3) != Some(&b'/') {
+        return Some(false);
+    }
+    if rest.starts_with(b"/**") && !matches!(rest.get(3), Some(b'*') | Some(b'/')) {
+        return Some(true);
+    }
+    None
+}
+
+/// The text of one doc comment, as the AST records it. `raw` is the
+/// comment exactly as written, starting at `///` or `/**`.
+///
+/// A `///` comment loses `///` and one following space. A block comment
+/// loses `/**` and `*/`; if every line after the first starts (after
+/// blanks) with `*`, that `*` and one following space is a gutter and goes
+/// too; then the common indent of the continuation lines goes. Blank lines
+/// at either end are dropped, and every line loses its trailing blanks.
+pub fn normalize_doc(raw: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(body) = raw.strip_prefix("///") {
+        lines.push(
+            body.strip_prefix(' ')
+                .unwrap_or(body)
+                .trim_end()
+                .to_string(),
+        );
+    } else {
+        let body = raw.strip_prefix("/**").unwrap_or(raw);
+        let body = body.strip_suffix("*/").unwrap_or(body);
+        let parts: Vec<&str> = body.split('\n').collect();
+        let gutter = parts.len() > 1
+            && parts[1..]
+                .iter()
+                .all(|l| l.trim().is_empty() || l.trim_start().starts_with('*'));
+        for (i, l) in parts.iter().enumerate() {
+            let l = l.trim_end_matches('\r');
+            if i == 0 {
+                lines.push(l.strip_prefix(' ').unwrap_or(l).trim_end().to_string());
+            } else if gutter && l.trim_start().starts_with('*') {
+                let t = l.trim_start()[1..].to_string();
+                lines.push(t.strip_prefix(' ').unwrap_or(&t).trim_end().to_string());
+            } else {
+                lines.push(l.trim_end().to_string());
+            }
+        }
+        let indent = if gutter {
+            0
+        } else {
+            lines[1..]
+                .iter()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.len() - l.trim_start().len())
+                .min()
+                .unwrap_or(0)
+        };
+        for l in lines.iter_mut().skip(1) {
+            *l = if l.len() >= indent {
+                l[indent..].to_string()
+            } else {
+                String::new()
+            };
+        }
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    let lead = lines.iter().take_while(|l| l.is_empty()).count();
+    lines[lead..].join("\n")
 }
 
 /// A comment, kept aside so the formatter can put it back.
@@ -210,6 +298,11 @@ pub struct Comment {
     pub text: String,
     /// Whether the comment is alone on its line, as opposed to trailing code.
     pub own_line: bool,
+    /// The column it starts at (1-based, in code points), so the formatter
+    /// can re-indent the continuation lines of a block comment.
+    pub col: u32,
+    /// `///` or `/** */`, alone on its line.
+    pub doc: bool,
 }
 
 pub struct Lexer<'a> {
@@ -223,6 +316,10 @@ pub struct Lexer<'a> {
     /// Each string literal's source text, quotes included, and each integer
     /// literal's, by position.
     spellings: Vec<(Span, String)>,
+    /// The doc comment waiting for the next token: its text so far, where it
+    /// starts, the last line it or an adjacent plain comment occupies, and whether
+    /// a plain comment has followed it (a later doc comment cannot join then).
+    pending_doc: Option<(String, Span, u32, bool)>,
 }
 
 /// Everything the formatter needs from the lexer: the tokens, and what the
@@ -243,6 +340,7 @@ impl<'a> Lexer<'a> {
             comments: Vec::new(),
             code_on_line: false,
             spellings: Vec::new(),
+            pending_doc: None,
         }
     }
 
@@ -317,44 +415,85 @@ impl<'a> Lexer<'a> {
                     self.code_on_line = false;
                 }
                 self.bump();
-            } else if c == b'/' && self.peek2() == b'/' {
+            } else if c == b'/' && (self.peek2() == b'/' || self.peek2() == b'*') {
+                let block = self.peek2() == b'*';
                 let at = self.here();
                 let own = !self.code_on_line;
                 let from = self.pos;
-                while self.pos < self.src.len() && self.peek() != b'\n' {
-                    self.bump();
+                let doc = if own {
+                    is_doc_start(&self.src[self.pos..]).is_some_and(|b| b == block)
+                } else {
+                    false
+                };
+                self.bump();
+                self.bump();
+                if block {
+                    loop {
+                        if self.pos >= self.src.len() {
+                            return Err(Diag::new(at, "unterminated block comment"));
+                        }
+                        if self.peek() == b'*' && self.peek2() == b'/' {
+                            self.bump();
+                            self.bump();
+                            break;
+                        }
+                        self.bump();
+                    }
+                } else {
+                    while self.pos < self.src.len() && self.peek() != b'\n' {
+                        self.bump();
+                    }
+                }
+                let raw = String::from_utf8_lossy(&self.src[from..self.pos]).to_string();
+                let text = if block {
+                    raw.clone()
+                } else {
+                    raw.trim_end().to_string()
+                };
+                // The line the comment ends on (a block comment spans several).
+                let end_line = self.line;
+                if doc {
+                    let norm = normalize_doc(&text);
+                    match self.pending_doc.take() {
+                        Some((prev, pat, last, false)) if at.line == last + 1 => {
+                            let joined = format!("{prev}\n{norm}");
+                            self.pending_doc = Some((joined, pat, end_line, false));
+                        }
+                        Some((_, pat, _, _)) => return Err(Diag::new(pat, DETACHED_DOC)),
+                        None => self.pending_doc = Some((norm, at, end_line, false)),
+                    }
+                } else if let Some(p) = self.pending_doc.as_mut() {
+                    // A plain comment right under a doc comment does not
+                    // detach it; a blank line does (checked at the token).
+                    if at.line == p.2 + 1 {
+                        p.2 = end_line;
+                        p.3 = true;
+                    }
                 }
                 self.comments.push(Comment {
                     line: at.line,
-                    text: String::from_utf8_lossy(&self.src[from..self.pos])
-                        .trim_end()
-                        .to_string(),
+                    text,
                     own_line: own,
-                });
-            } else if c == b'/' && self.peek2() == b'*' {
-                let start = self.here();
-                let own = !self.code_on_line;
-                let from = self.pos;
-                self.bump();
-                self.bump();
-                loop {
-                    if self.pos >= self.src.len() {
-                        return Err(Diag::new(start, "unterminated block comment"));
-                    }
-                    if self.peek() == b'*' && self.peek2() == b'/' {
-                        self.bump();
-                        self.bump();
-                        break;
-                    }
-                    self.bump();
-                }
-                self.comments.push(Comment {
-                    line: start.line,
-                    text: String::from_utf8_lossy(&self.src[from..self.pos]).to_string(),
-                    own_line: own,
+                    col: at.col,
+                    doc,
                 });
             } else {
                 return Ok(());
+            }
+        }
+    }
+
+    /// The pending doc comment, if the token about to be read on `line` is
+    /// close enough to take it: on the line the comment ends or the next one.
+    /// A blank line between them detaches it, which is an error.
+    fn take_doc(&mut self, line: u32) -> Result<Option<Doc>, Diag> {
+        match self.pending_doc.take() {
+            None => Ok(None),
+            Some((text, at, last, _)) => {
+                if line > last + 1 && self.pos < self.src.len() {
+                    return Err(Diag::new(at, DETACHED_DOC));
+                }
+                Ok(Some(Doc { text, span: at }))
             }
         }
     }
@@ -369,16 +508,21 @@ impl<'a> Lexer<'a> {
         loop {
             self.skip_trivia()?;
             let span = self.here();
+            let doc = self.take_doc(span.line)?;
             if self.pos >= self.src.len() {
+                if let Some(d) = doc {
+                    return Err(Diag::new(d.span, DETACHED_DOC));
+                }
                 out.push(Token {
                     tok: Tok::Eof,
                     span,
+                    doc: None,
                 });
                 return Ok(out);
             }
             self.code_on_line = true;
             let tok = self.next_tok(span)?;
-            out.push(Token { tok, span });
+            out.push(Token { tok, span, doc });
         }
     }
 

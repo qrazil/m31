@@ -45,6 +45,7 @@ impl Parser {
             let variants = variants
                 .into_iter()
                 .map(|(vname, payload): (&str, Vec<&str>)| EnumVariant {
+                    doc: None,
                     name: vname.to_string(),
                     payload: payload
                         .into_iter()
@@ -54,6 +55,7 @@ impl Parser {
                 })
                 .collect();
             out.push(TypeDecl {
+                doc: None,
                 name: name.to_string(),
                 module: String::new(),
                 is_pub: true,
@@ -131,16 +133,20 @@ impl Parser {
                     "every `import` must come before the first declaration",
                 ));
             }
+            // The doc comment sits on the first token of the declaration,
+            // `pub` included.
+            let doc_at = self.take_doc();
+            let doc = doc_at.as_ref().map(|d| d.text.clone());
             // Private is the default: forgetting to mark something private
             // would export it permanently, and forgetting to mark something
             // public is a one-word fix.
             let is_pub = self.eat(&Tok::KwPub);
             if self.peek() == &Tok::KwDistinct {
-                types.push(self.parse_distinct(is_pub)?);
+                types.push(self.parse_distinct(is_pub)?.with_doc(doc));
             } else if self.peek() == &Tok::KwEnum {
-                types.push(self.parse_enum_decl(is_pub)?);
+                types.push(self.parse_enum_decl(is_pub)?.with_doc(doc));
             } else if self.peek() == &Tok::KwType || self.peek() == &Tok::KwInterface {
-                types.push(self.parse_type_decl(is_pub)?);
+                types.push(self.parse_type_decl(is_pub)?.with_doc(doc));
             } else if self.peek() == &Tok::KwConst
                 && matches!(
                     self.peek_at(1),
@@ -162,14 +168,19 @@ impl Parser {
                 }
                 let mut t = self.parse_type_decl(is_pub)?;
                 t.is_const = true;
+                t.doc = doc;
                 types.push(t);
             } else if self.peek() == &Tok::KwConst {
                 // At the top level `const` is always a module constant, in
                 // the entry file as much as in a library: one spelling, one
                 // meaning. A `const` local is written inside a block.
-                consts.push(self.parse_const_decl(is_pub)?);
+                let mut c = self.parse_const_decl(is_pub)?;
+                c.doc = doc;
+                consts.push(c);
             } else if self.starts_func() {
-                funcs.push(self.parse_func(is_pub)?);
+                let mut f = self.parse_func(is_pub)?;
+                f.doc = doc;
+                funcs.push(f);
             } else if is_pub {
                 return Err(Diag::new(
                     self.span(),
@@ -177,9 +188,19 @@ impl Parser {
                 ));
             } else {
                 // Anything else at the top level is a statement, and runs.
-                toplevel.push(self.parse_stmt()?);
+                // A module-level `let` takes the doc comment; any other
+                // statement leaves it where it was, to be refused.
+                let at = self.pos;
+                let mut stmt = self.parse_stmt()?;
+                match (&mut stmt, doc_at) {
+                    (Stmt::Decl { doc: slot, .. }, Some(d)) => *slot = Some(d.text),
+                    (_, Some(d)) => self.toks[at].doc = Some(d),
+                    _ => {}
+                }
+                toplevel.push(stmt);
             }
         }
+        self.check_docs_attached()?;
         let prelude = self.prelude_types();
         // A program may not redeclare what the compiler already declared.
         for t in &types {
@@ -339,6 +360,7 @@ impl Parser {
             format!("{}#{name}", self.module)
         };
         Ok(ConstDecl {
+            doc: None,
             module: self.module.clone(),
             is_pub,
             ty,
@@ -360,6 +382,7 @@ impl Parser {
         self.expect(Tok::Semi)?;
         let name = self.qualify(&name);
         Ok(TypeDecl {
+            doc: None,
             name,
             module: self.module.clone(),
             is_pub,
@@ -396,6 +419,7 @@ impl Parser {
                     return Err(Diag::new(self.span(), "expected `}`, found end of file"));
                 }
                 let mspan = self.span();
+                let mdoc = self.take_doc().map(|d| d.text);
                 // An interface's methods are what it IS; one it hid would be
                 // a requirement nobody outside could see to satisfy.
                 if self.peek() == &Tok::KwPub {
@@ -440,6 +464,7 @@ impl Parser {
                 self.expect(Tok::RParen)?;
                 self.expect(Tok::Semi)?;
                 methods.push(Func {
+                    doc: mdoc,
                     module: self.module.clone(),
                     is_pub: true,
                     ret,
@@ -460,6 +485,7 @@ impl Parser {
             self.expect(Tok::RBrace)?;
             self.tparams.clear();
             return Ok(TypeDecl {
+                doc: None,
                 name,
                 module: self.module.clone(),
                 is_pub,
@@ -482,6 +508,7 @@ impl Parser {
             // `pub` on a field, as on any declaration, exports it. The span
             // starts at the keyword so a diagnostic points at the whole field.
             let fspan = self.span();
+            let fdoc = self.take_doc().map(|d| d.text);
             let is_pub = self.eat(&Tok::KwPub);
             if is_pub && self.peek() == &Tok::KwPub {
                 return Err(Diag::new(self.span(), "`pub` is written once"));
@@ -502,12 +529,14 @@ impl Parser {
             }
             f.is_pub = is_pub;
             f.span = fspan;
+            f.doc = fdoc;
             fields.push(f);
             self.expect(Tok::Semi)?;
         }
         self.expect(Tok::RBrace)?;
         self.tparams.clear();
         Ok(TypeDecl {
+            doc: None,
             name,
             module: self.module.clone(),
             is_pub,
@@ -544,6 +573,7 @@ impl Parser {
                 return Err(Diag::new(self.span(), "expected `}`, found end of file"));
             }
             let vspan = self.span();
+            let vdoc = self.take_doc().map(|d| d.text);
             // A variant is not a field: the enum is one value that is one of
             // its variants, so hiding a variant would make `match` on it
             // impossible to write exhaustively outside the module.
@@ -586,6 +616,7 @@ impl Parser {
             }
             self.expect(Tok::Semi)?;
             variants.push(EnumVariant {
+                doc: vdoc,
                 name: vname,
                 payload,
                 span: vspan,
@@ -604,6 +635,7 @@ impl Parser {
             ));
         }
         Ok(TypeDecl {
+            doc: None,
             name,
             module: self.module.clone(),
             is_pub,
@@ -790,6 +822,7 @@ impl Parser {
         };
         self.tparams.clear();
         Ok(Func {
+            doc: None,
             module: self.module.clone(),
             is_pub,
             ret,

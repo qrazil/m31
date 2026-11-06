@@ -136,6 +136,10 @@ pub struct EnumVariant {
     pub name: String,
     pub payload: Vec<Ty>,
     pub span: Span,
+    /// The doc comment above the declaration, normalised
+    /// (docs/docstrings-decision.md). Recorded by the parser and read by
+    /// `-doc`; nothing after the front end looks at it.
+    pub doc: Option<String>,
 }
 
 /// A user-defined type declaration, possibly generic.
@@ -173,6 +177,18 @@ pub struct TypeDecl {
     /// struct can be `const`.
     pub is_const: bool,
     pub span: Span,
+    /// The doc comment above the declaration, normalised
+    /// (docs/docstrings-decision.md). Recorded by the parser and read by
+    /// `-doc`; nothing after the front end looks at it.
+    pub doc: Option<String>,
+}
+
+impl TypeDecl {
+    /// This declaration with its doc comment attached.
+    pub fn with_doc(mut self, doc: Option<String>) -> Self {
+        self.doc = doc;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -272,6 +288,8 @@ pub enum Stmt {
         init: Expr,
         is_const: bool,
         span: Span,
+        /// A module-level declaration's doc comment; always `None` in a block.
+        doc: Option<String>,
     },
     /// `x = expr;`
     Assign {
@@ -414,6 +432,10 @@ pub struct Param {
     /// decision"). Always false for a field or a match binding.
     pub is_const: bool,
     pub span: Span,
+    /// The doc comment above the declaration, normalised
+    /// (docs/docstrings-decision.md). Recorded by the parser and read by
+    /// `-doc`; nothing after the front end looks at it.
+    pub doc: Option<String>,
 }
 
 impl Param {
@@ -533,6 +555,10 @@ pub struct Func {
     pub params: Vec<Param>,
     pub body: Vec<Stmt>,
     pub span: Span,
+    /// The doc comment above the declaration, normalised
+    /// (docs/docstrings-decision.md). Recorded by the parser and read by
+    /// `-doc`; nothing after the front end looks at it.
+    pub doc: Option<String>,
 }
 
 impl Func {
@@ -565,6 +591,10 @@ pub struct ConstDecl {
     pub name: String,
     pub init: Expr,
     pub span: Span,
+    /// The doc comment above the declaration, normalised
+    /// (docs/docstrings-decision.md). Recorded by the parser and read by
+    /// `-doc`; nothing after the front end looks at it.
+    pub doc: Option<String>,
 }
 
 /// One `import a.b.name;` -- the module this file depends on. `path` is

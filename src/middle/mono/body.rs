@@ -27,6 +27,7 @@ impl Mono {
                 init,
                 is_const,
                 span,
+                ..
             } => {
                 // Record the type AS WRITTEN, before substitution, so
                 // inference can unify against its structure.
@@ -36,6 +37,7 @@ impl Mono {
                     .expect("no scope")
                     .insert(name.clone(), *ty);
                 Stmt::Decl {
+                    doc: None,
                     ty: self.subst_ty(*ty, sub, *span)?,
                     name: name.clone(),
                     init,
@@ -97,6 +99,7 @@ impl Mono {
                     for b in &a.binds {
                         binds.push(match b {
                             Some(b) => Some(Param {
+                                doc: None,
                                 ty: self.subst_ty(b.ty, sub, b.span)?,
                                 name: b.name.clone(),
                                 default: None,

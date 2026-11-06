@@ -1,0 +1,3 @@
+int total = 1;
+/// A statement is not a declaration.
+print(total);

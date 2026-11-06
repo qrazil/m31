@@ -9,7 +9,7 @@
 
 use crate::front::ast::*;
 use crate::front::diag::{Diag, Span};
-use crate::front::lexer::{Tok, Token};
+use crate::front::lexer::{Doc, Tok, Token, DETACHED_DOC};
 
 pub struct Parser {
     toks: Vec<Token>,
@@ -276,6 +276,21 @@ impl Parser {
         self.nested("expression", |p| p.parse_expr_inner(min_bp))
     }
 
+    /// Take the doc comment sitting on the current token, if any: the
+    /// caller is at the start of a declaration and attaches it to the node.
+    fn take_doc(&mut self) -> Option<Doc> {
+        self.toks[self.pos].doc.take()
+    }
+
+    /// A doc comment left on a token nobody took is on something that is
+    /// not a declaration -- a statement, a closing brace, a parameter.
+    fn check_docs_attached(&self) -> Result<(), Diag> {
+        match self.toks.iter().find_map(|t| t.doc.as_ref()) {
+            Some(d) => Err(Diag::new(d.span, DETACHED_DOC)),
+            None => Ok(()),
+        }
+    }
+
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok
     }
@@ -427,6 +442,7 @@ impl Parser {
                 ));
             };
             return Ok(Param {
+                doc: None,
                 ty,
                 name: self.ty_exprs[i as usize].name.clone(),
                 default: None,
@@ -446,6 +462,7 @@ impl Parser {
             None
         };
         Ok(Param {
+            doc: None,
             ty,
             name,
             default,

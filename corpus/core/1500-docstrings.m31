@@ -1,0 +1,65 @@
+// Docstrings (docs/docstrings-decision.md): `///` and `/** */` above a
+// declaration are recorded by the front end and ignored by everything after
+// it. Every kind of declaration takes one; the program behaves as if they
+// were plain comments.
+
+/// A module constant.
+const int LIMIT = 3;
+
+/**
+ * A shape with a side.
+ *
+ * The block form: the gutter is stripped and the text is dedented.
+ */
+type Square {
+    /// Its side.
+    int side;
+}
+
+/// Its size is its side.
+int Square.size() {
+    return side;
+}
+
+/// Which way.
+enum Heading {
+    /// Up the page.
+    North;
+    /** Down the page. */
+    South;
+    East(int);
+}
+
+/// What can be measured.
+interface Sized {
+    /// How big it is.
+    int size();
+}
+
+/// Twice the value, but never over the limit.
+int twice(int value) {
+    /* a plain block comment in a body */
+    if (value * 2 > LIMIT) {
+        return LIMIT;
+    }
+    return value * 2;
+}
+
+/// A module-level variable.
+int counter = 0;
+Square sq = Square(4);
+Sized shape = sq;
+counter = twice(shape.size());
+print(counter);
+Heading way = Heading.East(2);
+match (way) {
+    case North: {
+        print("north");
+    }
+    case South: {
+        print("south");
+    }
+    case East(int steps): {
+        print(steps);
+    }
+}

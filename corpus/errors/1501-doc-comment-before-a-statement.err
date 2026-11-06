@@ -1,0 +1,4 @@
+corpus/errors/1501-doc-comment-before-a-statement.m31:2:1: doc comment is not attached to a declaration
+  |
+2 | /// A statement is not a declaration.
+  | ^

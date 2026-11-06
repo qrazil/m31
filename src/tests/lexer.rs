@@ -481,3 +481,76 @@ fn formatting_keeps_every_literal_byte_for_byte() {
     let q = crate::reformat(&once, "t").expect("formats again");
     assert_eq!(q, once);
 }
+
+// ---- doc comments (docs/docstrings-decision.md) ---------------------------
+
+use crate::front::lexer::normalize_doc;
+
+fn docs(src: &str) -> Vec<Option<String>> {
+    Lexer::new(src)
+        .tokenize()
+        .expect("expected this to lex")
+        .into_iter()
+        .map(|t| t.doc.map(|d| d.text))
+        .collect()
+}
+
+fn lex_err(src: &str) -> String {
+    Lexer::new(src)
+        .tokenize()
+        .expect_err("expected this to be refused")
+        .to_string()
+}
+
+#[test]
+fn a_doc_comment_rides_the_next_token() {
+    assert_eq!(
+        docs("/// hello\nint x;"),
+        [Some("hello".into()), None, None, None]
+    );
+    assert_eq!(
+        docs("/** hello */ int x;"),
+        [Some("hello".into()), None, None, None]
+    );
+}
+
+#[test]
+fn plain_comments_are_not_doc_comments() {
+    for src in [
+        "// x\nint y;",
+        "/* x */ int y;",
+        "//// x\nint y;",
+        "/**/ int y;",
+        "/*** x */ int y;",
+    ] {
+        assert!(docs(src).iter().all(Option::is_none), "{src}");
+    }
+    // trailing after code is a plain comment too
+    assert!(docs("int y; /// x\nint z;").iter().all(Option::is_none));
+}
+
+#[test]
+fn consecutive_doc_lines_are_one_doc_and_a_blank_line_detaches() {
+    assert_eq!(docs("/// a\n///   b\nint x;")[0], Some("a\n  b".into()));
+    assert!(lex_err("/// a\n\nint x;").contains("doc comment is not attached to a declaration"));
+    assert!(lex_err("int x;\n/// a\n").contains("doc comment is not attached"));
+    assert!(lex_err("/// a\n// plain\n/// b\nint x;").contains("not attached"));
+    // a plain comment under the doc does not detach it
+    assert_eq!(docs("/// a\n// note\nint x;")[0], Some("a".into()));
+}
+
+#[test]
+fn doc_text_is_normalised() {
+    assert_eq!(normalize_doc("/// a  "), "a");
+    assert_eq!(normalize_doc("///a"), "a");
+    assert_eq!(normalize_doc("/** a */"), "a");
+    assert_eq!(normalize_doc("/** a\n * b\n *   c\n */"), "a\nb\n  c");
+    assert_eq!(normalize_doc("/**\n * a\n *\n * b\n */"), "a\n\nb");
+    // no gutter: the common indent of the continuation goes
+    assert_eq!(normalize_doc("/** a\n    b\n      c */"), "a\nb\n  c");
+    // a `///` run and the block the fixer makes from it say the same
+    assert_eq!(
+        Some(normalize_doc("/** a\n *   b\n * c */")),
+        docs("///a\n///   b\n/// c\nint x;")[0]
+    );
+}

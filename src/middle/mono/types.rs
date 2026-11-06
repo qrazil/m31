@@ -119,6 +119,7 @@ impl Mono {
                 ));
             }
             fields.push(Param {
+                doc: None,
                 ty,
                 name: f.name.clone(),
                 default: match &f.default {
@@ -147,6 +148,7 @@ impl Mono {
                 }
             }
             variants.push(EnumVariant {
+                doc: None,
                 name: v.name.clone(),
                 payload,
                 span: v.span,
@@ -178,6 +180,7 @@ impl Mono {
         }
         let methods = self.subst_iface_methods(&decl.methods, &sub)?;
         self.out_types.push(TypeDecl {
+            doc: None,
             name: mangled.to_string(),
             module: decl.module.clone(),
             is_pub: decl.is_pub,
@@ -213,6 +216,7 @@ impl Mono {
             .insert(mangled.clone(), (name.to_string(), args.to_vec()));
         if self.done.insert(mangled.clone()) {
             self.out_types.push(TypeDecl {
+                doc: None,
                 name: mangled.clone(),
                 module: String::new(),
                 is_pub: true,
@@ -221,6 +225,7 @@ impl Mono {
                     .iter()
                     .enumerate()
                     .map(|(i, a)| Param {
+                        doc: None,
                         ty: *a,
                         name: format!("$t{i}"),
                         default: None,
@@ -260,6 +265,7 @@ impl Mono {
             let mut params = Vec::new();
             for p in &m.params {
                 params.push(Param {
+                    doc: None,
                     ty: self.subst_ty(p.ty, sub, p.span)?,
                     name: p.name.clone(),
                     default: None,
@@ -270,6 +276,7 @@ impl Mono {
                 });
             }
             out.push(Func {
+                doc: None,
                 module: m.module.clone(),
                 is_pub: m.is_pub,
                 ret: self.subst_ty(m.ret, sub, m.span)?,
@@ -292,6 +299,7 @@ impl Mono {
         let mut fields = Vec::new();
         for f in &t.fields {
             fields.push(Param {
+                doc: None,
                 ty: self.subst_ty(f.ty, sub, f.span)?,
                 name: f.name.clone(),
                 default: match &f.default {
@@ -311,12 +319,14 @@ impl Mono {
                 payload.push(self.subst_ty(*p, sub, v.span)?);
             }
             variants.push(EnumVariant {
+                doc: None,
                 name: v.name.clone(),
                 payload,
                 span: v.span,
             });
         }
         Ok(TypeDecl {
+            doc: None,
             name: t.name.clone(),
             module: t.module.clone(),
             is_pub: t.is_pub,

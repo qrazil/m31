@@ -237,6 +237,7 @@ impl Lowerer {
                         }]
                     };
                     out.push(Func {
+                        doc: None,
                         module: t.module.clone(),
                         is_pub: true,
                         ret: sig.ret,

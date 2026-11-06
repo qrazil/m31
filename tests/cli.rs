@@ -53,6 +53,7 @@ fn help_is_generated_and_is_only_spelled_one_way() {
         "-emit-ir  ",
         "-fmt  ",
         "-lint  ",
+        "-doc  ",
         "-init  ",
         "--help  ",
         "--version  ",
@@ -100,7 +101,7 @@ fn usage_errors_exit_2_on_stderr_with_the_usage_line() {
     assert_eq!(out(&o), "");
     assert_eq!(
         err(&o),
-        "m31c: m31c needs a command -- one of -emit-c, -emit-ir, -fmt, -lint, -init, -heapwatch\n\
+        "m31c: m31c needs a command -- one of -emit-c, -emit-ir, -fmt, -lint, -doc, -init, -heapwatch\n\
          usage: m31c -<command> [...]\n\
          try 'm31c --help' for more information\n"
     );
@@ -286,6 +287,28 @@ fn lint_options() {
 }
 
 #[test]
+fn doc_prints_public_items_with_their_docstrings() {
+    let d = scratch("doc");
+    let src = d.join("shapes.m31");
+    std::fs::write(
+        &src,
+        "/// A point.\npub type Point {\n    /** Across. */\n    pub int across;\n    int hidden;\n}\n\n/// Hidden.\nint secret() {\n    return 1;\n}\n\n/// Sum.\npub int total(int left, int right) {\n    return left + right;\n}\n",
+    )
+    .unwrap();
+    let o = m31c(&["-doc", src.to_str().unwrap()]);
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    assert_eq!(
+        out(&o),
+        "# Module `shapes`\n\n## type `Point`\n\n```m31\npub type Point\n```\n\nA point.\n\n- field `int across`: Across.\n\n## function `total`\n\n```m31\npub int total(int left, int right)\n```\n\nSum.\n"
+    );
+    // a doc comment on nothing is an error, and -doc says so
+    std::fs::write(&src, "int one = 1;\n/// nothing\n").unwrap();
+    let o = m31c(&["-doc", src.to_str().unwrap()]);
+    assert_eq!(code(&o), 1);
+    assert!(err(&o).contains("doc comment is not attached to a declaration"));
+}
+
+#[test]
 fn init_options() {
     let d = scratch("init");
     let long = d.join("long");
@@ -327,7 +350,7 @@ fn completions_come_from_the_option_tables() {
     assert_eq!(code(&o), 0);
     let script = out(&o);
     assert!(script.contains("complete -o filenames -F _m31c_complete m31c"));
-    assert!(script.contains("-emit-c -emit-ir -fmt -lint -init -heapwatch --help --version"));
+    assert!(script.contains("-emit-c -emit-ir -fmt -lint -doc -init -heapwatch --help --version"));
     assert!(script.contains("fmt) COMPREPLY=($(compgen -W \"--check --c --recursive --r --help"));
     assert_eq!(code(&m31c(&["--completions=fish"])), 0);
     let o = m31c(&["--completions", "zsh"]);

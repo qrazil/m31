@@ -894,6 +894,7 @@ impl Lowerer {
             .into_iter()
             .enumerate()
             .map(|(i, ty)| Param {
+                doc: None,
                 ty,
                 name: format!("a{i}"),
                 default: None,
@@ -1230,6 +1231,7 @@ impl Lowerer {
         // one synthesised function. Declarations are order-independent, so a
         // function may be called above its own definition.
         let entry = Func {
+            doc: None,
             module: p.module.clone(),
             is_pub: false,
             ret: Ty::Void,

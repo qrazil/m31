@@ -34,6 +34,7 @@ impl Lowerer {
                 init,
                 is_const,
                 span,
+                ..
             } => {
                 self.check_named_ty(*ty, *span)?;
                 let val = self.lower_expr_as(init, *ty)?;

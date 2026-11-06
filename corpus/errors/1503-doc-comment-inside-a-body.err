@@ -1,0 +1,4 @@
+corpus/errors/1503-doc-comment-inside-a-body.m31:2:5: doc comment is not attached to a declaration
+  |
+2 |     /// Locals are not documented.
+  |     ^

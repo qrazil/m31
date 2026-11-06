@@ -481,6 +481,21 @@ run "formatter fixtures" bash -c '
     done
     exit $bad'
 
+# `m31c -doc`: each `corpus/doc/*.m31` must print exactly its `.md`.
+run "doc fixtures" bash -c '
+    bad=0
+    for f in corpus/doc/*.'"$LANG_EXT"'; do
+        [ -e "$f" ] || continue
+        want="${f%.'"$LANG_EXT"'}.md"
+        got=$(./target/debug/'"$LANG_BIN"' -doc "$f" 2>&1)
+        if [ "$got" != "$(cat "$want")" ]; then
+            echo "-doc output differs from $want:"
+            echo "$got" | diff "$want" - | head -10
+            bad=1
+        fi
+    done
+    exit $bad'
+
 # The same input must always produce the same C.
 #
 # It did not: the promoted-method list for embedding was built by iterating a

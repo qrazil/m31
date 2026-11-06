@@ -136,6 +136,7 @@ impl Mono {
         for p in &f.params {
             scope.insert(p.name.clone(), p.ty);
             params.push(Param {
+                doc: None,
                 ty: self.subst_ty(p.ty, sub, p.span)?,
                 name: p.name.clone(),
                 default: match &p.default {
@@ -161,6 +162,7 @@ impl Mono {
         let body = body?;
         self.env.clear();
         Ok(Func {
+            doc: None,
             module: f.module.clone(),
             is_pub: f.is_pub,
             ret,

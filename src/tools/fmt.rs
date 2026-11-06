@@ -258,8 +258,19 @@ impl Fmt {
     fn print_comment(&mut self, i: usize) {
         self.done[i] = true;
         let text = self.comments[i].text.clone();
-        for part in text.lines() {
-            self.line(part.trim());
+        let col = self.comments[i].col as usize;
+        for (n, part) in text.lines().enumerate() {
+            if n == 0 || !self.comments[i].own_line {
+                self.line(part.trim());
+            } else {
+                // A block comment's continuation lines keep their layout
+                // relative to the `/*`: strip the indent the comment
+                // started at (at most), and let `line` add the current one.
+                // Re-trimming them is what flattened ` * ` gutters.
+                let lead = part.len() - part.trim_start().len();
+                let part = part.trim_end();
+                self.line(&part[lead.min(col.saturating_sub(1))..]);
+            }
         }
     }
 
@@ -1165,6 +1176,25 @@ fn shown(name: &str) -> String {
             }
         }
     }
+}
+
+/// A type as the source wrote it, for the tools that print declarations
+/// (`-doc`). Valid after `set_type_names` for the program in hand.
+pub fn type_text(t: Ty) -> String {
+    match t {
+        Ty::User(i) => TYPE_NAMES.with(|n| {
+            n.borrow()
+                .get(i as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("T{i}"))
+        }),
+        other => other.name().to_string(),
+    }
+}
+
+/// Names are interned module-qualified; show one the way the source did.
+pub fn bare_name(name: &str) -> String {
+    shown(name)
 }
 
 fn render_ty(exprs: &[TyExpr], t: &Ty) -> String {

@@ -130,6 +130,7 @@ impl Lowerer {
             .iter()
             .enumerate()
             .map(|(i, p)| Param {
+                doc: None,
                 ty: p.ty,
                 name: format!("$a{i}"),
                 default: None,
@@ -211,6 +212,7 @@ impl Lowerer {
             }]
         };
         let f = Func {
+            doc: None,
             module: module.clone(),
             is_pub: true,
             ret,
@@ -680,6 +682,7 @@ impl Lowerer {
             };
             out.push((
                 Param {
+                    doc: None,
                     ty,
                     name,
                     default: None,
@@ -773,6 +776,7 @@ impl Lowerer {
         // them; they passed `check_shadow` at the site, so they collide with
         // nothing the synthesised method can see either.
         let f = Func {
+            doc: None,
             module: self.cur_module.clone(),
             is_pub: true,
             ret: m.ret,

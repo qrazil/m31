@@ -1,0 +1,6 @@
+int one() {
+    /// Locals are not documented.
+    int value = 1;
+    return value;
+}
+print(one());

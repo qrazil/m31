@@ -2,6 +2,7 @@
 //! project scaffolder, and the reader of a program's heap watch ledger.
 
 pub mod cli;
+pub mod doc;
 pub mod fmt;
 pub mod heapwatch;
 pub mod init;

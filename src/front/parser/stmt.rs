@@ -39,6 +39,7 @@ impl Parser {
             let init = self.parse_expr(0)?;
             self.expect(Tok::Semi)?;
             return Ok(Stmt::Decl {
+                doc: None,
                 ty,
                 name,
                 init,
@@ -171,6 +172,7 @@ impl Parser {
                         }
                         let (name, _) = self.expect_ident()?;
                         binds.push(Some(Param {
+                            doc: None,
                             ty,
                             name,
                             default: None,
