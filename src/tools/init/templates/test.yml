@@ -28,7 +28,7 @@ jobs:
         include:
           - { label: "Linux x86-64", os: ubuntu-latest, asset: linux-x86_64 }
           - { label: "Linux aarch64", os: ubuntu-24.04-arm, asset: linux-aarch64 }
-          - { label: "macOS (arm64)", os: macos-14, asset: macos-arm64 }
+          - { label: "macOS (arm64)", os: macos-15, asset: macos-arm64 }
     steps:
       - uses: actions/checkout@v4
 
