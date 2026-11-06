@@ -3,6 +3,24 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## 0.14.1 (2026-11-05)
+
+### Changed
+
+- The `m31c -init` templates (`test.yml`, `release-app.yml`) run their macOS
+  job on `macos-15`; GitHub retired `macos-14`. Projects already generated
+  keep their workflow files and need the same one-word change.
+
+### Compatibility
+
+- Repositories that bump past 0.13.x must have no stray `///` or `/** */`
+  above statements, before an `import`, inside a function body, or detached
+  from a declaration by a blank line: since 0.14.0 such a doc comment is the
+  error `doc comment is not attached to a declaration`. Change those to `//`
+  (or `/* */`) before bumping; a `///` directly above a declaration is
+  fine. Older compilers read `///` and `/**` as plain comments, so the change
+  is safe to make first.
+
 ## 0.14.0 (2026-11-05)
 
 ### Added
