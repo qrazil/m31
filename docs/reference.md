@@ -49,6 +49,21 @@ regeneration for a new Unicode version moves both at once.
 
 `// to end of line` and `/* ... */`. Block comments do not nest.
 
+**A comment longer than one line is a block comment.** Two or more
+consecutive own-line `//` lines are a `m31c -lint` finding, and `m31c -lint
+--fix` rewrites them to `/* ... */`, line for line. One line, a trailing
+comment after code and a `// ----` divider are fine.
+
+**Docstrings.** `///` (one line) and `/** ... */` (many), alone on their line,
+document the declaration directly below: a function or method, a type, enum
+or interface, a variant, a field, an interface method, a `const`, a `prim`,
+a module-level variable. `////`, `/**/` and `/***` are plain comments. The
+compiler records the text and otherwise ignores it. A doc comment attached
+to nothing -- end of file, before a statement or an `import`, in a body,
+or separated from the declaration by a blank line -- is an error, `doc
+comment is not attached to a declaration`. `m31c -doc` prints the public
+items with their docstrings as markdown. See `docs/docstrings-decision.md`.
+
 ### 1.3 Identifiers
 
 A letter or `_`, then letters, digits or `_`. Case-sensitive. **A lone `_` is

@@ -36,6 +36,7 @@ the CHANGELOG cite them by name.
 | `closures-decision.md` | Callbacks, function references, lambdas |
 | `destructors-decision.md` | Destructors |
 | `const-decision.md` | `const` |
+| `docstrings-decision.md` | Docstrings (`///`, `/** */`), `m31c -doc`, and the comment rule: a comment longer than one line is a block comment |
 | `heap-watch.md` | Heap watch, a user guide: build with `--heapwatch`, read the report, fix a cycle leak |
 | `heap-watch-design.md` | Heap watch: the leak ledger, trace and epoch close (design, as built, cost) |
 | `text-decision.md` | Text |

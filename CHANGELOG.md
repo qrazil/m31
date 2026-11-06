@@ -3,6 +3,53 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased
+
+### Added
+
+- **Docstrings** (docs/docstrings-decision.md): `///` (one line) and
+  `/** ... */` (many), alone on their line, document the declaration directly
+  below -- a function or method, a type, enum or interface, an enum variant,
+  a field, an interface method, a module `const`, a `prim`, a module-level
+  variable. The front end records the normalised text on the AST node
+  (`doc: Option<String>`); nothing after it looks at it, so the emitted C is
+  the same with or without docstrings. `////`, `/**/`, `/***` and a trailing
+  `///` stay plain comments. A doc comment attached to nothing -- end of
+  file, before a statement or an `import`, in a body, or separated from the
+  declaration by a blank line -- is an error: `doc comment is not attached to
+  a declaration`. The formatter keeps docstrings byte for byte above their
+  item, and a block comment's continuation lines keep their layout relative
+  to the `/*` (a ` * ` gutter used to be flattened).
+- **`m31c -doc <file|dir>...`** prints markdown for the public items with
+  their signatures and docstrings. Private items, module-level variables and
+  module-level docs are not covered.
+- **The comment rule:** `m31c -lint` reports a comment longer than one line
+  that is not a block comment -- two or more consecutive own-line `//` (or
+  `///`) lines at one indent -- suggesting `/* ... */`, or `/** ... */` above a
+  declaration. A single line, a trailing comment and a `// ----` divider are
+  fine. **`m31c -lint --fix`** rewrites the runs in place, line for line (so
+  no diagnostic position moves) and idempotently; a run whose text holds `*/`
+  is left and reported. `gates.sh` enforces the rule on lib, tests, examples,
+  runtime and bench.
+
+### Changed
+
+- `lib/` and the other linted trees were migrated by `--fix`: 164 files, every
+  multi-line `//`/`///` run is now a block comment. Four stdlib comments
+  (`lib/crypto/ecdsa.m31`, `lib/crypto/rsa.m31`, `lib/fs.m31`) had `*/` in
+  their examples and were reworded by hand.
+- `lib/term.m31`'s 77-line `///` module header before `import` is a plain `//`
+  header: a doc comment before `import` is a detached doc comment now.
+- GitHub Actions macOS jobs run on `macos-15` (GitHub retired `macos-14`).
+
+### Compatibility
+
+- A `///` is a plain `//` comment and a `/**` a plain block comment to every
+  earlier `m31c`, so a library that adopts docstrings still builds with one.
+  What 0.14.0 adds is the refusal of a doc comment that documents nothing: a
+  tree that wrote `///` above statements, in bodies or before `import` must
+  change those to `//` before it builds with 0.14.0.
+
 ## 0.13.0 (2026-11-04)
 
 ### Added

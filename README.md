@@ -451,7 +451,7 @@ src/                   the compiler, one folder per pipeline stage
                        hoist.rs, ir.rs (docs/ir-v0.md made real)
   back/                emit_c/: post-refcount IR to C (mod, types, statics, func, inst,
                        blocking)
-  tools/               fmt.rs (the formatter: one layout, no options), lint.rs
+  tools/               fmt.rs (the formatter: one layout, no options), lint.rs, doc.rs
   tests/               unit tests by area, mostly IR assertions
 runtime/
   rt.h rt.c            the runtime — a SEPARATE translation unit, see §7.1
@@ -511,7 +511,9 @@ It **keeps declarations in the order written, except that a method joins its
 type**. Declaring methods by qualified name lets them scatter through a file,
 which was accepted on exactly this basis; nothing else moves, so a section
 divider stays in its section. A comment block touching the declaration below
-it travels with it; one with a blank line after it stays where it is. String
+it travels with it; one with a blank line after it stays where it is. That
+includes a docstring (`///`, `/** */`), which the formatter keeps byte for
+byte directly above its item (docs/docstrings-decision.md). String
 literals are printed as they were spelled. **Lines are not wrapped** — gofmt's
 choice, not rustfmt's; see the header of `src/tools/fmt.rs`.
 
