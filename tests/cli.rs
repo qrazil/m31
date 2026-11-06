@@ -430,3 +430,27 @@ fn the_old_spellings_still_work_and_warn() {
     assert!(err(&o).contains("cannot read fmt"));
     assert!(!err(&o).contains("deprecated"));
 }
+
+#[test]
+fn the_program_at_the_nesting_limit_compiles_on_a_small_main_stack() {
+    // The compiler works on a thread with its own large stack, so the
+    // nesting limit's diagnostic -- not a stack overflow with no message --
+    // is what a deep program meets, whatever the OS gives the main thread
+    // (macOS arm64 frames overflowed 8 MB at the limit in 0.14.0).
+    let prog = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/corpus/core/055-nesting-at-limit.m31"
+    );
+    for kb in ["8192", "512"] {
+        let o = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "ulimit -s {kb} && exec \"$0\" -emit-c \"$1\" --out /dev/null"
+            ))
+            .arg(env!("CARGO_BIN_EXE_m31c"))
+            .arg(prog)
+            .output()
+            .expect("run sh");
+        assert_eq!(code(&o), 0, "stack {kb} KB: {}", err(&o));
+    }
+}

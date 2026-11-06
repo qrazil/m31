@@ -167,7 +167,26 @@ const OLD_SPELLINGS: &[(&str, &str)] = &[
     ("-r", "--recursive"),
 ];
 
+/// The compiler's passes recurse on the shape of the program, and the
+/// nesting limit (`MAX_DEPTH`) is measured against an 8 MB main-thread stack
+/// -- which macOS arm64 frames overflowed at the limit, with no diagnostic.
+/// The work runs on a thread with a stack far larger than any limit needs
+/// (the memory is reserved, not touched, until used), so `nesting too deep`
+/// fires first on every host, whatever the OS gives the main thread.
+const WORK_STACK: usize = 256 * 1024 * 1024;
+
 fn main() -> ExitCode {
+    match std::thread::Builder::new()
+        .stack_size(WORK_STACK)
+        .spawn(real_main)
+    {
+        Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
+        // No such thread: run on this one rather than not at all.
+        Err(_) => real_main(),
+    }
+}
+
+fn real_main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let args = cli::migrate("m31c", &raw, OLD_SPELLINGS, OLD_FIRST_WORDS);
     match cli::parse(&ROOT, &args) {
