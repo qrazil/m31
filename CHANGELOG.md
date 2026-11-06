@@ -3,6 +3,18 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## 0.14.2 (2026-11-05)
+
+### Fixed
+
+- **macOS arm64: `m31c` aborted ("Abort trap: 6") on a program nested at the
+  limit** (`corpus/core/055-nesting-at-limit.m31`), 0.14.0 and 0.14.1. The
+  recursive passes overflowed the 8 MB main-thread stack before the
+  `nesting too deep` check could speak. The compiler now does its work on a
+  thread with a 256 MB stack (reserved, not touched until used), so the
+  limit's diagnostic fires first on every host. A test compiles the at-limit
+  program under `ulimit -s 512`.
+
 ## 0.14.1 (2026-11-05)
 
 ### Changed
